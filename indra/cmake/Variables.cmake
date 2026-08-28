@@ -69,6 +69,7 @@ set(LL_VULKAN_RUNTIME_TEST OFF CACHE BOOL "Build isolated Vulkan runtime dispatc
 set(LL_VULKAN_TONEMAP_TEST OFF CACHE BOOL "Build the standalone Vulkan offscreen render-contract diagnostics")
 set(LL_VULKAN_SDL_WSI OFF CACHE BOOL "Build the opt-in Linux SDL Vulkan window migration path")
 set(LL_VULKAN_MACOS_WSI OFF CACHE BOOL "Build the opt-in macOS Vulkan window diagnostic")
+set(LL_VULKAN_WIN32_WSI OFF CACHE BOOL "Build the opt-in Windows Vulkan window diagnostic")
 set(LL_VULKAN_VALIDATION_LAYER_DIR "" CACHE PATH "Directory containing the Khronos Vulkan validation-layer manifest")
 set(LL_VULKAN_MOLTENVK_ICD "" CACHE FILEPATH "Path to the MoltenVK Vulkan ICD manifest on macOS")
 set(LL_VULKAN_MACOS_X86_64_LOADER "" CACHE FILEPATH "Path to an x86_64 Vulkan loader dylib for universal macOS diagnostics")

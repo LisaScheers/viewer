@@ -34,6 +34,15 @@ if (LL_VULKAN_MACOS_WSI)
   endif ()
 endif ()
 
+if (LL_VULKAN_WIN32_WSI)
+  if (NOT WINDOWS)
+    message(FATAL_ERROR "LL_VULKAN_WIN32_WSI is supported only on Windows")
+  endif ()
+  if (NOT LL_TESTS OR NOT LL_VULKAN_RUNTIME_TEST)
+    message(FATAL_ERROR "LL_VULKAN_WIN32_WSI requires LL_TESTS=ON and LL_VULKAN_RUNTIME_TEST=ON")
+  endif ()
+endif ()
+
 set(llwindow_SOURCE_FILES
     llcursortypes.cpp
     llkeyboard.cpp
@@ -324,6 +333,35 @@ if (LL_VULKAN_MACOS_WSI)
       SKIP_PRECOMPILE_HEADERS TRUE)
 endif ()
 
+if (LL_VULKAN_WIN32_WSI)
+  add_library(llwindowwin32vulkan STATIC
+    llwindowwin32vulkan.cpp
+    llwindowwin32vulkan.h
+    llwindowwin32vulkan-native.cpp)
+  target_include_directories(llwindowwin32vulkan
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(llwindowwin32vulkan
+    PUBLIC
+      llwindow
+      llrendervulkaninstance
+    PRIVATE
+      user32)
+  set_target_properties(llwindowwin32vulkan PROPERTIES FOLDER "Tests")
+  set_source_files_properties(
+    llwindowwin32vulkan.cpp
+    llwindowwin32vulkan-native.cpp
+    PROPERTIES
+      SKIP_PRECOMPILE_HEADERS TRUE)
+  set_source_files_properties(
+    llwindowwin32vulkan-native.cpp
+    PROPERTIES
+      COMPILE_DEFINITIONS "VK_NO_PROTOTYPES;VK_USE_PLATFORM_WIN32_KHR")
+  set_source_files_properties(
+    llwindowwin32vulkan.cpp
+    PROPERTIES
+      COMPILE_DEFINITIONS VK_NO_PROTOTYPES)
+endif ()
+
 if (LL_TESTS)
   include(LLAddBuildTest)
   set_source_files_properties(
@@ -371,6 +409,28 @@ if (LL_TESTS)
       PRIVATE VK_NO_PROTOTYPES)
     target_compile_definitions(
       INTEGRATION_TEST_llwindowvulkanmacoswsi
+      PRIVATE VK_NO_PROTOTYPES)
+  endif ()
+
+  if (LL_VULKAN_WIN32_WSI)
+    set_source_files_properties(
+      tests/llwindowwin32vulkan_test.cpp
+      tests/llwindowvulkanwin32wsi_test.cpp
+      PROPERTIES
+        SKIP_PRECOMPILE_HEADERS TRUE)
+    LL_ADD_INTEGRATION_TEST(
+      llwindowwin32vulkan
+      ""
+      "llwindowwin32vulkan;llcommon")
+    LL_ADD_INTEGRATION_TEST(
+      llwindowvulkanwin32wsi
+      ""
+      "llwindowwin32vulkan;llcommon")
+    target_compile_definitions(
+      INTEGRATION_TEST_llwindowwin32vulkan
+      PRIVATE VK_NO_PROTOTYPES)
+    target_compile_definitions(
+      INTEGRATION_TEST_llwindowvulkanwin32wsi
       PRIVATE VK_NO_PROTOTYPES)
   endif ()
 endif ()
