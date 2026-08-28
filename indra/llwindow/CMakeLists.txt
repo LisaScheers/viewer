@@ -25,6 +25,15 @@ if (LL_VULKAN_SDL_WSI AND NOT USE_SDL_WINDOW)
   message(FATAL_ERROR "LL_VULKAN_SDL_WSI requires the Linux SDL window path")
 endif ()
 
+if (LL_VULKAN_MACOS_WSI)
+  if (NOT DARWIN)
+    message(FATAL_ERROR "LL_VULKAN_MACOS_WSI is supported only on macOS")
+  endif ()
+  if (NOT LL_TESTS OR NOT LL_VULKAN_RUNTIME_TEST)
+    message(FATAL_ERROR "LL_VULKAN_MACOS_WSI requires LL_TESTS=ON and LL_VULKAN_RUNTIME_TEST=ON")
+  endif ()
+endif ()
+
 set(llwindow_SOURCE_FILES
     llcursortypes.cpp
     llkeyboard.cpp
@@ -283,6 +292,38 @@ if (DARWIN)
   target_link_libraries(llwindow ${CARBON_LIBRARY})
 endif (DARWIN)
 
+if (LL_VULKAN_MACOS_WSI)
+  find_library(LL_VULKAN_QUARTZCORE_LIBRARY QuartzCore)
+  if (NOT LL_VULKAN_QUARTZCORE_LIBRARY)
+    message(FATAL_ERROR "LL_VULKAN_MACOS_WSI requires the QuartzCore framework")
+  endif ()
+
+  add_library(llwindowmacosxvulkan STATIC
+    llwindowmacosxvulkan.cpp
+    llwindowmacosxvulkan.h
+    llwindowmacosxvulkan-objc.mm
+    llwindowmacosxvulkan-objc.h)
+  target_include_directories(llwindowmacosxvulkan
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(llwindowmacosxvulkan
+    PUBLIC
+      llwindow
+      llrendervulkaninstance
+    PRIVATE
+      ${APPKIT_LIBRARY}
+      ${LL_VULKAN_QUARTZCORE_LIBRARY}
+      ${CMAKE_DL_LIBS})
+  set_target_properties(llwindowmacosxvulkan PROPERTIES FOLDER "Tests")
+  set_source_files_properties(
+    llwindowmacosxvulkan.cpp
+    PROPERTIES
+      COMPILE_DEFINITIONS "VK_NO_PROTOTYPES;VK_USE_PLATFORM_METAL_EXT")
+  set_source_files_properties(
+    llwindowmacosxvulkan-objc.mm
+    PROPERTIES
+      SKIP_PRECOMPILE_HEADERS TRUE)
+endif ()
+
 if (LL_TESTS)
   include(LLAddBuildTest)
   set_source_files_properties(
@@ -308,6 +349,28 @@ if (LL_TESTS)
       "llwindow;llrendervulkaninstance;llrendervulkanglobaldispatch;llcommon")
     target_compile_definitions(
       INTEGRATION_TEST_llwindowvulkansdlwsi
+      PRIVATE VK_NO_PROTOTYPES)
+  endif ()
+
+  if (LL_VULKAN_MACOS_WSI)
+    set_source_files_properties(
+      tests/llwindowmacosxvulkan_test.cpp
+      tests/llwindowvulkanmacoswsi_test.cpp
+      PROPERTIES
+        SKIP_PRECOMPILE_HEADERS TRUE)
+    LL_ADD_INTEGRATION_TEST(
+      llwindowmacosxvulkan
+      ""
+      "llwindowmacosxvulkan;llcommon")
+    LL_ADD_INTEGRATION_TEST(
+      llwindowvulkanmacoswsi
+      ""
+      "llwindowmacosxvulkan;llcommon")
+    target_compile_definitions(
+      INTEGRATION_TEST_llwindowmacosxvulkan
+      PRIVATE VK_NO_PROTOTYPES)
+    target_compile_definitions(
+      INTEGRATION_TEST_llwindowvulkanmacoswsi
       PRIVATE VK_NO_PROTOTYPES)
   endif ()
 endif ()
