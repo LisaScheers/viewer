@@ -303,6 +303,27 @@ LLRenderVulkan::VulkanSurfaceAcquireResult LLWindowSDLVulkan::acquireSurfaceGene
     return VulkanInstanceDetail::acquireSurface(*mInstanceGeneration, request, allocation_checkpoint);
 }
 
+LLRenderVulkan::VulkanPresentationDeviceAcquireResult LLWindowSDLVulkan::acquirePresentationDeviceGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanPresentationDeviceAcquireError{ VulkanPresentationDeviceAcquireCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mWindow)
+    {
+        return VulkanPresentationDeviceAcquireError{ VulkanPresentationDeviceAcquireCode::StaleWindowGeneration, std::nullopt };
+    }
+
+    SurfaceAcquireContext           context{ this, mInstanceGeneration.get(), &mOperations, mWindow };
+    VulkanPresentationDeviceRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquirePresentationDeviceGeneration(request);
+}
+
 bool LLWindowSDLVulkan::resetSurfaceGeneration() noexcept
 {
     if (!mInstanceGeneration || !mInstanceGeneration->hasSurfaceGeneration())

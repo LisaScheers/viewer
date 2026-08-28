@@ -52,6 +52,13 @@ namespace
         return { code, result, command };
     }
 
+    VulkanPresentationDeviceAcquireError presentationDeviceFailure(
+        VulkanPresentationDeviceAcquireCode                code,
+        std::optional<VulkanPhysicalDeviceResolutionError> resolution_error = std::nullopt) noexcept
+    {
+        return { code, resolution_error };
+    }
+
     bool current(const VulkanWindowGenerationCheck& check, std::uint64_t generation) noexcept
     {
         return generation != 0 && check.mIsCurrent && check.mIsCurrent(check.mUserdata, generation);
@@ -66,6 +73,20 @@ namespace
         if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
         {
             return surfaceFailure(VulkanSurfaceAcquireCode::StaleWindowGeneration);
+        }
+        return std::nullopt;
+    }
+
+    VulkanPresentationDeviceAcquireResult presentationDeviceFreshness(const VulkanPresentationDeviceRequest& request,
+                                                                      const VulkanInstanceGeneration&        generation) noexcept
+    {
+        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        {
+            return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::StaleInstanceOwner);
+        }
+        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        {
+            return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::StaleWindowGeneration);
         }
         return std::nullopt;
     }
@@ -318,6 +339,11 @@ struct VulkanInstanceGenerationFactory
     static VulkanSurfaceAcquireResult acquireSurface(VulkanInstanceGeneration&                  instance_generation,
                                                      const VulkanSurfaceRequest&                request,
                                                      VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    static VulkanPresentationDeviceAcquireResult acquirePresentationDevice(
+        VulkanInstanceGeneration&                  instance_generation,
+        const VulkanPresentationDeviceRequest&     request,
+        VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
 };
 
 VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
@@ -359,7 +385,8 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& ot
     mDestroyInstance(std::exchange(other.mDestroyInstance, nullptr)),
     mDebugMessenger(std::exchange(other.mDebugMessenger, VK_NULL_HANDLE)),
     mDestroyDebugMessenger(std::exchange(other.mDestroyDebugMessenger, nullptr)),
-    mSurfaceGeneration(std::move(other.mSurfaceGeneration))
+    mSurfaceGeneration(std::move(other.mSurfaceGeneration)),
+    mPresentationDeviceGeneration(std::move(other.mPresentationDeviceGeneration))
 {
     other.mGlobalDispatch.reset();
 }
@@ -407,13 +434,65 @@ std::uint64_t VulkanInstanceGeneration::surfaceNativeWindowGeneration() const no
     return mSurfaceGeneration ? mSurfaceGeneration->nativeWindowGeneration() : 0;
 }
 
+bool VulkanInstanceGeneration::hasPresentationDeviceGeneration() const noexcept
+{
+    return mPresentationDeviceGeneration != nullptr;
+}
+
+VkPhysicalDevice VulkanInstanceGeneration::physicalDevice() const noexcept
+{
+    return mPresentationDeviceGeneration ? mPresentationDeviceGeneration->physicalDevice() : VK_NULL_HANDLE;
+}
+
+std::uint32_t VulkanInstanceGeneration::physicalDeviceIndex() const noexcept
+{
+    return mPresentationDeviceGeneration ? mPresentationDeviceGeneration->physicalDeviceIndex() : std::numeric_limits<std::uint32_t>::max();
+}
+
+VkPhysicalDeviceProperties VulkanInstanceGeneration::physicalDeviceProperties() const noexcept
+{
+    return mPresentationDeviceGeneration ? mPresentationDeviceGeneration->properties() : VkPhysicalDeviceProperties{};
+}
+
+std::uint32_t VulkanInstanceGeneration::presentationQueueFamilyIndex() const noexcept
+{
+    return mPresentationDeviceGeneration ? mPresentationDeviceGeneration->queueFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
+}
+
+VkQueueFamilyProperties VulkanInstanceGeneration::presentationQueueFamilyProperties() const noexcept
+{
+    return mPresentationDeviceGeneration ? mPresentationDeviceGeneration->queueFamilyProperties() : VkQueueFamilyProperties{};
+}
+
+std::span<const std::string_view> VulkanInstanceGeneration::requiredDeviceExtensions() const noexcept
+{
+    return mPresentationDeviceGeneration ? mPresentationDeviceGeneration->requiredDeviceExtensions() : std::span<const std::string_view>{};
+}
+
+bool VulkanInstanceGeneration::portabilitySubsetRequired() const noexcept
+{
+    return mPresentationDeviceGeneration && mPresentationDeviceGeneration->portabilitySubsetRequired();
+}
+
 VulkanSurfaceAcquireResult VulkanInstanceGeneration::acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept
 {
     return VulkanInstanceDetail::acquireSurface(*this, request, nullptr);
 }
 
+VulkanPresentationDeviceAcquireResult VulkanInstanceGeneration::acquirePresentationDeviceGeneration(
+    const VulkanPresentationDeviceRequest& request) noexcept
+{
+    return VulkanInstanceDetail::acquirePresentationDevice(*this, request, nullptr);
+}
+
+void VulkanInstanceGeneration::resetPresentationDeviceGeneration() noexcept
+{
+    mPresentationDeviceGeneration.reset();
+}
+
 void VulkanInstanceGeneration::resetSurfaceGeneration() noexcept
 {
+    resetPresentationDeviceGeneration();
     mSurfaceGeneration.reset();
 }
 
@@ -556,6 +635,87 @@ VulkanSurfaceAcquireResult VulkanInstanceGenerationFactory::acquireSurface(
     catch (const std::bad_alloc&)
     {
         return surfaceFailure(VulkanSurfaceAcquireCode::AllocationFailure);
+    }
+}
+
+VulkanPresentationDeviceAcquireResult VulkanInstanceGenerationFactory::acquirePresentationDevice(
+    VulkanInstanceGeneration&                  instance_generation,
+    const VulkanPresentationDeviceRequest&     request,
+    VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept
+{
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+    {
+        return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::InvalidInstanceOwnerCheck);
+    }
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+    {
+        return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::InvalidWindowGenerationCheck);
+    }
+    if (request.mNativeWindowGeneration == 0)
+    {
+        return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::InvalidNativeWindowGeneration);
+    }
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance || !instance_generation.mGlobalDispatch ||
+        instance_generation.mNativeWindowGeneration == 0)
+    {
+        return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::InstanceNotLive);
+    }
+    if (!instance_generation.mSurfaceGeneration || instance_generation.surface() == VK_NULL_HANDLE)
+    {
+        return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::SurfaceNotLive);
+    }
+    if (instance_generation.mPresentationDeviceGeneration)
+    {
+        return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::PresentationDeviceAlreadyOwned);
+    }
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+        request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+    {
+        return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::NativeWindowGenerationMismatch);
+    }
+    if (VulkanPresentationDeviceAcquireResult freshness = presentationDeviceFreshness(request, instance_generation))
+    {
+        return freshness;
+    }
+
+    const VkInstance            instance = instance_generation.mInstance;
+    const VkSurfaceKHR          surface  = instance_generation.surface();
+    VulkanPhysicalDeviceRequest selection_request;
+    selection_request.mGetInstanceProcAddr = instance_generation.mGlobalDispatch->getInstanceProcAddr();
+    selection_request.mInstance            = instance;
+    selection_request.mSurface             = surface;
+
+    VulkanPhysicalDeviceResolutionResult selection_result = resolveVulkanPhysicalDeviceGeneration(selection_request);
+    if (const auto* error = std::get_if<VulkanPhysicalDeviceResolutionError>(&selection_result))
+    {
+        return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::ResolutionFailure, *error);
+    }
+
+    try
+    {
+        if (allocation_checkpoint)
+        {
+            allocation_checkpoint();
+        }
+        auto pending =
+            std::make_unique<VulkanPhysicalDeviceGeneration>(std::move(std::get<VulkanPhysicalDeviceGeneration>(selection_result)));
+
+        if (VulkanPresentationDeviceAcquireResult freshness = presentationDeviceFreshness(request, instance_generation))
+        {
+            return freshness;
+        }
+        if (instance_generation.mInstance != instance || !instance_generation.mSurfaceGeneration ||
+            instance_generation.surface() != surface || !pending->selectedFor(instance_generation.mInstance, instance_generation.surface()))
+        {
+            return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::SurfaceNotLive);
+        }
+
+        instance_generation.mPresentationDeviceGeneration = std::move(pending);
+        return std::nullopt;
+    }
+    catch (const std::bad_alloc&)
+    {
+        return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::AllocationFailure);
     }
 }
 
@@ -869,6 +1029,13 @@ namespace VulkanInstanceDetail
                                               AllocationCheckpoint        allocation_checkpoint) noexcept
     {
         return VulkanInstanceGenerationFactory::acquireSurface(instance_generation, request, allocation_checkpoint);
+    }
+
+    VulkanPresentationDeviceAcquireResult acquirePresentationDevice(VulkanInstanceGeneration&              instance_generation,
+                                                                    const VulkanPresentationDeviceRequest& request,
+                                                                    AllocationCheckpoint                   allocation_checkpoint) noexcept
+    {
+        return VulkanInstanceGenerationFactory::acquirePresentationDevice(instance_generation, request, allocation_checkpoint);
     }
 
 } // namespace VulkanInstanceDetail

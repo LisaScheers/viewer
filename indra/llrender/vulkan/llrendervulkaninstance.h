@@ -17,6 +17,7 @@
 #define LL_LLRENDERVULKANINSTANCE_H
 
 #include "llrendervulkanglobaldispatch.h"
+#include "llrendervulkanphysicaldevice.h"
 
 #include <vulkan/vulkan.h>
 
@@ -190,6 +191,40 @@ struct VulkanSurfaceAcquireError
 
 using VulkanSurfaceAcquireResult = std::optional<VulkanSurfaceAcquireError>;
 
+struct VulkanPresentationDeviceRequest
+{
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent and native-window lifetime changes during acquisition.
+    std::uint64_t               mNativeWindowGeneration = 0;
+    VulkanInstanceOwnerCheck    mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck mWindowGenerationCheck;
+};
+
+enum class VulkanPresentationDeviceAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanPresentationDeviceAcquireError
+{
+    VulkanPresentationDeviceAcquireCode                mCode = VulkanPresentationDeviceAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanPhysicalDeviceResolutionError> mResolutionError;
+
+    friend constexpr bool operator==(const VulkanPresentationDeviceAcquireError&, const VulkanPresentationDeviceAcquireError&) = default;
+};
+
+using VulkanPresentationDeviceAcquireResult = std::optional<VulkanPresentationDeviceAcquireError>;
+
 // This generation owns the Vulkan objects but borrows the loader behind the
 // originating window's resolver. It must be reset before that window destroys
 // its requirements generation or releases its loader references.
@@ -217,8 +252,18 @@ public:
     bool                            hasSurfaceGeneration() const noexcept;
     VkSurfaceKHR                    surface() const noexcept;
     std::uint64_t                   surfaceNativeWindowGeneration() const noexcept;
+    bool                              hasPresentationDeviceGeneration() const noexcept;
+    VkPhysicalDevice                  physicalDevice() const noexcept;
+    std::uint32_t                     physicalDeviceIndex() const noexcept;
+    VkPhysicalDeviceProperties        physicalDeviceProperties() const noexcept;
+    std::uint32_t                     presentationQueueFamilyIndex() const noexcept;
+    VkQueueFamilyProperties           presentationQueueFamilyProperties() const noexcept;
+    std::span<const std::string_view> requiredDeviceExtensions() const noexcept;
+    bool                              portabilitySubsetRequired() const noexcept;
 
     VulkanSurfaceAcquireResult acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept;
+    VulkanPresentationDeviceAcquireResult acquirePresentationDeviceGeneration(const VulkanPresentationDeviceRequest& request) noexcept;
+    void                                  resetPresentationDeviceGeneration() noexcept;
     void                       resetSurfaceGeneration() noexcept;
 
     void reset() noexcept;
@@ -250,6 +295,7 @@ private:
     VkDebugUtilsMessengerEXT                      mDebugMessenger         = VK_NULL_HANDLE;
     PFN_vkDestroyDebugUtilsMessengerEXT           mDestroyDebugMessenger  = nullptr;
     std::unique_ptr<VulkanSurfaceGeneration>      mSurfaceGeneration;
+    std::unique_ptr<VulkanPhysicalDeviceGeneration> mPresentationDeviceGeneration;
 };
 
 using VulkanInstanceAcquireResult = std::variant<VulkanInstanceAcquireError, VulkanInstanceGeneration>;
@@ -268,6 +314,10 @@ namespace VulkanInstanceDetail
     VulkanSurfaceAcquireResult acquireSurface(VulkanInstanceGeneration&   instance_generation,
                                               const VulkanSurfaceRequest& request,
                                               AllocationCheckpoint        allocation_checkpoint) noexcept;
+
+    VulkanPresentationDeviceAcquireResult acquirePresentationDevice(VulkanInstanceGeneration&              instance_generation,
+                                                                    const VulkanPresentationDeviceRequest& request,
+                                                                    AllocationCheckpoint                   allocation_checkpoint) noexcept;
 
 } // namespace VulkanInstanceDetail
 

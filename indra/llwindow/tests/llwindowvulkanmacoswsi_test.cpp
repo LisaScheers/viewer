@@ -145,9 +145,30 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("surface acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("surface acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    const auto presentation_device_error = owner->acquirePresentationDeviceGeneration();
+    ensure("the exact Metal surface selects a Vulkan presentation device", !presentation_device_error.has_value());
+    ensure("the instance parent owns one presentation-device generation", instance_generation->hasPresentationDeviceGeneration());
+    ensure("the selected physical-device handle is non-null", instance_generation->physicalDevice() != VK_NULL_HANDLE);
+    const VkPhysicalDeviceProperties physical_properties = instance_generation->physicalDeviceProperties();
+    ensure("the selected physical device supports standard Vulkan 1.1 or newer",
+           VK_API_VERSION_VARIANT(physical_properties.apiVersion) == 0 && physical_properties.apiVersion >= VK_API_VERSION_1_1);
+    const VkQueueFamilyProperties queue_properties = instance_generation->presentationQueueFamilyProperties();
+    ensure("the selected queue family is nonempty and graphics-capable",
+           instance_generation->presentationQueueFamilyIndex() != VK_QUEUE_FAMILY_IGNORED && queue_properties.queueCount != 0 &&
+               (queue_properties.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0);
+    const auto device_extensions = instance_generation->requiredDeviceExtensions();
+    ensure("MoltenVK requires exact swapchain and portability-subset device extensions",
+           instance_generation->portabilitySubsetRequired() && device_extensions.size() == 2 &&
+               device_extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME && device_extensions[1] == "VK_KHR_portability_subset");
+    ensure("presentation-device selection creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("presentation-device selection leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     ensure("the native smoke explicitly resets the Vulkan surface", owner->resetSurfaceGeneration());
     ensure("explicit reset removes only the surface child",
            !instance_generation->hasSurfaceGeneration() && instance_generation->surface() == VK_NULL_HANDLE);
+    ensure("surface reset first removes the presentation-device child",
+           !instance_generation->hasPresentationDeviceGeneration() && instance_generation->physicalDevice() == VK_NULL_HANDLE &&
+               instance_generation->presentationQueueFamilyIndex() == VK_QUEUE_FAMILY_IGNORED);
     ensure("the exact instance parent remains live after surface reset",
            owner->instanceGeneration() == instance_generation && instance_generation->instance() != VK_NULL_HANDLE);
     ensure("required validation remains live during explicit surface destruction", instance_generation->validationEnabled());

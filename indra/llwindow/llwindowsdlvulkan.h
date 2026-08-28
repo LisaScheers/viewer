@@ -110,6 +110,7 @@ public:
         LLRenderVulkan::VulkanInstanceValidationMode  validation_mode,
         LLRenderVulkan::VulkanInstancePortabilityMode portability_mode) noexcept;
     std::optional<LLRenderVulkan::VulkanSurfaceAcquireError> acquireSurfaceGeneration() noexcept;
+    LLRenderVulkan::VulkanPresentationDeviceAcquireResult    acquirePresentationDeviceGeneration() noexcept;
     const LLRenderVulkan::VulkanInstanceGeneration*          instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
     bool                                                     resetSurfaceGeneration() noexcept;
 

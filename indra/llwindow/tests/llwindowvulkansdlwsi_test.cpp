@@ -118,6 +118,12 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool surface_nonnull               = false;
     bool surface_generation_exact      = false;
     bool surface_window_owned          = false;
+    bool presentation_device_acquired  = false;
+    bool presentation_device_nonnull   = false;
+    bool presentation_device_api_1_1   = false;
+    bool presentation_queue_usable     = false;
+    bool presentation_extensions_exact = false;
+    bool presentation_device_removed   = false;
     bool surface_explicitly_reset      = false;
     bool surface_removed               = false;
     bool surface_parent_still_live     = false;
@@ -166,6 +172,22 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 surface_generation_exact =
                     instance_generation->surfaceNativeWindowGeneration() == requirements->nativeWindowGeneration() &&
                     instance_generation->surfaceNativeWindowGeneration() == instance_generation->nativeWindowGeneration();
+                presentation_device_acquired                         = instance_generation->hasPresentationDeviceGeneration();
+                presentation_device_nonnull                          = instance_generation->physicalDevice() != VK_NULL_HANDLE;
+                const VkPhysicalDeviceProperties physical_properties = instance_generation->physicalDeviceProperties();
+                presentation_device_api_1_1 =
+                    VK_API_VERSION_VARIANT(physical_properties.apiVersion) == 0 && physical_properties.apiVersion >= VK_API_VERSION_1_1;
+                const VkQueueFamilyProperties queue_properties = instance_generation->presentationQueueFamilyProperties();
+                presentation_queue_usable = instance_generation->presentationQueueFamilyIndex() != VK_QUEUE_FAMILY_IGNORED &&
+                                            queue_properties.queueCount != 0 && (queue_properties.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+                const auto device_extensions = instance_generation->requiredDeviceExtensions();
+                presentation_extensions_exact =
+                    !device_extensions.empty() && device_extensions.front() == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+                    device_extensions.size() == (instance_generation->portabilitySubsetRequired() ? std::size_t{ 2 } : std::size_t{ 1 });
+                if (presentation_extensions_exact && instance_generation->portabilitySubsetRequired())
+                {
+                    presentation_extensions_exact = device_extensions[1] == "VK_KHR_portability_subset";
+                }
 
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
                 const auto& enabled_extensions  = instance_generation->enabledExtensions();
@@ -199,6 +221,9 @@ void window_vulkan_sdl_wsi_object::test<1>()
         surface_window_owned = owned_instance_generation->hasSurfaceGeneration() && owned_instance_generation->surface() != VK_NULL_HANDLE;
         surface_explicitly_reset = static_cast<LLWindowSDL*>(window)->resetVulkanSurfaceGeneration();
         surface_removed = !owned_instance_generation->hasSurfaceGeneration() && owned_instance_generation->surface() == VK_NULL_HANDLE;
+        presentation_device_removed = !owned_instance_generation->hasPresentationDeviceGeneration() &&
+                                      owned_instance_generation->physicalDevice() == VK_NULL_HANDLE &&
+                                      owned_instance_generation->presentationQueueFamilyIndex() == VK_QUEUE_FAMILY_IGNORED;
         surface_parent_still_live = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == owned_instance_generation &&
                                     owned_instance_generation->instance() != VK_NULL_HANDLE;
         surface_validation_still_live = owned_instance_generation->validationEnabled();
@@ -229,8 +254,14 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the SDL-created Vulkan surface handle is non-null", surface_nonnull);
     ensure("the Vulkan surface retains the exact instance and native-window generation", surface_generation_exact);
     ensure("the Vulkan surface is owned by the SDL window's exact instance parent", surface_window_owned);
+    ensure("the exact SDL surface selects one presentation-capable physical device", presentation_device_acquired);
+    ensure("the selected physical-device handle is non-null", presentation_device_nonnull);
+    ensure("the selected physical device supports standard Vulkan 1.1 or newer", presentation_device_api_1_1);
+    ensure("the selected queue family is nonempty and graphics-capable", presentation_queue_usable);
+    ensure("the selected device retains exact swapchain and portability requirements", presentation_extensions_exact);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
     ensure("explicit reset removes only the Vulkan surface child", surface_removed);
+    ensure("surface reset first removes the presentation-device child", presentation_device_removed);
     ensure("the exact parent instance remains live after explicit surface reset", surface_parent_still_live);
     ensure("required validation remains live while the surface is explicitly destroyed", surface_validation_still_live);
     ensure("surface creation and destruction emit no validation messages", instance_validation_clean);

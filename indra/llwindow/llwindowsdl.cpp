@@ -227,6 +227,14 @@ bool LLWindowSDL::createVulkanWindow(int x, int y, int width, int height, bool f
         return false;
     }
 
+    const auto presentation_device_error = vulkan_window->acquirePresentationDeviceGeneration();
+    if (presentation_device_error)
+    {
+        LL_WARNS("Window") << "Vulkan presentation-device selection failed with code " << static_cast<U32>(presentation_device_error->mCode)
+                           << LL_ENDL;
+        return false;
+    }
+
     mVulkanWindow = std::move(vulkan_window);
     mWindow       = mVulkanWindow->window();
     mFullscreen   = fullscreen;

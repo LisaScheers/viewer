@@ -107,6 +107,13 @@ struct FakeState
     bool     mNullSurface            = false;
     bool     mPoisonSurfaceOutput    = false;
 
+    VkResult                   mPhysicalEnumerationResult = VK_SUCCESS;
+    VkPhysicalDevice           mPhysicalDevice            = fakeHandle<VkPhysicalDevice>(0x4444);
+    VkPhysicalDeviceProperties mPhysicalDeviceProperties{};
+    VkQueueFamilyProperties    mQueueFamilyProperties{};
+    std::vector<std::string>   mDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    VkBool32                   mPresentationSupported = VK_TRUE;
+
     VkInstance                           mInstance       = fakeHandle<VkInstance>(0x1111);
     VkDebugUtilsMessengerEXT             mDebugMessenger = fakeHandle<VkDebugUtilsMessengerEXT>(0x2222);
     VkSurfaceKHR                         mSurface        = fakeHandle<VkSurfaceKHR>(0x3333);
@@ -126,15 +133,30 @@ struct FakeState
     std::size_t mDestroyInstanceCalls = 0;
     std::size_t mDestroyDebugCalls    = 0;
 
-    std::size_t                  mDestroySurfaceResolutionCalls     = 0;
-    VkInstance                   mDestroySurfaceResolutionInstance  = VK_NULL_HANDLE;
-    std::size_t                  mCreateSurfaceCalls                = 0;
-    VkInstance                   mCreateSurfaceInstance             = VK_NULL_HANDLE;
-    const VkAllocationCallbacks* mCreateSurfaceAllocationCallbacks  = nullptr;
-    std::size_t                  mDestroySurfaceCalls               = 0;
-    VkInstance                   mDestroySurfaceInstance            = VK_NULL_HANDLE;
-    VkSurfaceKHR                 mDestroyedSurface                  = VK_NULL_HANDLE;
-    const VkAllocationCallbacks* mDestroySurfaceAllocationCallbacks = nullptr;
+    std::size_t                     mDestroySurfaceResolutionCalls        = 0;
+    VkInstance                      mDestroySurfaceResolutionInstance     = VK_NULL_HANDLE;
+    std::size_t                     mCreateSurfaceCalls                   = 0;
+    VkInstance                      mCreateSurfaceInstance                = VK_NULL_HANDLE;
+    const VkAllocationCallbacks*    mCreateSurfaceAllocationCallbacks     = nullptr;
+    std::size_t                     mDestroySurfaceCalls                  = 0;
+    VkInstance                      mDestroySurfaceInstance               = VK_NULL_HANDLE;
+    VkSurfaceKHR                    mDestroyedSurface                     = VK_NULL_HANDLE;
+    const VkAllocationCallbacks*    mDestroySurfaceAllocationCallbacks    = nullptr;
+    const VulkanInstanceGeneration* mSurfaceDestroyOwner                  = nullptr;
+    bool                            mSurfaceDestroyObservationMade        = false;
+    bool                            mObservedPresentationAtSurfaceDestroy = false;
+
+    std::size_t      mPhysicalCountCalls         = 0;
+    std::size_t      mPhysicalListCalls          = 0;
+    std::size_t      mPhysicalPropertiesCalls    = 0;
+    std::size_t      mQueueFamilyCountCalls      = 0;
+    std::size_t      mQueueFamilyListCalls       = 0;
+    std::size_t      mSurfaceSupportCalls        = 0;
+    std::size_t      mDeviceExtensionCountCalls  = 0;
+    std::size_t      mDeviceExtensionValuesCalls = 0;
+    VkPhysicalDevice mLastSurfaceSupportDevice   = VK_NULL_HANDLE;
+    std::uint32_t    mLastSurfaceSupportQueue    = VK_QUEUE_FAMILY_IGNORED;
+    VkSurfaceKHR     mLastSurfaceSupportSurface  = VK_NULL_HANDLE;
 
     bool        mGenerationCurrent   = true;
     std::size_t mGenerationChecks    = 0;
@@ -147,6 +169,15 @@ struct FakeState
     bool                            mSurfaceWindowCurrent   = true;
     std::size_t                     mSurfaceWindowChecks    = 0;
     std::size_t                     mFailSurfaceWindowCheck = 0;
+
+    FakeState()
+    {
+        mPhysicalDeviceProperties.apiVersion = VK_API_VERSION_1_1;
+        mPhysicalDeviceProperties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        std::memcpy(mPhysicalDeviceProperties.deviceName, "fake-presentation-device", sizeof("fake-presentation-device"));
+        mQueueFamilyProperties.queueFlags = VK_QUEUE_GRAPHICS_BIT;
+        mQueueFamilyProperties.queueCount = 1;
+    }
 };
 
 FakeState* gFakeState = nullptr;
@@ -332,7 +363,113 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroySurface(VkInstance                   insta
     gFakeState->mDestroySurfaceInstance            = instance;
     gFakeState->mDestroyedSurface                  = surface;
     gFakeState->mDestroySurfaceAllocationCallbacks = allocation_callbacks;
+    if (gFakeState->mSurfaceDestroyOwner)
+    {
+        gFakeState->mSurfaceDestroyObservationMade        = true;
+        gFakeState->mObservedPresentationAtSurfaceDestroy = gFakeState->mSurfaceDestroyOwner->hasPresentationDeviceGeneration();
+    }
     gFakeState->mEvents.push_back(Event::DestroySurface);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEnumeratePhysicalDevices(VkInstance instance, std::uint32_t* count, VkPhysicalDevice* devices) noexcept
+{
+    if (!gFakeState || instance != gFakeState->mInstance || !count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (!devices)
+    {
+        ++gFakeState->mPhysicalCountCalls;
+        *count = 1;
+    }
+    else
+    {
+        ++gFakeState->mPhysicalListCalls;
+        if (*count != 0)
+        {
+            devices[0] = gFakeState->mPhysicalDevice;
+            *count     = 1;
+        }
+    }
+    return gFakeState->mPhysicalEnumerationResult;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice            physical_device,
+                                                           VkPhysicalDeviceProperties* properties) noexcept
+{
+    if (gFakeState && physical_device == gFakeState->mPhysicalDevice && properties)
+    {
+        ++gFakeState->mPhysicalPropertiesCalls;
+        *properties = gFakeState->mPhysicalDeviceProperties;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice         physical_device,
+                                                                      std::uint32_t*           count,
+                                                                      VkQueueFamilyProperties* properties) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !count)
+    {
+        return;
+    }
+    if (!properties)
+    {
+        ++gFakeState->mQueueFamilyCountCalls;
+        *count = 1;
+    }
+    else
+    {
+        ++gFakeState->mQueueFamilyListCalls;
+        if (*count != 0)
+        {
+            properties[0] = gFakeState->mQueueFamilyProperties;
+            *count        = 1;
+        }
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetPhysicalDeviceSurfaceSupport(VkPhysicalDevice physical_device,
+                                                                   std::uint32_t    queue_family_index,
+                                                                   VkSurfaceKHR     surface,
+                                                                   VkBool32*        supported) noexcept
+{
+    if (!gFakeState || !supported || physical_device != gFakeState->mPhysicalDevice || surface != gFakeState->mSurface ||
+        queue_family_index != 0)
+    {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    ++gFakeState->mSurfaceSupportCalls;
+    gFakeState->mLastSurfaceSupportDevice  = physical_device;
+    gFakeState->mLastSurfaceSupportQueue   = queue_family_index;
+    gFakeState->mLastSurfaceSupportSurface = surface;
+    *supported                             = gFakeState->mPresentationSupported;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysicalDevice       physical_device,
+                                                                      const char*            layer_name,
+                                                                      std::uint32_t*         count,
+                                                                      VkExtensionProperties* properties) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || layer_name || !count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (!properties)
+    {
+        ++gFakeState->mDeviceExtensionCountCalls;
+        *count = static_cast<std::uint32_t>(gFakeState->mDeviceExtensions.size());
+        return VK_SUCCESS;
+    }
+
+    ++gFakeState->mDeviceExtensionValuesCalls;
+    const std::size_t fill_count = std::min<std::size_t>(*count, gFakeState->mDeviceExtensions.size());
+    for (std::size_t index = 0; index < fill_count; ++index)
+    {
+        copyPropertyName(properties[index].extensionName, gFakeState->mDeviceExtensions[index], false);
+    }
+    *count = static_cast<std::uint32_t>(gFakeState->mDeviceExtensions.size());
+    return VK_SUCCESS;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance instance, const char* name) noexcept
@@ -373,6 +510,26 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         ++gFakeState->mDestroySurfaceResolutionCalls;
         gFakeState->mDestroySurfaceResolutionInstance = instance;
         return gFakeState->mMissing == MissingCommand::DestroySurface ? nullptr : eraseFunctionType(fakeDestroySurface);
+    }
+    if (std::strcmp(name, "vkEnumeratePhysicalDevices") == 0)
+    {
+        return eraseFunctionType(fakeEnumeratePhysicalDevices);
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceProperties") == 0)
+    {
+        return eraseFunctionType(fakeGetPhysicalDeviceProperties);
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceQueueFamilyProperties") == 0)
+    {
+        return eraseFunctionType(fakeGetPhysicalDeviceQueueFamilyProperties);
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0)
+    {
+        return eraseFunctionType(fakeGetPhysicalDeviceSurfaceSupport);
+    }
+    if (std::strcmp(name, "vkEnumerateDeviceExtensionProperties") == 0)
+    {
+        return eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
     }
     if (std::strcmp(name, "vkCreateDebugUtilsMessengerEXT") == 0)
     {
@@ -454,6 +611,12 @@ VulkanSurfaceRequest makeSurfaceRequest(FakeState& state, VulkanInstanceGenerati
     return { 42, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent }, { &state, createSurface } };
 }
 
+VulkanPresentationDeviceRequest makePresentationDeviceRequest(FakeState& state, VulkanInstanceGeneration& owner) noexcept
+{
+    state.mExpectedInstanceOwner = &owner;
+    return { 42, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
+}
+
 const VulkanInstanceAcquireError& requireError(const VulkanInstanceAcquireResult& result)
 {
     const auto* error = std::get_if<VulkanInstanceAcquireError>(&result);
@@ -481,6 +644,17 @@ const VulkanSurfaceAcquireError& requireSurfaceError(const VulkanSurfaceAcquireR
 void ensureSurfaceCode(const VulkanSurfaceAcquireResult& result, VulkanSurfaceAcquireCode code)
 {
     tut::ensure("the exact surface error is reported", requireSurfaceError(result).mCode == code);
+}
+
+const VulkanPresentationDeviceAcquireError& requirePresentationDeviceError(const VulkanPresentationDeviceAcquireResult& result)
+{
+    tut::ensure("presentation-device acquisition returns an error", result.has_value());
+    return *result;
+}
+
+void ensurePresentationDeviceCode(const VulkanPresentationDeviceAcquireResult& result, VulkanPresentationDeviceAcquireCode code)
+{
+    tut::ensure("the exact presentation-device error is reported", requirePresentationDeviceError(result).mCode == code);
 }
 
 void failAllocation()
@@ -1302,6 +1476,216 @@ void render_vulkan_instance_test_object::test<21>()
            state.mDestroySurfaceResolutionCalls == 1 && state.mCreateSurfaceCalls == 0 && state.mDestroySurfaceCalls == 0 &&
                !owner.hasSurfaceGeneration() && owner.instance() == state.mInstance);
     ensure("the live parent can retry after allocation failure", !owner.acquireSurfaceGeneration(request));
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<22>()
+{
+    static_assert(std::is_same_v<VulkanPresentationDeviceAcquireResult, std::optional<VulkanPresentationDeviceAcquireError>>);
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().acquirePresentationDeviceGeneration(
+        std::declval<const VulkanPresentationDeviceRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().resetPresentationDeviceGeneration()));
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().hasPresentationDeviceGeneration()));
+
+    const VulkanPresentationDeviceAcquireError left{ VulkanPresentationDeviceAcquireCode::ResolutionFailure,
+                                                     VulkanPhysicalDeviceResolutionError{
+                                                         VulkanPhysicalDeviceResolutionCode::NoSuitablePhysicalDevice } };
+    ensure("identical presentation-device errors compare equal", left == left);
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("an owner without a selected device exposes neutral observations",
+           !owner.hasPresentationDeviceGeneration() && owner.physicalDevice() == VK_NULL_HANDLE &&
+               owner.physicalDeviceIndex() == std::numeric_limits<std::uint32_t>::max() &&
+               owner.presentationQueueFamilyIndex() == VK_QUEUE_FAMILY_IGNORED && owner.requiredDeviceExtensions().empty() &&
+               !owner.portabilitySubsetRequired());
+
+    VulkanPresentationDeviceRequest request = makePresentationDeviceRequest(state, owner);
+    request.mInstanceOwnerCheck             = {};
+    ensurePresentationDeviceCode(owner.acquirePresentationDeviceGeneration(request),
+                                 VulkanPresentationDeviceAcquireCode::InvalidInstanceOwnerCheck);
+
+    request                        = makePresentationDeviceRequest(state, owner);
+    request.mWindowGenerationCheck = {};
+    ensurePresentationDeviceCode(owner.acquirePresentationDeviceGeneration(request),
+                                 VulkanPresentationDeviceAcquireCode::InvalidWindowGenerationCheck);
+
+    request                         = makePresentationDeviceRequest(state, owner);
+    request.mNativeWindowGeneration = 0;
+    ensurePresentationDeviceCode(owner.acquirePresentationDeviceGeneration(request),
+                                 VulkanPresentationDeviceAcquireCode::InvalidNativeWindowGeneration);
+
+    request = makePresentationDeviceRequest(state, owner);
+    ensurePresentationDeviceCode(owner.acquirePresentationDeviceGeneration(request), VulkanPresentationDeviceAcquireCode::SurfaceNotLive);
+
+    ensure("surface acquisition succeeds for presentation preflight", !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+    request                         = makePresentationDeviceRequest(state, owner);
+    request.mNativeWindowGeneration = 41;
+    ensurePresentationDeviceCode(owner.acquirePresentationDeviceGeneration(request),
+                                 VulkanPresentationDeviceAcquireCode::NativeWindowGenerationMismatch);
+
+    request                     = makePresentationDeviceRequest(state, owner);
+    state.mInstanceOwnerCurrent = false;
+    ensurePresentationDeviceCode(owner.acquirePresentationDeviceGeneration(request),
+                                 VulkanPresentationDeviceAcquireCode::StaleInstanceOwner);
+    state.mInstanceOwnerCurrent = true;
+    state.mSurfaceWindowCurrent = false;
+    ensurePresentationDeviceCode(owner.acquirePresentationDeviceGeneration(request),
+                                 VulkanPresentationDeviceAcquireCode::StaleWindowGeneration);
+    state.mSurfaceWindowCurrent = true;
+
+    owner.reset();
+    request = makePresentationDeviceRequest(state, owner);
+    ensurePresentationDeviceCode(owner.acquirePresentationDeviceGeneration(request), VulkanPresentationDeviceAcquireCode::InstanceNotLive);
+    ensure_equals("preflight and stale provenance failures make no physical-device query", state.mPhysicalCountCalls, std::size_t{ 0 });
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<23>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("surface acquisition succeeds before device resolution", !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+
+    state.mPhysicalEnumerationResult = VK_ERROR_DEVICE_LOST;
+    const VulkanPresentationDeviceAcquireResult result =
+        owner.acquirePresentationDeviceGeneration(makePresentationDeviceRequest(state, owner));
+    const VulkanPresentationDeviceAcquireError& error = requirePresentationDeviceError(result);
+    ensure("the parent preserves the exact nested resolver failure",
+           error.mCode == VulkanPresentationDeviceAcquireCode::ResolutionFailure && error.mResolutionError &&
+               error.mResolutionError->mCode == VulkanPhysicalDeviceResolutionCode::PhysicalDeviceEnumerationFailure &&
+               error.mResolutionError->mCommand == VulkanPhysicalDeviceCommand::EnumeratePhysicalDevices &&
+               error.mResolutionError->mResult == VK_ERROR_DEVICE_LOST && error.mResolutionError->mEnumerationAttempt == 1);
+    ensure("resolver failure publishes no child and leaves the exact parent surface reusable",
+           !owner.hasPresentationDeviceGeneration() && owner.hasSurfaceGeneration() && owner.surface() == state.mSurface &&
+               state.mPhysicalCountCalls == 1 && state.mPhysicalListCalls == 0);
+
+    state.mPhysicalEnumerationResult = VK_SUCCESS;
+    ensure("the parent can retry selection after a resolver failure",
+           !owner.acquirePresentationDeviceGeneration(makePresentationDeviceRequest(state, owner)) &&
+               owner.hasPresentationDeviceGeneration());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<24>()
+{
+    FakeState state;
+    state.mDeviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_portability_subset" };
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("surface acquisition succeeds before the canonical selection",
+           !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+
+    const VulkanPresentationDeviceRequest request = makePresentationDeviceRequest(state, owner);
+    ensure("presentation-device acquisition succeeds", !owner.acquirePresentationDeviceGeneration(request));
+    const std::span<const std::string_view> required = owner.requiredDeviceExtensions();
+    ensure("the parent exposes the selected device and exact unified queue",
+           owner.hasPresentationDeviceGeneration() && owner.physicalDevice() == state.mPhysicalDevice && owner.physicalDeviceIndex() == 0 &&
+               owner.physicalDeviceProperties().apiVersion == VK_API_VERSION_1_1 &&
+               std::string_view(owner.physicalDeviceProperties().deviceName) == "fake-presentation-device" &&
+               owner.presentationQueueFamilyIndex() == 0 && owner.presentationQueueFamilyProperties().queueCount == 1 &&
+               (owner.presentationQueueFamilyProperties().queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0);
+    ensure("the exact device-create obligations are retained in deterministic order",
+           owner.portabilitySubsetRequired() && required.size() == 2 && required[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+               required[1] == "VK_KHR_portability_subset");
+    ensure("selection uses the exact owned surface",
+           state.mLastSurfaceSupportDevice == state.mPhysicalDevice && state.mLastSurfaceSupportQueue == 0 &&
+               state.mLastSurfaceSupportSurface == state.mSurface);
+
+    const std::size_t count_calls = state.mPhysicalCountCalls;
+    ensurePresentationDeviceCode(owner.acquirePresentationDeviceGeneration(request),
+                                 VulkanPresentationDeviceAcquireCode::PresentationDeviceAlreadyOwned);
+    ensure("duplicate acquisition preserves the first selection without re-entering the resolver",
+           owner.physicalDevice() == state.mPhysicalDevice && state.mPhysicalCountCalls == count_calls);
+
+    owner.resetPresentationDeviceGeneration();
+    ensure("explicit selection reset leaves the instance and surface live",
+           !owner.hasPresentationDeviceGeneration() && owner.physicalDevice() == VK_NULL_HANDLE &&
+               owner.requiredDeviceExtensions().empty() && owner.instance() == state.mInstance && owner.surface() == state.mSurface);
+    ensure("selection can be reacquired for the same live parent surface", !owner.acquirePresentationDeviceGeneration(request));
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<25>()
+{
+    for (bool fail_instance_owner : { true, false })
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        ensure("surface acquisition succeeds before the stale-selection boundary",
+               !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+
+        state.mInstanceOwnerChecks    = 0;
+        state.mSurfaceWindowChecks    = 0;
+        state.mFailInstanceOwnerCheck = fail_instance_owner ? 2 : 0;
+        state.mFailSurfaceWindowCheck = fail_instance_owner ? 0 : 2;
+        const VulkanPresentationDeviceAcquireResult result =
+            owner.acquirePresentationDeviceGeneration(makePresentationDeviceRequest(state, owner));
+        ensurePresentationDeviceCode(result, fail_instance_owner ? VulkanPresentationDeviceAcquireCode::StaleInstanceOwner
+                                                                 : VulkanPresentationDeviceAcquireCode::StaleWindowGeneration);
+        ensure("freshness is reauthenticated after resolution and before publication",
+               state.mPhysicalCountCalls == 1 && state.mPhysicalListCalls == 1 && state.mInstanceOwnerChecks == 2 &&
+                   state.mSurfaceWindowChecks == (fail_instance_owner ? 1 : 2));
+        ensure("a stale final boundary publishes no selection and preserves its parent surface",
+               !owner.hasPresentationDeviceGeneration() && owner.hasSurfaceGeneration() && owner.surface() == state.mSurface);
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<26>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration first = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("surface acquisition succeeds before parent move", !first.acquireSurfaceGeneration(makeSurfaceRequest(state, first)));
+    ensure("selection succeeds before parent move",
+           !first.acquirePresentationDeviceGeneration(makePresentationDeviceRequest(state, first)));
+
+    VulkanInstanceGeneration moved(std::move(first));
+    ensure("the parent move transfers the surface-bound selection",
+           !first.hasPresentationDeviceGeneration() && first.physicalDevice() == VK_NULL_HANDLE &&
+               moved.hasPresentationDeviceGeneration() && moved.physicalDevice() == state.mPhysicalDevice &&
+               moved.presentationQueueFamilyIndex() == 0 && moved.surface() == state.mSurface);
+
+    state.mSurfaceDestroyOwner = &moved;
+    moved.resetSurfaceGeneration();
+    ensure("surface reset removes the presentation child before invoking surface destruction",
+           state.mSurfaceDestroyObservationMade && !state.mObservedPresentationAtSurfaceDestroy && state.mDestroySurfaceCalls == 1 &&
+               !moved.hasPresentationDeviceGeneration() && !moved.hasSurfaceGeneration() && moved.physicalDevice() == VK_NULL_HANDLE &&
+               moved.surface() == VK_NULL_HANDLE && moved.instance() == state.mInstance);
+
+    ensure("the moved parent remains reusable after its complete child chain is reset",
+           !moved.acquireSurfaceGeneration(makeSurfaceRequest(state, moved)) &&
+               !moved.acquirePresentationDeviceGeneration(makePresentationDeviceRequest(state, moved)));
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<27>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("surface acquisition succeeds before forced selection allocation failure",
+           !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+    const VulkanPresentationDeviceRequest request = makePresentationDeviceRequest(state, owner);
+
+    const VulkanPresentationDeviceAcquireResult result = VulkanInstanceDetail::acquirePresentationDevice(owner, request, failAllocation);
+    ensurePresentationDeviceCode(result, VulkanPresentationDeviceAcquireCode::AllocationFailure);
+    ensure("allocation failure occurs after resolution but rolls back without disturbing the parent surface",
+           state.mPhysicalCountCalls == 1 && state.mPhysicalListCalls == 1 && !owner.hasPresentationDeviceGeneration() &&
+               owner.hasSurfaceGeneration() && owner.surface() == state.mSurface && owner.instance() == state.mInstance);
+    ensure("the live parent can retry after presentation-device allocation failure",
+           !owner.acquirePresentationDeviceGeneration(request) && owner.hasPresentationDeviceGeneration() &&
+               state.mPhysicalCountCalls == 2);
 }
 
 } // namespace tut

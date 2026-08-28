@@ -438,6 +438,27 @@ LLRenderVulkan::VulkanSurfaceAcquireResult LLWindowMacOSXVulkan::acquireSurfaceG
     return VulkanInstanceDetail::acquireSurface(*mInstanceGeneration, request, allocation_checkpoint);
 }
 
+LLRenderVulkan::VulkanPresentationDeviceAcquireResult LLWindowMacOSXVulkan::acquirePresentationDeviceGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanPresentationDeviceAcquireError{ VulkanPresentationDeviceAcquireCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mLoader || !validIdentity(mNativeWindow) || !refreshNativeGeometry())
+    {
+        return VulkanPresentationDeviceAcquireError{ VulkanPresentationDeviceAcquireCode::StaleWindowGeneration, std::nullopt };
+    }
+
+    SurfaceAcquireContext context{ this, mInstanceGeneration.get(), &mOperations, mRequirements->resolver(), mNativeWindow.mMetalLayer };
+    VulkanPresentationDeviceRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquirePresentationDeviceGeneration(request);
+}
+
 bool LLWindowMacOSXVulkan::resetSurfaceGeneration() noexcept
 {
     if (!mInstanceGeneration || !mInstanceGeneration->hasSurfaceGeneration())
