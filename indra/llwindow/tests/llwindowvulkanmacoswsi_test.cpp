@@ -163,12 +163,33 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("presentation-device selection creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("presentation-device selection leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    const auto logical_device_error = owner->acquireLogicalDeviceGeneration();
+    ensure("the exact presentation selection creates one Vulkan logical device", !logical_device_error.has_value());
+    ensure("the instance parent owns one logical-device generation", instance_generation->hasLogicalDeviceGeneration());
+    ensure("the created logical device and its borrowed queue are non-null",
+           instance_generation->logicalDevice() != VK_NULL_HANDLE && instance_generation->presentationQueue() != VK_NULL_HANDLE);
+    ensure("the logical-device provenance matches the exact presentation selection",
+           instance_generation->logicalDevicePhysicalDevice() == instance_generation->physicalDevice() &&
+               instance_generation->logicalDeviceQueueFamilyIndex() == instance_generation->presentationQueueFamilyIndex() &&
+               instance_generation->logicalDeviceQueueIndex() == 0);
+    const auto enabled_device_extensions = instance_generation->enabledDeviceExtensions();
+    ensure("the MoltenVK device enables exact swapchain and portability-subset policy",
+           instance_generation->logicalDeviceEnabledFeatures().independentBlend == VK_TRUE &&
+               instance_generation->portabilitySubsetEnabled() && enabled_device_extensions.size() == 2 &&
+               enabled_device_extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+               enabled_device_extensions[1] == "VK_KHR_portability_subset");
+    ensure("logical-device acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("logical-device acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     ensure("the native smoke explicitly resets the Vulkan surface", owner->resetSurfaceGeneration());
     ensure("explicit reset removes only the surface child",
            !instance_generation->hasSurfaceGeneration() && instance_generation->surface() == VK_NULL_HANDLE);
     ensure("surface reset first removes the presentation-device child",
            !instance_generation->hasPresentationDeviceGeneration() && instance_generation->physicalDevice() == VK_NULL_HANDLE &&
                instance_generation->presentationQueueFamilyIndex() == VK_QUEUE_FAMILY_IGNORED);
+    ensure("surface reset first destroys the logical-device generation and clears its borrowed queue",
+           !instance_generation->hasLogicalDeviceGeneration() && instance_generation->logicalDevice() == VK_NULL_HANDLE &&
+               instance_generation->presentationQueue() == VK_NULL_HANDLE);
     ensure("the exact instance parent remains live after surface reset",
            owner->instanceGeneration() == instance_generation && instance_generation->instance() != VK_NULL_HANDLE);
     ensure("required validation remains live during explicit surface destruction", instance_generation->validationEnabled());

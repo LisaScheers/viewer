@@ -17,6 +17,7 @@
 #define LL_LLRENDERVULKANINSTANCE_H
 
 #include "llrendervulkanglobaldispatch.h"
+#include "llrendervulkanlogicaldevice.h"
 #include "llrendervulkanphysicaldevice.h"
 
 #include <vulkan/vulkan.h>
@@ -225,6 +226,41 @@ struct VulkanPresentationDeviceAcquireError
 
 using VulkanPresentationDeviceAcquireResult = std::optional<VulkanPresentationDeviceAcquireError>;
 
+struct VulkanLogicalDeviceRequest
+{
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent and native-window lifetime changes during acquisition.
+    std::uint64_t               mNativeWindowGeneration = 0;
+    VulkanInstanceOwnerCheck    mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck mWindowGenerationCheck;
+};
+
+enum class VulkanLogicalDeviceAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanLogicalDeviceAcquireError
+{
+    VulkanLogicalDeviceAcquireCode                    mCode = VulkanLogicalDeviceAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanLogicalDeviceResolutionError> mResolutionError;
+
+    friend constexpr bool operator==(const VulkanLogicalDeviceAcquireError&, const VulkanLogicalDeviceAcquireError&) = default;
+};
+
+using VulkanLogicalDeviceAcquireResult = std::optional<VulkanLogicalDeviceAcquireError>;
+
 // This generation owns the Vulkan objects but borrows the loader behind the
 // originating window's resolver. It must be reset before that window destroys
 // its requirements generation or releases its loader references.
@@ -240,18 +276,18 @@ public:
     VulkanInstanceGeneration(VulkanInstanceGeneration&& other) noexcept;
     VulkanInstanceGeneration& operator=(VulkanInstanceGeneration&&) = delete;
 
-    VkInstance                      instance() const noexcept { return mInstance; }
-    std::uint32_t                   apiVersion() const noexcept { return RENDERER_VULKAN_API_VERSION; }
-    std::uint64_t                   nativeWindowGeneration() const noexcept { return mNativeWindowGeneration; }
-    bool                            validationEnabled() const noexcept { return mDebugMessenger != VK_NULL_HANDLE; }
-    bool                            portabilityEnumerationEnabled() const noexcept { return mPortabilityEnumeration; }
-    const std::vector<std::string>& enabledExtensions() const noexcept { return mEnabledExtensions; }
-    const std::vector<std::string>& enabledLayers() const noexcept { return mEnabledLayers; }
-    bool                            isExtensionEnabled(std::string_view extension_name) const noexcept;
-    VulkanValidationSnapshot        validationSnapshot() const noexcept;
-    bool                            hasSurfaceGeneration() const noexcept;
-    VkSurfaceKHR                    surface() const noexcept;
-    std::uint64_t                   surfaceNativeWindowGeneration() const noexcept;
+    VkInstance                        instance() const noexcept { return mInstance; }
+    std::uint32_t                     apiVersion() const noexcept { return RENDERER_VULKAN_API_VERSION; }
+    std::uint64_t                     nativeWindowGeneration() const noexcept { return mNativeWindowGeneration; }
+    bool                              validationEnabled() const noexcept { return mDebugMessenger != VK_NULL_HANDLE; }
+    bool                              portabilityEnumerationEnabled() const noexcept { return mPortabilityEnumeration; }
+    const std::vector<std::string>&   enabledExtensions() const noexcept { return mEnabledExtensions; }
+    const std::vector<std::string>&   enabledLayers() const noexcept { return mEnabledLayers; }
+    bool                              isExtensionEnabled(std::string_view extension_name) const noexcept;
+    VulkanValidationSnapshot          validationSnapshot() const noexcept;
+    bool                              hasSurfaceGeneration() const noexcept;
+    VkSurfaceKHR                      surface() const noexcept;
+    std::uint64_t                     surfaceNativeWindowGeneration() const noexcept;
     bool                              hasPresentationDeviceGeneration() const noexcept;
     VkPhysicalDevice                  physicalDevice() const noexcept;
     std::uint32_t                     physicalDeviceIndex() const noexcept;
@@ -260,11 +296,22 @@ public:
     VkQueueFamilyProperties           presentationQueueFamilyProperties() const noexcept;
     std::span<const std::string_view> requiredDeviceExtensions() const noexcept;
     bool                              portabilitySubsetRequired() const noexcept;
+    bool                              hasLogicalDeviceGeneration() const noexcept;
+    VkDevice                          logicalDevice() const noexcept;
+    VkQueue                           presentationQueue() const noexcept;
+    VkPhysicalDevice                  logicalDevicePhysicalDevice() const noexcept;
+    std::uint32_t                     logicalDeviceQueueFamilyIndex() const noexcept;
+    std::uint32_t                     logicalDeviceQueueIndex() const noexcept;
+    VkPhysicalDeviceFeatures          logicalDeviceEnabledFeatures() const noexcept;
+    std::span<const std::string_view> enabledDeviceExtensions() const noexcept;
+    bool                              portabilitySubsetEnabled() const noexcept;
 
-    VulkanSurfaceAcquireResult acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept;
+    VulkanSurfaceAcquireResult            acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept;
     VulkanPresentationDeviceAcquireResult acquirePresentationDeviceGeneration(const VulkanPresentationDeviceRequest& request) noexcept;
+    VulkanLogicalDeviceAcquireResult      acquireLogicalDeviceGeneration(const VulkanLogicalDeviceRequest& request) noexcept;
+    void                                  resetLogicalDeviceGeneration() noexcept;
     void                                  resetPresentationDeviceGeneration() noexcept;
-    void                       resetSurfaceGeneration() noexcept;
+    void                                  resetSurfaceGeneration() noexcept;
 
     void reset() noexcept;
 
@@ -284,18 +331,19 @@ private:
                              VkDebugUtilsMessengerEXT            debug_messenger,
                              PFN_vkDestroyDebugUtilsMessengerEXT destroy_debug_messenger) noexcept;
 
-    std::optional<VulkanGlobalDispatchGeneration> mGlobalDispatch;
-    std::unique_ptr<ValidationState>              mValidationState;
-    std::vector<std::string>                      mEnabledExtensions;
-    std::vector<std::string>                      mEnabledLayers;
-    std::uint64_t                                 mNativeWindowGeneration = 0;
-    bool                                          mPortabilityEnumeration = false;
-    VkInstance                                    mInstance               = VK_NULL_HANDLE;
-    PFN_vkDestroyInstance                         mDestroyInstance        = nullptr;
-    VkDebugUtilsMessengerEXT                      mDebugMessenger         = VK_NULL_HANDLE;
-    PFN_vkDestroyDebugUtilsMessengerEXT           mDestroyDebugMessenger  = nullptr;
-    std::unique_ptr<VulkanSurfaceGeneration>      mSurfaceGeneration;
+    std::optional<VulkanGlobalDispatchGeneration>   mGlobalDispatch;
+    std::unique_ptr<ValidationState>                mValidationState;
+    std::vector<std::string>                        mEnabledExtensions;
+    std::vector<std::string>                        mEnabledLayers;
+    std::uint64_t                                   mNativeWindowGeneration = 0;
+    bool                                            mPortabilityEnumeration = false;
+    VkInstance                                      mInstance               = VK_NULL_HANDLE;
+    PFN_vkDestroyInstance                           mDestroyInstance        = nullptr;
+    VkDebugUtilsMessengerEXT                        mDebugMessenger         = VK_NULL_HANDLE;
+    PFN_vkDestroyDebugUtilsMessengerEXT             mDestroyDebugMessenger  = nullptr;
+    std::unique_ptr<VulkanSurfaceGeneration>        mSurfaceGeneration;
     std::unique_ptr<VulkanPhysicalDeviceGeneration> mPresentationDeviceGeneration;
+    std::unique_ptr<VulkanLogicalDeviceGeneration>  mLogicalDeviceGeneration;
 };
 
 using VulkanInstanceAcquireResult = std::variant<VulkanInstanceAcquireError, VulkanInstanceGeneration>;
@@ -318,6 +366,10 @@ namespace VulkanInstanceDetail
     VulkanPresentationDeviceAcquireResult acquirePresentationDevice(VulkanInstanceGeneration&              instance_generation,
                                                                     const VulkanPresentationDeviceRequest& request,
                                                                     AllocationCheckpoint                   allocation_checkpoint) noexcept;
+
+    VulkanLogicalDeviceAcquireResult acquireLogicalDevice(VulkanInstanceGeneration&         instance_generation,
+                                                          const VulkanLogicalDeviceRequest& request,
+                                                          AllocationCheckpoint              allocation_checkpoint) noexcept;
 
 } // namespace VulkanInstanceDetail
 

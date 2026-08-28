@@ -48,7 +48,11 @@ enum class MissingCommand : std::uint8_t
     DestroyInstance,
     CreateDebugMessenger,
     DestroyDebugMessenger,
-    DestroySurface
+    DestroySurface,
+    GetPhysicalDeviceFeatures,
+    CreateDevice,
+    DestroyDevice,
+    GetDeviceQueue
 };
 
 enum class Event : std::uint8_t
@@ -56,6 +60,9 @@ enum class Event : std::uint8_t
     CreateInstance,
     CreateDebugMessenger,
     CreateSurface,
+    CreateDevice,
+    GetDeviceQueue,
+    DestroyDevice,
     DestroySurface,
     DestroyDebugMessenger,
     DestroyInstance
@@ -113,10 +120,13 @@ struct FakeState
     VkQueueFamilyProperties    mQueueFamilyProperties{};
     std::vector<std::string>   mDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME };
     VkBool32                   mPresentationSupported = VK_TRUE;
+    VkPhysicalDeviceFeatures   mSupportedFeatures{};
 
     VkInstance                           mInstance       = fakeHandle<VkInstance>(0x1111);
     VkDebugUtilsMessengerEXT             mDebugMessenger = fakeHandle<VkDebugUtilsMessengerEXT>(0x2222);
     VkSurfaceKHR                         mSurface        = fakeHandle<VkSurfaceKHR>(0x3333);
+    VkDevice                             mDevice         = fakeHandle<VkDevice>(0x5555);
+    VkQueue                              mQueue          = fakeHandle<VkQueue>(0x6666);
     std::vector<Event>                   mEvents;
     std::vector<std::string>             mEnabledExtensions;
     std::vector<std::string>             mEnabledLayers;
@@ -145,6 +155,7 @@ struct FakeState
     const VulkanInstanceGeneration* mSurfaceDestroyOwner                  = nullptr;
     bool                            mSurfaceDestroyObservationMade        = false;
     bool                            mObservedPresentationAtSurfaceDestroy = false;
+    bool                            mObservedLogicalAtSurfaceDestroy      = false;
 
     std::size_t      mPhysicalCountCalls         = 0;
     std::size_t      mPhysicalListCalls          = 0;
@@ -157,6 +168,19 @@ struct FakeState
     VkPhysicalDevice mLastSurfaceSupportDevice   = VK_NULL_HANDLE;
     std::uint32_t    mLastSurfaceSupportQueue    = VK_QUEUE_FAMILY_IGNORED;
     VkSurfaceKHR     mLastSurfaceSupportSurface  = VK_NULL_HANDLE;
+
+    std::size_t                     mPhysicalFeaturesCalls               = 0;
+    VkPhysicalDevice                mPhysicalFeaturesDevice              = VK_NULL_HANDLE;
+    std::size_t                     mCreateDeviceCalls                   = 0;
+    std::size_t                     mDestroyDeviceCalls                  = 0;
+    std::size_t                     mGetDeviceQueueCalls                 = 0;
+    VkDevice                        mGetDeviceQueueDevice                = VK_NULL_HANDLE;
+    std::uint32_t                   mGetDeviceQueueFamily                = VK_QUEUE_FAMILY_IGNORED;
+    std::uint32_t                   mGetDeviceQueueIndex                 = std::numeric_limits<std::uint32_t>::max();
+    const VulkanInstanceGeneration* mDeviceDestroyOwner                  = nullptr;
+    bool                            mDeviceDestroyObservationMade        = false;
+    bool                            mObservedPresentationAtDeviceDestroy = false;
+    bool                            mObservedSurfaceAtDeviceDestroy      = false;
 
     bool        mGenerationCurrent   = true;
     std::size_t mGenerationChecks    = 0;
@@ -175,8 +199,9 @@ struct FakeState
         mPhysicalDeviceProperties.apiVersion = VK_API_VERSION_1_1;
         mPhysicalDeviceProperties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
         std::memcpy(mPhysicalDeviceProperties.deviceName, "fake-presentation-device", sizeof("fake-presentation-device"));
-        mQueueFamilyProperties.queueFlags = VK_QUEUE_GRAPHICS_BIT;
-        mQueueFamilyProperties.queueCount = 1;
+        mQueueFamilyProperties.queueFlags   = VK_QUEUE_GRAPHICS_BIT;
+        mQueueFamilyProperties.queueCount   = 1;
+        mSupportedFeatures.independentBlend = VK_TRUE;
     }
 };
 
@@ -367,6 +392,7 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroySurface(VkInstance                   insta
     {
         gFakeState->mSurfaceDestroyObservationMade        = true;
         gFakeState->mObservedPresentationAtSurfaceDestroy = gFakeState->mSurfaceDestroyOwner->hasPresentationDeviceGeneration();
+        gFakeState->mObservedLogicalAtSurfaceDestroy      = gFakeState->mSurfaceDestroyOwner->hasLogicalDeviceGeneration();
     }
     gFakeState->mEvents.push_back(Event::DestroySurface);
 }
@@ -472,6 +498,65 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysical
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures* features) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !features)
+    {
+        return;
+    }
+    ++gFakeState->mPhysicalFeaturesCalls;
+    gFakeState->mPhysicalFeaturesDevice = physical_device;
+    *features                           = gFakeState->mSupportedFeatures;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice physical_device,
+                                                const VkDeviceCreateInfo*,
+                                                const VkAllocationCallbacks*,
+                                                VkDevice* device) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !device)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gFakeState->mCreateDeviceCalls;
+    gFakeState->mEvents.push_back(Event::CreateDevice);
+    *device = gFakeState->mDevice;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyDevice(VkDevice device, const VkAllocationCallbacks*) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice)
+    {
+        return;
+    }
+    ++gFakeState->mDestroyDeviceCalls;
+    if (gFakeState->mDeviceDestroyOwner)
+    {
+        gFakeState->mDeviceDestroyObservationMade        = true;
+        gFakeState->mObservedPresentationAtDeviceDestroy = gFakeState->mDeviceDestroyOwner->hasPresentationDeviceGeneration();
+        gFakeState->mObservedSurfaceAtDeviceDestroy      = gFakeState->mDeviceDestroyOwner->hasSurfaceGeneration();
+    }
+    gFakeState->mEvents.push_back(Event::DestroyDevice);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetDeviceQueue(VkDevice      device,
+                                              std::uint32_t queue_family_index,
+                                              std::uint32_t queue_index,
+                                              VkQueue*      queue) noexcept
+{
+    if (!gFakeState || !queue)
+    {
+        return;
+    }
+    ++gFakeState->mGetDeviceQueueCalls;
+    gFakeState->mGetDeviceQueueDevice = device;
+    gFakeState->mGetDeviceQueueFamily = queue_family_index;
+    gFakeState->mGetDeviceQueueIndex  = queue_index;
+    gFakeState->mEvents.push_back(Event::GetDeviceQueue);
+    *queue = gFakeState->mQueue;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance instance, const char* name) noexcept
 {
     if (!gFakeState || !name)
@@ -530,6 +615,23 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
     if (std::strcmp(name, "vkEnumerateDeviceExtensionProperties") == 0)
     {
         return eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceFeatures") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::GetPhysicalDeviceFeatures ? nullptr
+                                                                                 : eraseFunctionType(fakeGetPhysicalDeviceFeatures);
+    }
+    if (std::strcmp(name, "vkCreateDevice") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CreateDevice ? nullptr : eraseFunctionType(fakeCreateDevice);
+    }
+    if (std::strcmp(name, "vkDestroyDevice") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::DestroyDevice ? nullptr : eraseFunctionType(fakeDestroyDevice);
+    }
+    if (std::strcmp(name, "vkGetDeviceQueue") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::GetDeviceQueue ? nullptr : eraseFunctionType(fakeGetDeviceQueue);
     }
     if (std::strcmp(name, "vkCreateDebugUtilsMessengerEXT") == 0)
     {
@@ -617,6 +719,12 @@ VulkanPresentationDeviceRequest makePresentationDeviceRequest(FakeState& state, 
     return { 42, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
 }
 
+VulkanLogicalDeviceRequest makeLogicalDeviceRequest(FakeState& state, VulkanInstanceGeneration& owner) noexcept
+{
+    state.mExpectedInstanceOwner = &owner;
+    return { 42, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
+}
+
 const VulkanInstanceAcquireError& requireError(const VulkanInstanceAcquireResult& result)
 {
     const auto* error = std::get_if<VulkanInstanceAcquireError>(&result);
@@ -655,6 +763,24 @@ const VulkanPresentationDeviceAcquireError& requirePresentationDeviceError(const
 void ensurePresentationDeviceCode(const VulkanPresentationDeviceAcquireResult& result, VulkanPresentationDeviceAcquireCode code)
 {
     tut::ensure("the exact presentation-device error is reported", requirePresentationDeviceError(result).mCode == code);
+}
+
+const VulkanLogicalDeviceAcquireError& requireLogicalDeviceError(const VulkanLogicalDeviceAcquireResult& result)
+{
+    tut::ensure("logical-device acquisition returns an error", result.has_value());
+    return *result;
+}
+
+void ensureLogicalDeviceCode(const VulkanLogicalDeviceAcquireResult& result, VulkanLogicalDeviceAcquireCode code)
+{
+    tut::ensure("the exact logical-device error is reported", requireLogicalDeviceError(result).mCode == code);
+}
+
+void acquireSelectionChain(FakeState& state, VulkanInstanceGeneration& owner)
+{
+    tut::ensure("the surface fixture succeeds", !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+    tut::ensure("the presentation fixture succeeds",
+                !owner.acquirePresentationDeviceGeneration(makePresentationDeviceRequest(state, owner)));
 }
 
 void failAllocation()
@@ -1686,6 +1812,227 @@ void render_vulkan_instance_test_object::test<27>()
     ensure("the live parent can retry after presentation-device allocation failure",
            !owner.acquirePresentationDeviceGeneration(request) && owner.hasPresentationDeviceGeneration() &&
                state.mPhysicalCountCalls == 2);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<28>()
+{
+    static_assert(std::is_same_v<VulkanLogicalDeviceAcquireResult, std::optional<VulkanLogicalDeviceAcquireError>>);
+    static_assert(noexcept(
+        std::declval<VulkanInstanceGeneration&>().acquireLogicalDeviceGeneration(std::declval<const VulkanLogicalDeviceRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().resetLogicalDeviceGeneration()));
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().hasLogicalDeviceGeneration()));
+
+    const VulkanLogicalDeviceAcquireError left{ VulkanLogicalDeviceAcquireCode::ResolutionFailure,
+                                                VulkanLogicalDeviceResolutionError{
+                                                    VulkanLogicalDeviceResolutionCode::IndependentBlendUnsupported,
+                                                    VulkanLogicalDeviceCommand::GetPhysicalDeviceFeatures } };
+    ensure("identical logical-device errors compare equal", left == left);
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("an owner without a logical device exposes neutral observations",
+           !owner.hasLogicalDeviceGeneration() && owner.logicalDevice() == VK_NULL_HANDLE && owner.presentationQueue() == VK_NULL_HANDLE &&
+               owner.logicalDevicePhysicalDevice() == VK_NULL_HANDLE && owner.logicalDeviceQueueFamilyIndex() == VK_QUEUE_FAMILY_IGNORED &&
+               owner.logicalDeviceQueueIndex() == std::numeric_limits<std::uint32_t>::max() &&
+               !owner.logicalDeviceEnabledFeatures().independentBlend && owner.enabledDeviceExtensions().empty() &&
+               !owner.portabilitySubsetEnabled());
+
+    VulkanLogicalDeviceRequest request = makeLogicalDeviceRequest(state, owner);
+    request.mInstanceOwnerCheck        = {};
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(request), VulkanLogicalDeviceAcquireCode::InvalidInstanceOwnerCheck);
+
+    request                        = makeLogicalDeviceRequest(state, owner);
+    request.mWindowGenerationCheck = {};
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(request), VulkanLogicalDeviceAcquireCode::InvalidWindowGenerationCheck);
+
+    request                         = makeLogicalDeviceRequest(state, owner);
+    request.mNativeWindowGeneration = 0;
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(request), VulkanLogicalDeviceAcquireCode::InvalidNativeWindowGeneration);
+
+    request = makeLogicalDeviceRequest(state, owner);
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(request), VulkanLogicalDeviceAcquireCode::SurfaceNotLive);
+
+    ensure("logical preflight surface acquisition succeeds", !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner)),
+                            VulkanLogicalDeviceAcquireCode::PresentationDeviceNotLive);
+    ensure("logical preflight selection succeeds", !owner.acquirePresentationDeviceGeneration(makePresentationDeviceRequest(state, owner)));
+
+    request                         = makeLogicalDeviceRequest(state, owner);
+    request.mNativeWindowGeneration = 41;
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(request), VulkanLogicalDeviceAcquireCode::NativeWindowGenerationMismatch);
+
+    request                     = makeLogicalDeviceRequest(state, owner);
+    state.mInstanceOwnerCurrent = false;
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(request), VulkanLogicalDeviceAcquireCode::StaleInstanceOwner);
+    state.mInstanceOwnerCurrent = true;
+    state.mSurfaceWindowCurrent = false;
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(request), VulkanLogicalDeviceAcquireCode::StaleWindowGeneration);
+    state.mSurfaceWindowCurrent = true;
+
+    owner.reset();
+    request = makeLogicalDeviceRequest(state, owner);
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(request), VulkanLogicalDeviceAcquireCode::InstanceNotLive);
+    ensure("preflight and stale provenance failures create no logical device",
+           state.mPhysicalFeaturesCalls == 0 && state.mCreateDeviceCalls == 0 && state.mDestroyDeviceCalls == 0);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<29>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSelectionChain(state, owner);
+
+    state.mSupportedFeatures.independentBlend                = VK_FALSE;
+    const VulkanLogicalDeviceAcquireResult unsupported       = owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner));
+    const VulkanLogicalDeviceAcquireError& unsupported_error = requireLogicalDeviceError(unsupported);
+    ensure("the parent preserves the exact unsupported-feature error",
+           unsupported_error.mCode == VulkanLogicalDeviceAcquireCode::ResolutionFailure && unsupported_error.mResolutionError &&
+               unsupported_error.mResolutionError->mCode == VulkanLogicalDeviceResolutionCode::IndependentBlendUnsupported &&
+               unsupported_error.mResolutionError->mCommand == VulkanLogicalDeviceCommand::GetPhysicalDeviceFeatures);
+    ensure("the feature query uses the selected device and publishes nothing on failure",
+           state.mPhysicalFeaturesCalls == 1 && state.mPhysicalFeaturesDevice == state.mPhysicalDevice && state.mCreateDeviceCalls == 0 &&
+               !owner.hasLogicalDeviceGeneration() && owner.hasPresentationDeviceGeneration());
+
+    state.mSupportedFeatures.independentBlend = VK_TRUE;
+    const VulkanLogicalDeviceRequest request  = makeLogicalDeviceRequest(state, owner);
+    ensure("the exact selection creates one logical-device generation", !owner.acquireLogicalDeviceGeneration(request));
+    const std::span<const std::string_view> extensions = owner.enabledDeviceExtensions();
+    ensure(
+        "the parent exposes the authenticated logical device, queue, feature, and extension policy",
+        owner.hasLogicalDeviceGeneration() && owner.logicalDevice() == state.mDevice && owner.presentationQueue() == state.mQueue &&
+            owner.logicalDevicePhysicalDevice() == owner.physicalDevice() && owner.logicalDevicePhysicalDevice() == state.mPhysicalDevice &&
+            owner.logicalDeviceQueueFamilyIndex() == owner.presentationQueueFamilyIndex() && owner.logicalDeviceQueueFamilyIndex() == 0 &&
+            owner.logicalDeviceQueueIndex() == 0 && owner.logicalDeviceEnabledFeatures().independentBlend == VK_TRUE &&
+            extensions.size() == 1 && extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME && !owner.portabilitySubsetEnabled());
+    ensure("queue retrieval uses the exact created device, selected family, and queue zero",
+           state.mGetDeviceQueueCalls == 1 && state.mGetDeviceQueueDevice == state.mDevice && state.mGetDeviceQueueFamily == 0 &&
+               state.mGetDeviceQueueIndex == 0);
+
+    const std::size_t feature_calls = state.mPhysicalFeaturesCalls;
+    ensureLogicalDeviceCode(owner.acquireLogicalDeviceGeneration(request), VulkanLogicalDeviceAcquireCode::LogicalDeviceAlreadyOwned);
+    ensure("duplicate acquisition keeps the first device without re-entering creation",
+           owner.logicalDevice() == state.mDevice && state.mPhysicalFeaturesCalls == feature_calls && state.mCreateDeviceCalls == 1);
+
+    owner.resetLogicalDeviceGeneration();
+    ensure("logical-only reset destroys the device and leaves the complete parent selection reusable",
+           state.mDestroyDeviceCalls == 1 && !owner.hasLogicalDeviceGeneration() && owner.logicalDevice() == VK_NULL_HANDLE &&
+               owner.presentationQueue() == VK_NULL_HANDLE && owner.hasPresentationDeviceGeneration() && owner.hasSurfaceGeneration() &&
+               owner.instance() == state.mInstance);
+    owner.resetLogicalDeviceGeneration();
+    ensure_equals("logical-only reset is idempotent", state.mDestroyDeviceCalls, std::size_t{ 1 });
+    ensure("logical-device acquisition can retry after explicit reset", !owner.acquireLogicalDeviceGeneration(request));
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<30>()
+{
+    for (bool fail_instance_owner : { true, false })
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireSelectionChain(state, owner);
+
+        state.mInstanceOwnerChecks                    = 0;
+        state.mSurfaceWindowChecks                    = 0;
+        state.mFailInstanceOwnerCheck                 = fail_instance_owner ? 2 : 0;
+        state.mFailSurfaceWindowCheck                 = fail_instance_owner ? 0 : 2;
+        const VulkanLogicalDeviceAcquireResult result = owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner));
+        ensureLogicalDeviceCode(result, fail_instance_owner ? VulkanLogicalDeviceAcquireCode::StaleInstanceOwner
+                                                            : VulkanLogicalDeviceAcquireCode::StaleWindowGeneration);
+        ensure("post-create freshness failure destroys the pending device before publication",
+               state.mCreateDeviceCalls == 1 && state.mGetDeviceQueueCalls == 1 && state.mDestroyDeviceCalls == 1 &&
+                   !owner.hasLogicalDeviceGeneration() && owner.hasPresentationDeviceGeneration() && owner.hasSurfaceGeneration());
+
+        state.mFailInstanceOwnerCheck = 0;
+        state.mFailSurfaceWindowCheck = 0;
+        ensure("the current parent can retry after stale rollback",
+               !owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner)) && owner.hasLogicalDeviceGeneration());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<31>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSelectionChain(state, owner);
+    const VulkanLogicalDeviceRequest request = makeLogicalDeviceRequest(state, owner);
+
+    const VulkanLogicalDeviceAcquireResult result = VulkanInstanceDetail::acquireLogicalDevice(owner, request, failAllocation);
+    ensureLogicalDeviceCode(result, VulkanLogicalDeviceAcquireCode::AllocationFailure);
+    ensure("post-create parent allocation failure destroys the result-owned device and preserves the selection",
+           state.mCreateDeviceCalls == 1 && state.mGetDeviceQueueCalls == 1 && state.mDestroyDeviceCalls == 1 &&
+               !owner.hasLogicalDeviceGeneration() && owner.hasPresentationDeviceGeneration() && owner.hasSurfaceGeneration());
+    ensure("the live parent retries after logical-device allocation failure",
+           !owner.acquireLogicalDeviceGeneration(request) && owner.hasLogicalDeviceGeneration() && state.mCreateDeviceCalls == 2);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<32>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration first = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSelectionChain(state, first);
+    ensure("logical-device acquisition succeeds before parent move",
+           !first.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, first)));
+
+    VulkanInstanceGeneration moved(std::move(first));
+    ensure("the parent move transfers the complete logical-device child chain",
+           !first.hasLogicalDeviceGeneration() && first.logicalDevice() == VK_NULL_HANDLE && !first.hasPresentationDeviceGeneration() &&
+               !first.hasSurfaceGeneration() && moved.hasLogicalDeviceGeneration() && moved.logicalDevice() == state.mDevice &&
+               moved.presentationQueue() == state.mQueue && moved.logicalDevicePhysicalDevice() == moved.physicalDevice() &&
+               moved.logicalDeviceQueueFamilyIndex() == 0 && moved.hasPresentationDeviceGeneration() && moved.hasSurfaceGeneration());
+    first.reset();
+    ensure_equals("resetting the moved-from parent destroys no logical device", state.mDestroyDeviceCalls, std::size_t{ 0 });
+
+    state.mDeviceDestroyOwner  = &moved;
+    state.mSurfaceDestroyOwner = &moved;
+    moved.reset();
+    ensure("device destruction observes its selection and surface parents still live",
+           state.mDeviceDestroyObservationMade && state.mObservedPresentationAtDeviceDestroy && state.mObservedSurfaceAtDeviceDestroy);
+    ensure("surface destruction observes both younger children already removed",
+           state.mSurfaceDestroyObservationMade && !state.mObservedLogicalAtSurfaceDestroy && !state.mObservedPresentationAtSurfaceDestroy);
+    ensure("the exact owning teardown order is logical device, surface, then instance",
+           state.mEvents == std::vector<Event>{ Event::CreateInstance, Event::CreateSurface, Event::CreateDevice, Event::GetDeviceQueue,
+                                                Event::DestroyDevice, Event::DestroySurface, Event::DestroyInstance } &&
+               state.mDestroyDeviceCalls == 1 && state.mDestroySurfaceCalls == 1 && state.mDestroyInstanceCalls == 1);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<33>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSelectionChain(state, owner);
+
+    state.mMissing                                = MissingCommand::DestroyDevice;
+    const VulkanLogicalDeviceAcquireResult result = owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner));
+    const VulkanLogicalDeviceAcquireError& error  = requireLogicalDeviceError(result);
+    ensure("the parent preserves exact missing logical-device command identity",
+           error.mCode == VulkanLogicalDeviceAcquireCode::ResolutionFailure && error.mResolutionError &&
+               error.mResolutionError->mCode == VulkanLogicalDeviceResolutionCode::MissingRequiredCommand &&
+               error.mResolutionError->mCommand == VulkanLogicalDeviceCommand::DestroyDevice);
+    ensure("missing rollback capability stops before feature query and device creation",
+           state.mPhysicalFeaturesCalls == 0 && state.mCreateDeviceCalls == 0 && state.mDestroyDeviceCalls == 0 &&
+               !owner.hasLogicalDeviceGeneration());
+
+    state.mMissing = MissingCommand::None;
+    ensure("the selection remains retryable after a nested dispatch failure",
+           !owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner)) && owner.hasLogicalDeviceGeneration());
 }
 
 } // namespace tut

@@ -124,6 +124,13 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool presentation_queue_usable     = false;
     bool presentation_extensions_exact = false;
     bool presentation_device_removed   = false;
+    bool logical_device_acquired       = false;
+    bool logical_device_nonnull        = false;
+    bool logical_queue_nonnull         = false;
+    bool logical_provenance_exact      = false;
+    bool logical_feature_exact         = false;
+    bool logical_extensions_exact      = false;
+    bool logical_device_removed        = false;
     bool surface_explicitly_reset      = false;
     bool surface_removed               = false;
     bool surface_parent_still_live     = false;
@@ -188,6 +195,20 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 {
                     presentation_extensions_exact = device_extensions[1] == "VK_KHR_portability_subset";
                 }
+                logical_device_acquired = instance_generation->hasLogicalDeviceGeneration();
+                logical_device_nonnull  = instance_generation->logicalDevice() != VK_NULL_HANDLE;
+                logical_queue_nonnull   = instance_generation->presentationQueue() != VK_NULL_HANDLE;
+                logical_provenance_exact =
+                    instance_generation->logicalDevicePhysicalDevice() == instance_generation->physicalDevice() &&
+                    instance_generation->logicalDeviceQueueFamilyIndex() == instance_generation->presentationQueueFamilyIndex() &&
+                    instance_generation->logicalDeviceQueueIndex() == 0;
+                logical_feature_exact                = instance_generation->logicalDeviceEnabledFeatures().independentBlend == VK_TRUE;
+                const auto enabled_device_extensions = instance_generation->enabledDeviceExtensions();
+                logical_extensions_exact             = enabled_device_extensions.size() == device_extensions.size();
+                for (std::size_t index = 0; logical_extensions_exact && index < device_extensions.size(); ++index)
+                {
+                    logical_extensions_exact = enabled_device_extensions[index] == device_extensions[index];
+                }
 
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
                 const auto& enabled_extensions  = instance_generation->enabledExtensions();
@@ -224,6 +245,9 @@ void window_vulkan_sdl_wsi_object::test<1>()
         presentation_device_removed = !owned_instance_generation->hasPresentationDeviceGeneration() &&
                                       owned_instance_generation->physicalDevice() == VK_NULL_HANDLE &&
                                       owned_instance_generation->presentationQueueFamilyIndex() == VK_QUEUE_FAMILY_IGNORED;
+        logical_device_removed = !owned_instance_generation->hasLogicalDeviceGeneration() &&
+                                 owned_instance_generation->logicalDevice() == VK_NULL_HANDLE &&
+                                 owned_instance_generation->presentationQueue() == VK_NULL_HANDLE;
         surface_parent_still_live = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == owned_instance_generation &&
                                     owned_instance_generation->instance() != VK_NULL_HANDLE;
         surface_validation_still_live = owned_instance_generation->validationEnabled();
@@ -259,9 +283,16 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the selected physical device supports standard Vulkan 1.1 or newer", presentation_device_api_1_1);
     ensure("the selected queue family is nonempty and graphics-capable", presentation_queue_usable);
     ensure("the selected device retains exact swapchain and portability requirements", presentation_extensions_exact);
+    ensure("the SDL Vulkan branch automatically owns one logical device", logical_device_acquired);
+    ensure("the automatically created logical device is non-null", logical_device_nonnull);
+    ensure("the automatically retrieved presentation queue is non-null", logical_queue_nonnull);
+    ensure("the logical device retains exact physical-device, family, and queue provenance", logical_provenance_exact);
+    ensure("the logical device enables the required independent-blend capability", logical_feature_exact);
+    ensure("the logical device enables the selected extensions in exact order", logical_extensions_exact);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
     ensure("explicit reset removes only the Vulkan surface child", surface_removed);
     ensure("surface reset first removes the presentation-device child", presentation_device_removed);
+    ensure("surface reset first removes the logical-device child and borrowed queue", logical_device_removed);
     ensure("the exact parent instance remains live after explicit surface reset", surface_parent_still_live);
     ensure("required validation remains live while the surface is explicitly destroyed", surface_validation_still_live);
     ensure("surface creation and destruction emit no validation messages", instance_validation_clean);

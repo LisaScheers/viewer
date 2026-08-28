@@ -235,6 +235,14 @@ bool LLWindowSDL::createVulkanWindow(int x, int y, int width, int height, bool f
         return false;
     }
 
+    const auto logical_device_error = vulkan_window->acquireLogicalDeviceGeneration();
+    if (logical_device_error)
+    {
+        LL_WARNS("Window") << "Vulkan logical-device acquisition failed with code " << static_cast<U32>(logical_device_error->mCode)
+                           << LL_ENDL;
+        return false;
+    }
+
     mVulkanWindow = std::move(vulkan_window);
     mWindow       = mVulkanWindow->window();
     mFullscreen   = fullscreen;
