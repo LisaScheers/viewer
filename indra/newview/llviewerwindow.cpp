@@ -1983,17 +1983,6 @@ LLViewerWindow::LLViewerWindow(const Params& p)
     {
         LL_INFOS("Window") << "NOTE: ALL NOTIFICATIONS THAT OCCUR WILL GET ADDED TO IGNORE LIST FOR LATER RUNS." << LL_ENDL;
     }
-
-
-    /*
-    LLWindowCallbacks* callbacks,
-    const std::string& title, const std::string& name, S32 x, S32 y, S32 width, S32 height, U32 flags,
-    bool fullscreen,
-    bool clearBg,
-    bool disable_vsync,
-    bool ignore_pixel_depth,
-    U32 fsaa_samples)
-    */
     // create window
 
     U32 max_core_count = gSavedSettings.getU32("EmulateCoreCount");
@@ -2005,11 +1994,12 @@ LLViewerWindow::LLViewerWindow(const Params& p)
         : 0;
 
     mWindow = LLWindowManager::createWindow(this,
-        p.title, p.name, p.x, p.y, p.width, p.height, window_flags,
+        p.title, p.name, p.x, p.y, p.width, p.height,
+        gHeadlessClient ? LLWindow::GraphicsAPI::Headless : LLWindow::GraphicsAPI::OpenGL,
+        window_flags,
         p.fullscreen,
         gHeadlessClient,
         gSavedSettings.getBOOL("RenderVSyncEnable"),
-        !gHeadlessClient,
         p.ignore_pixel_depth,
         0,
         max_core_count,

@@ -260,3 +260,13 @@ endif ()
 if (DARWIN)
   target_link_libraries(llwindow ${CARBON_LIBRARY})
 endif (DARWIN)
+
+if (LL_TESTS)
+  include(LLAddBuildTest)
+  set_source_files_properties(
+    tests/llwindowgraphicsapi_test.cpp
+    PROPERTIES
+    SKIP_PRECOMPILE_HEADERS TRUE
+  )
+  LL_ADD_INTEGRATION_TEST(llwindowgraphicsapi "" "llwindow;llcommon")
+endif ()

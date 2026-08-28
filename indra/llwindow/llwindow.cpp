@@ -446,50 +446,69 @@ static std::set<LLWindow*> sWindowList;
 
 LLWindow* LLWindowManager::createWindow(
     LLWindowCallbacks* callbacks,
-    const std::string& title, const std::string& name, S32 x, S32 y, S32 width, S32 height, U32 flags,
+    const std::string& title, const std::string& name, S32 x, S32 y, S32 width, S32 height,
+    LLWindow::GraphicsAPI graphics_api,
+    U32 flags,
     bool fullscreen,
     bool clearBg,
     bool enable_vsync,
-    bool use_gl,
     bool ignore_pixel_depth,
     U32 fsaa_samples,
     U32 max_cores,
     F32 max_gl_version)
 {
-    LLWindow* new_window;
+    switch (graphics_api)
+    {
+    case LLWindow::GraphicsAPI::OpenGL:
+    case LLWindow::GraphicsAPI::Headless:
+        break;
+    case LLWindow::GraphicsAPI::Vulkan:
+        LL_WARNS("Window") << "Vulkan window creation is not implemented." << LL_ENDL;
+        return nullptr;
+    }
+
+    if (graphics_api != LLWindow::GraphicsAPI::OpenGL &&
+        graphics_api != LLWindow::GraphicsAPI::Headless)
+    {
+        LL_WARNS("Window") << "Unknown graphics API selection: "
+                           << static_cast<U32>(graphics_api) << LL_ENDL;
+        return nullptr;
+    }
+
+    LLWindow* new_window = nullptr;
 
 #if LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)
     init_sdl(name);
 #endif
 
-    if (use_gl)
+    if (graphics_api == LLWindow::GraphicsAPI::OpenGL)
     {
 #if LL_MESA_HEADLESS
         new_window = new LLWindowMesaHeadless(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth);
+            fullscreen, clearBg, enable_vsync, true, ignore_pixel_depth);
 #elif LL_SDL_WINDOW
         new_window = new LLWindowSDL(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth, fsaa_samples);
+            fullscreen, clearBg, enable_vsync, true, ignore_pixel_depth, fsaa_samples);
 #elif LL_WINDOWS
         new_window = new LLWindowWin32(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth, fsaa_samples, max_cores, max_gl_version);
+            fullscreen, clearBg, enable_vsync, true, ignore_pixel_depth, fsaa_samples, max_cores, max_gl_version);
 #elif LL_DARWIN
         new_window = new LLWindowMacOSX(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth, fsaa_samples);
+            fullscreen, clearBg, enable_vsync, true, ignore_pixel_depth, fsaa_samples);
 #endif
     }
     else
     {
         new_window = new LLWindowHeadless(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth);
+            fullscreen, clearBg, enable_vsync, false, ignore_pixel_depth);
     }
 
-    if (false == new_window->isValid())
+    if (!new_window || !new_window->isValid())
     {
         delete new_window;
         LL_WARNS() << "LLWindowManager::create() : Error creating window." << LL_ENDL;

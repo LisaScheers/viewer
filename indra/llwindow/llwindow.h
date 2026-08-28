@@ -51,6 +51,13 @@ class LLWindow : public LLInstanceTracker<LLWindow>
 {
 public:
 
+    enum class GraphicsAPI : U8
+    {
+        OpenGL,
+        Vulkan,
+        Headless
+    };
+
     struct LLWindowResolution
     {
         S32 mWidth;
@@ -315,11 +322,11 @@ public:
     static LLWindow *createWindow(
         LLWindowCallbacks* callbacks,
         const std::string& title, const std::string& name, S32 x, S32 y, S32 width, S32 height,
+        LLWindow::GraphicsAPI graphics_api,
         U32 flags = 0,
         bool fullscreen = false,
         bool clearBg = false,
         bool enable_vsync = false,
-        bool use_gl = true,
         bool ignore_pixel_depth = false,
         U32 fsaa_samples = 0,
         U32 max_cores = 0,
