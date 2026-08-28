@@ -66,6 +66,13 @@ namespace
         return { code, resolution_error };
     }
 
+    VulkanSwapchainConfigurationAcquireError swapchainConfigurationFailure(
+        VulkanSwapchainConfigurationAcquireCode                    code,
+        std::optional<VulkanSwapchainConfigurationResolutionError> resolution_error = std::nullopt) noexcept
+    {
+        return { code, resolution_error };
+    }
+
     bool current(const VulkanWindowGenerationCheck& check, std::uint64_t generation) noexcept
     {
         return generation != 0 && check.mIsCurrent && check.mIsCurrent(check.mUserdata, generation);
@@ -108,6 +115,20 @@ namespace
         if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
         {
             return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::StaleWindowGeneration);
+        }
+        return std::nullopt;
+    }
+
+    VulkanSwapchainConfigurationAcquireResult swapchainConfigurationFreshness(const VulkanSwapchainConfigurationRequest& request,
+                                                                              const VulkanInstanceGeneration& generation) noexcept
+    {
+        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        {
+            return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::StaleInstanceOwner);
+        }
+        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        {
+            return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::StaleWindowGeneration);
         }
         return std::nullopt;
     }
@@ -369,6 +390,11 @@ struct VulkanInstanceGenerationFactory
     static VulkanLogicalDeviceAcquireResult acquireLogicalDevice(VulkanInstanceGeneration&                  instance_generation,
                                                                  const VulkanLogicalDeviceRequest&          request,
                                                                  VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    static VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfiguration(
+        VulkanInstanceGeneration&                  instance_generation,
+        const VulkanSwapchainConfigurationRequest& request,
+        VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
 };
 
 VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
@@ -412,7 +438,8 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& ot
     mDestroyDebugMessenger(std::exchange(other.mDestroyDebugMessenger, nullptr)),
     mSurfaceGeneration(std::move(other.mSurfaceGeneration)),
     mPresentationDeviceGeneration(std::move(other.mPresentationDeviceGeneration)),
-    mLogicalDeviceGeneration(std::move(other.mLogicalDeviceGeneration))
+    mLogicalDeviceGeneration(std::move(other.mLogicalDeviceGeneration)),
+    mSwapchainConfigurationGeneration(std::move(other.mSwapchainConfigurationGeneration))
 {
     other.mGlobalDispatch.reset();
 }
@@ -545,6 +572,75 @@ bool VulkanInstanceGeneration::portabilitySubsetEnabled() const noexcept
     return mLogicalDeviceGeneration && mLogicalDeviceGeneration->portabilitySubsetEnabled();
 }
 
+bool VulkanInstanceGeneration::hasSwapchainConfigurationGeneration() const noexcept
+{
+    return mSwapchainConfigurationGeneration != nullptr;
+}
+
+VkExtent2D VulkanInstanceGeneration::swapchainDrawableExtent() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->drawableExtent() : VkExtent2D{};
+}
+
+VkSurfaceCapabilitiesKHR VulkanInstanceGeneration::swapchainSurfaceCapabilities() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->surfaceCapabilities() : VkSurfaceCapabilitiesKHR{};
+}
+
+VkSurfaceFormatKHR VulkanInstanceGeneration::swapchainSurfaceFormat() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->surfaceFormat() : VkSurfaceFormatKHR{};
+}
+
+VkPresentModeKHR VulkanInstanceGeneration::swapchainPresentMode() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->presentMode()
+                                             : static_cast<VkPresentModeKHR>(VK_PRESENT_MODE_MAX_ENUM_KHR);
+}
+
+std::uint32_t VulkanInstanceGeneration::swapchainImageCount() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->imageCount() : 0;
+}
+
+VkExtent2D VulkanInstanceGeneration::swapchainImageExtent() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->imageExtent() : VkExtent2D{};
+}
+
+std::uint32_t VulkanInstanceGeneration::swapchainImageArrayLayers() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->imageArrayLayers() : 0;
+}
+
+VkImageUsageFlags VulkanInstanceGeneration::swapchainImageUsage() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->imageUsage() : VkImageUsageFlags{};
+}
+
+VkSharingMode VulkanInstanceGeneration::swapchainImageSharingMode() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->imageSharingMode()
+                                             : static_cast<VkSharingMode>(VK_SHARING_MODE_MAX_ENUM);
+}
+
+VkSurfaceTransformFlagBitsKHR VulkanInstanceGeneration::swapchainPreTransform() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->preTransform()
+                                             : static_cast<VkSurfaceTransformFlagBitsKHR>(0);
+}
+
+VkCompositeAlphaFlagBitsKHR VulkanInstanceGeneration::swapchainCompositeAlpha() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->compositeAlpha()
+                                             : static_cast<VkCompositeAlphaFlagBitsKHR>(0);
+}
+
+VkBool32 VulkanInstanceGeneration::swapchainClipped() const noexcept
+{
+    return mSwapchainConfigurationGeneration ? mSwapchainConfigurationGeneration->clipped() : VK_FALSE;
+}
+
 VulkanSurfaceAcquireResult VulkanInstanceGeneration::acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept
 {
     return VulkanInstanceDetail::acquireSurface(*this, request, nullptr);
@@ -562,8 +658,20 @@ VulkanLogicalDeviceAcquireResult VulkanInstanceGeneration::acquireLogicalDeviceG
     return VulkanInstanceDetail::acquireLogicalDevice(*this, request, nullptr);
 }
 
+VulkanSwapchainConfigurationAcquireResult VulkanInstanceGeneration::acquireSwapchainConfigurationGeneration(
+    const VulkanSwapchainConfigurationRequest& request) noexcept
+{
+    return VulkanInstanceDetail::acquireSwapchainConfiguration(*this, request, nullptr);
+}
+
+void VulkanInstanceGeneration::resetSwapchainConfigurationGeneration() noexcept
+{
+    mSwapchainConfigurationGeneration.reset();
+}
+
 void VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
 {
+    resetSwapchainConfigurationGeneration();
     mLogicalDeviceGeneration.reset();
 }
 
@@ -885,6 +993,107 @@ VulkanLogicalDeviceAcquireResult VulkanInstanceGenerationFactory::acquireLogical
     catch (const std::bad_alloc&)
     {
         return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::AllocationFailure);
+    }
+}
+
+VulkanSwapchainConfigurationAcquireResult VulkanInstanceGenerationFactory::acquireSwapchainConfiguration(
+    VulkanInstanceGeneration&                  instance_generation,
+    const VulkanSwapchainConfigurationRequest& request,
+    VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept
+{
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::InvalidInstanceOwnerCheck);
+    }
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::InvalidWindowGenerationCheck);
+    }
+    if (request.mNativeWindowGeneration == 0)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::InvalidNativeWindowGeneration);
+    }
+    if (request.mDrawableExtent.width == 0 || request.mDrawableExtent.height == 0)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::InvalidDrawableExtent);
+    }
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance || !instance_generation.mGlobalDispatch ||
+        instance_generation.mNativeWindowGeneration == 0)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::InstanceNotLive);
+    }
+    if (!instance_generation.mSurfaceGeneration || instance_generation.surface() == VK_NULL_HANDLE)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::SurfaceNotLive);
+    }
+    if (!instance_generation.mPresentationDeviceGeneration || instance_generation.physicalDevice() == VK_NULL_HANDLE)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::PresentationDeviceNotLive);
+    }
+    if (!instance_generation.mLogicalDeviceGeneration || instance_generation.logicalDevice() == VK_NULL_HANDLE ||
+        instance_generation.presentationQueue() == VK_NULL_HANDLE)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::LogicalDeviceNotLive);
+    }
+    if (instance_generation.mSwapchainConfigurationGeneration)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::SwapchainConfigurationAlreadyOwned);
+    }
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+        request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::NativeWindowGenerationMismatch);
+    }
+    if (VulkanSwapchainConfigurationAcquireResult freshness = swapchainConfigurationFreshness(request, instance_generation))
+    {
+        return freshness;
+    }
+
+    const VkInstance                      instance        = instance_generation.mInstance;
+    const VkSurfaceKHR                    surface         = instance_generation.surface();
+    const VulkanPhysicalDeviceGeneration* selection       = instance_generation.mPresentationDeviceGeneration.get();
+    const VulkanLogicalDeviceGeneration*  logical_device  = instance_generation.mLogicalDeviceGeneration.get();
+    const VkPhysicalDevice                physical_device = selection->physicalDevice();
+    const VkDevice                        device          = logical_device->device();
+    const std::uint32_t                   queue_family    = selection->queueFamilyIndex();
+    const VkExtent2D                      drawable_extent = request.mDrawableExtent;
+
+    VulkanSwapchainConfigurationResolutionResult resolution_result =
+        resolveVulkanSwapchainConfigurationGeneration(*selection, *logical_device, drawable_extent);
+    if (const auto* error = std::get_if<VulkanSwapchainConfigurationResolutionError>(&resolution_result))
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::ResolutionFailure, *error);
+    }
+
+    try
+    {
+        if (allocation_checkpoint)
+        {
+            allocation_checkpoint();
+        }
+        auto pending = std::make_unique<VulkanSwapchainConfigurationGeneration>(
+            std::move(std::get<VulkanSwapchainConfigurationGeneration>(resolution_result)));
+
+        if (VulkanSwapchainConfigurationAcquireResult freshness = swapchainConfigurationFreshness(request, instance_generation))
+        {
+            return freshness;
+        }
+        if (instance_generation.mInstance != instance || !instance_generation.mSurfaceGeneration ||
+            instance_generation.surface() != surface || instance_generation.mPresentationDeviceGeneration.get() != selection ||
+            instance_generation.mLogicalDeviceGeneration.get() != logical_device ||
+            instance_generation.physicalDevice() != physical_device || instance_generation.logicalDevice() != device ||
+            instance_generation.presentationQueueFamilyIndex() != queue_family ||
+            !pending->createdFor(*selection, *logical_device, drawable_extent))
+        {
+            return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::LogicalDeviceNotLive);
+        }
+
+        instance_generation.mSwapchainConfigurationGeneration = std::move(pending);
+        return std::nullopt;
+    }
+    catch (const std::bad_alloc&)
+    {
+        return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::AllocationFailure);
     }
 }
 
@@ -1212,6 +1421,13 @@ namespace VulkanInstanceDetail
                                                           AllocationCheckpoint              allocation_checkpoint) noexcept
     {
         return VulkanInstanceGenerationFactory::acquireLogicalDevice(instance_generation, request, allocation_checkpoint);
+    }
+
+    VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfiguration(VulkanInstanceGeneration&                  instance_generation,
+                                                                            const VulkanSwapchainConfigurationRequest& request,
+                                                                            AllocationCheckpoint allocation_checkpoint) noexcept
+    {
+        return VulkanInstanceGenerationFactory::acquireSwapchainConfiguration(instance_generation, request, allocation_checkpoint);
     }
 
 } // namespace VulkanInstanceDetail

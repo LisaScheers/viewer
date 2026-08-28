@@ -75,6 +75,12 @@ SDL_WindowFlags getWindowFlags(void*, SDL_Window* window) noexcept
     return SDL_GetWindowFlags(window);
 }
 
+bool getWindowSizeInPixels(void*, SDL_Window* window, int* width, int* height) noexcept
+{
+    SDL_assert(SDL_IsMainThread());
+    return SDL_GetWindowSizeInPixels(window, width, height);
+}
+
 LLWindowVulkanFunction getResolver(void*) noexcept
 {
     SDL_assert(SDL_IsMainThread());
@@ -99,7 +105,8 @@ bool createSurface(void*, SDL_Window* window, VkInstance instance, const VkAlloc
 bool validOperations(const LLWindowSDLVulkanOperations& operations) noexcept
 {
     return operations.mLoadLibrary && operations.mUnloadLibrary && operations.mCreateWindow && operations.mDestroyWindow &&
-           operations.mGetWindowFlags && operations.mGetResolver && operations.mGetInstanceExtensions && operations.mCreateSurface;
+           operations.mGetWindowFlags && operations.mGetWindowSizeInPixels && operations.mGetResolver &&
+           operations.mGetInstanceExtensions && operations.mCreateSurface;
 }
 
 bool isInstanceWindowGenerationCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
@@ -345,6 +352,36 @@ LLRenderVulkan::VulkanLogicalDeviceAcquireResult LLWindowSDLVulkan::acquireLogic
     return mInstanceGeneration->acquireLogicalDeviceGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainConfigurationAcquireResult LLWindowSDLVulkan::acquireSwapchainConfigurationGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainConfigurationAcquireError{ VulkanSwapchainConfigurationAcquireCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mWindow || !mOperations.mGetWindowSizeInPixels)
+    {
+        return VulkanSwapchainConfigurationAcquireError{ VulkanSwapchainConfigurationAcquireCode::StaleWindowGeneration, std::nullopt };
+    }
+
+    int drawable_width  = 0;
+    int drawable_height = 0;
+    if (!mOperations.mGetWindowSizeInPixels(mOperations.mUserdata, mWindow, &drawable_width, &drawable_height) || drawable_width <= 0 ||
+        drawable_height <= 0)
+    {
+        return VulkanSwapchainConfigurationAcquireError{ VulkanSwapchainConfigurationAcquireCode::InvalidDrawableExtent, std::nullopt };
+    }
+
+    SurfaceAcquireContext               context{ this, mInstanceGeneration.get(), &mOperations, mWindow };
+    VulkanSwapchainConfigurationRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = { static_cast<std::uint32_t>(drawable_width), static_cast<std::uint32_t>(drawable_height) };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquireSwapchainConfigurationGeneration(request);
+}
+
 bool LLWindowSDLVulkan::resetSurfaceGeneration() noexcept
 {
     if (!mInstanceGeneration || !mInstanceGeneration->hasSurfaceGeneration())
@@ -385,8 +422,10 @@ void LLWindowSDLVulkan::reset() noexcept
 
 const LLWindowSDLVulkanOperations& defaultLLWindowSDLVulkanOperations() noexcept
 {
-    static const LLWindowSDLVulkanOperations operations{ nullptr,        loadLibrary, unloadLibrary,         createWindow, destroyWindow,
-                                                         getWindowFlags, getResolver, getInstanceExtensions, createSurface };
+    static const LLWindowSDLVulkanOperations operations{
+        nullptr,        loadLibrary,           unloadLibrary, createWindow,          destroyWindow,
+        getWindowFlags, getWindowSizeInPixels, getResolver,   getInstanceExtensions, createSurface
+    };
     return operations;
 }
 

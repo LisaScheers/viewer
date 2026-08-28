@@ -1154,4 +1154,61 @@ void window_macosx_vulkan_object::test<12>()
     ensure_equals("instance retry never creates a surface", state.mCreateSurfaceCount, std::size_t{ 0 });
 }
 
+template<>
+template<>
+void window_macosx_vulkan_object::test<13>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState   state;
+    ScopedState active(state);
+    const auto  info   = createInfo();
+    auto        result = acquireLLWindowMacOSXVulkan(info, 131, fakeOperations(state));
+    auto*       owner  = acquiredWindow(result);
+    ensure("swapchain-adapter fixture acquired a native owner", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainConfigurationGeneration();
+    ensure("swapchain configuration requires a live instance before refreshing geometry",
+           missing_instance && missing_instance->mCode == VulkanSwapchainConfigurationAcquireCode::InstanceNotLive &&
+               state.mRefreshCount == 0);
+
+    ensure("swapchain-adapter fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    const std::size_t refreshes_after_instance = state.mRefreshCount;
+
+    state.mRefreshSucceeds    = false;
+    const auto failed_refresh = owner->acquireSwapchainConfigurationGeneration();
+    ensure("a failed Cocoa geometry refresh maps to a stale window",
+           failed_refresh && failed_refresh->mCode == VulkanSwapchainConfigurationAcquireCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance + 1);
+
+    state.mRefreshSucceeds     = true;
+    state.mRefreshMutation     = RefreshMutation::ZeroHeight;
+    const auto invalid_refresh = owner->acquireSwapchainConfigurationGeneration();
+    ensure("an invalid refreshed backing height maps to a stale window",
+           invalid_refresh && invalid_refresh->mCode == VulkanSwapchainConfigurationAcquireCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance + 2);
+
+    state.mRefreshMutation     = RefreshMutation::None;
+    state.mRefreshScale        = 1.25;
+    state.mRefreshWidth        = 1600;
+    state.mRefreshHeight       = 1000;
+    const auto missing_surface = owner->acquireSwapchainConfigurationGeneration();
+    ensure("valid refreshed Cocoa backing pixels are forwarded to the live instance parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainConfigurationAcquireCode::SurfaceNotLive &&
+               state.mRefreshCount == refreshes_after_instance + 3 && owner->drawableWidth() == 1600 && owner->drawableHeight() == 1000);
+
+    ensure("swapchain-adapter fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const std::size_t refreshes_after_surface = state.mRefreshCount;
+    const auto        missing_selection       = owner->acquireSwapchainConfigurationGeneration();
+    ensure("the Cocoa adapter forwards refreshed pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainConfigurationAcquireCode::PresentationDeviceNotLive &&
+               state.mRefreshCount == refreshes_after_surface + 1 && owner->drawableWidth() == 1600 && owner->drawableHeight() == 1000);
+
+    state.mOwnerDuringDestroy = owner;
+    ensure("swapchain-adapter fixture teardown succeeds", owner->reset());
+    ensure_equals("adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
 } // namespace tut

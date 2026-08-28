@@ -243,6 +243,14 @@ bool LLWindowSDL::createVulkanWindow(int x, int y, int width, int height, bool f
         return false;
     }
 
+    const auto swapchain_configuration_error = vulkan_window->acquireSwapchainConfigurationGeneration();
+    if (swapchain_configuration_error)
+    {
+        LL_WARNS("Window") << "Vulkan swapchain-configuration acquisition failed with code "
+                           << static_cast<U32>(swapchain_configuration_error->mCode) << LL_ENDL;
+        return false;
+    }
+
     mVulkanWindow = std::move(vulkan_window);
     mWindow       = mVulkanWindow->window();
     mFullscreen   = fullscreen;

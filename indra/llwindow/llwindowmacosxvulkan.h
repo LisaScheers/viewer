@@ -146,11 +146,12 @@ public:
     std::optional<LLRenderVulkan::VulkanInstanceAcquireError> acquireInstanceGeneration(
         LLRenderVulkan::VulkanInstanceValidationMode  validation_mode,
         LLRenderVulkan::VulkanInstancePortabilityMode portability_mode) noexcept;
-    std::optional<LLRenderVulkan::VulkanSurfaceAcquireError> acquireSurfaceGeneration() noexcept;
-    LLRenderVulkan::VulkanPresentationDeviceAcquireResult    acquirePresentationDeviceGeneration() noexcept;
-    LLRenderVulkan::VulkanLogicalDeviceAcquireResult         acquireLogicalDeviceGeneration() noexcept;
-    const LLRenderVulkan::VulkanInstanceGeneration* instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
-    bool                                            resetSurfaceGeneration() noexcept;
+    std::optional<LLRenderVulkan::VulkanSurfaceAcquireError>  acquireSurfaceGeneration() noexcept;
+    LLRenderVulkan::VulkanPresentationDeviceAcquireResult     acquirePresentationDeviceGeneration() noexcept;
+    LLRenderVulkan::VulkanLogicalDeviceAcquireResult          acquireLogicalDeviceGeneration() noexcept;
+    LLRenderVulkan::VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfigurationGeneration() noexcept;
+    const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
+    bool                                                      resetSurfaceGeneration() noexcept;
 
     // AppKit ownership is main-thread-affine. An explicit off-main reset
     // returns false without releasing any resource. Destruction of a still

@@ -26,8 +26,11 @@
 #include "SDL3/SDL.h"
 #include "SDL3/SDL_vulkan.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <variant>
@@ -58,6 +61,43 @@ bool nativeSmokeRequested()
 {
     const char* value = std::getenv(NATIVE_SMOKE_ENVIRONMENT);
     return value && std::string_view(value) == "1";
+}
+
+std::uint32_t expectedImageCount(const VkSurfaceCapabilitiesKHR& capabilities)
+{
+    std::uint32_t image_count = capabilities.minImageCount;
+    if (image_count != std::numeric_limits<std::uint32_t>::max() &&
+        (capabilities.maxImageCount == 0 || image_count < capabilities.maxImageCount))
+    {
+        ++image_count;
+    }
+    return image_count;
+}
+
+VkExtent2D expectedImageExtent(const VkSurfaceCapabilitiesKHR& capabilities, VkExtent2D drawable_extent)
+{
+    if (capabilities.currentExtent.width != std::numeric_limits<std::uint32_t>::max())
+    {
+        return capabilities.currentExtent;
+    }
+    return { std::clamp(drawable_extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
+             std::clamp(drawable_extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height) };
+}
+
+VkCompositeAlphaFlagBitsKHR expectedCompositeAlpha(VkCompositeAlphaFlagsKHR supported)
+{
+    constexpr std::array<VkCompositeAlphaFlagBitsKHR, 4> priorities{ VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                                                     VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                                                                     VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+                                                                     VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR };
+    for (VkCompositeAlphaFlagBitsKHR priority : priorities)
+    {
+        if ((supported & priority) != 0)
+        {
+            return priority;
+        }
+    }
+    return static_cast<VkCompositeAlphaFlagBitsKHR>(0);
 }
 
 } // namespace
@@ -106,38 +146,44 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool extensions_identical     = false;
     bool global_dispatch_resolved = false;
 
-    bool instance_acquired             = false;
-    bool instance_nonnull              = false;
-    bool instance_api_1_1              = false;
-    bool instance_generation_exact     = false;
-    bool instance_extensions_ordered   = false;
-    bool instance_validation_enabled   = false;
-    bool instance_validation_clean     = false;
-    bool instance_window_owned         = false;
-    bool surface_acquired              = false;
-    bool surface_nonnull               = false;
-    bool surface_generation_exact      = false;
-    bool surface_window_owned          = false;
-    bool presentation_device_acquired  = false;
-    bool presentation_device_nonnull   = false;
-    bool presentation_device_api_1_1   = false;
-    bool presentation_queue_usable     = false;
-    bool presentation_extensions_exact = false;
-    bool presentation_device_removed   = false;
-    bool logical_device_acquired       = false;
-    bool logical_device_nonnull        = false;
-    bool logical_queue_nonnull         = false;
-    bool logical_provenance_exact      = false;
-    bool logical_feature_exact         = false;
-    bool logical_extensions_exact      = false;
-    bool logical_device_removed        = false;
-    bool surface_explicitly_reset      = false;
-    bool surface_removed               = false;
-    bool surface_parent_still_live     = false;
-    bool surface_validation_still_live = false;
-    bool mixed_opengl_rejected         = false;
-    bool vulkan_context_switch_fails   = false;
-    bool vulkan_shared_context_fails   = false;
+    bool instance_acquired                = false;
+    bool instance_nonnull                 = false;
+    bool instance_api_1_1                 = false;
+    bool instance_generation_exact        = false;
+    bool instance_extensions_ordered      = false;
+    bool instance_validation_enabled      = false;
+    bool instance_validation_clean        = false;
+    bool instance_window_owned            = false;
+    bool surface_acquired                 = false;
+    bool surface_nonnull                  = false;
+    bool surface_generation_exact         = false;
+    bool surface_window_owned             = false;
+    bool presentation_device_acquired     = false;
+    bool presentation_device_nonnull      = false;
+    bool presentation_device_api_1_1      = false;
+    bool presentation_queue_usable        = false;
+    bool presentation_extensions_exact    = false;
+    bool presentation_device_removed      = false;
+    bool logical_device_acquired          = false;
+    bool logical_device_nonnull           = false;
+    bool logical_queue_nonnull            = false;
+    bool logical_provenance_exact         = false;
+    bool logical_feature_exact            = false;
+    bool logical_extensions_exact         = false;
+    bool logical_device_removed           = false;
+    bool swapchain_configuration_acquired = false;
+    bool swapchain_drawable_extent_exact  = false;
+    bool swapchain_format_supported       = false;
+    bool swapchain_present_mode_exact     = false;
+    bool swapchain_create_policy_exact    = false;
+    bool swapchain_configuration_removed  = false;
+    bool surface_explicitly_reset         = false;
+    bool surface_removed                  = false;
+    bool surface_parent_still_live        = false;
+    bool surface_validation_still_live    = false;
+    bool mixed_opengl_rejected            = false;
+    bool vulkan_context_switch_fails      = false;
+    bool vulkan_shared_context_fails      = false;
 
     const LLRenderVulkan::VulkanInstanceGeneration* owned_instance_generation = nullptr;
 
@@ -210,6 +256,31 @@ void window_vulkan_sdl_wsi_object::test<1>()
                     logical_extensions_exact = enabled_device_extensions[index] == device_extensions[index];
                 }
 
+                swapchain_configuration_acquired = instance_generation->hasSwapchainConfigurationGeneration();
+                LLCoordWindow current_drawable;
+                const bool    drawable_queried = window->getSize(&current_drawable) && current_drawable.mX > 0 && current_drawable.mY > 0;
+                const VkExtent2D retained_drawable = instance_generation->swapchainDrawableExtent();
+                swapchain_drawable_extent_exact    = drawable_queried &&
+                                                  retained_drawable.width == static_cast<std::uint32_t>(current_drawable.mX) &&
+                                                  retained_drawable.height == static_cast<std::uint32_t>(current_drawable.mY);
+                const VkSurfaceFormatKHR surface_format = instance_generation->swapchainSurfaceFormat();
+                swapchain_format_supported =
+                    (surface_format.format == VK_FORMAT_B8G8R8A8_UNORM || surface_format.format == VK_FORMAT_R8G8B8A8_UNORM) &&
+                    surface_format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+                swapchain_present_mode_exact                   = instance_generation->swapchainPresentMode() == VK_PRESENT_MODE_FIFO_KHR;
+                const VkSurfaceCapabilitiesKHR capabilities    = instance_generation->swapchainSurfaceCapabilities();
+                const VkExtent2D               image_extent    = instance_generation->swapchainImageExtent();
+                const VkExtent2D               expected_extent = expectedImageExtent(capabilities, retained_drawable);
+                swapchain_create_policy_exact =
+                    instance_generation->swapchainImageCount() == expectedImageCount(capabilities) &&
+                    image_extent.width == expected_extent.width && image_extent.height == expected_extent.height &&
+                    instance_generation->swapchainImageArrayLayers() == 1 &&
+                    instance_generation->swapchainImageUsage() == VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &&
+                    instance_generation->swapchainImageSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
+                    instance_generation->swapchainPreTransform() == capabilities.currentTransform &&
+                    instance_generation->swapchainCompositeAlpha() == expectedCompositeAlpha(capabilities.supportedCompositeAlpha) &&
+                    instance_generation->swapchainClipped() == VK_TRUE;
+
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
                 const auto& enabled_extensions  = instance_generation->enabledExtensions();
                 instance_extensions_ordered     = enabled_extensions.size() >= required_extensions.size();
@@ -248,6 +319,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
         logical_device_removed = !owned_instance_generation->hasLogicalDeviceGeneration() &&
                                  owned_instance_generation->logicalDevice() == VK_NULL_HANDLE &&
                                  owned_instance_generation->presentationQueue() == VK_NULL_HANDLE;
+        swapchain_configuration_removed = !owned_instance_generation->hasSwapchainConfigurationGeneration();
         surface_parent_still_live = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == owned_instance_generation &&
                                     owned_instance_generation->instance() != VK_NULL_HANDLE;
         surface_validation_still_live = owned_instance_generation->validationEnabled();
@@ -289,10 +361,16 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the logical device retains exact physical-device, family, and queue provenance", logical_provenance_exact);
     ensure("the logical device enables the required independent-blend capability", logical_feature_exact);
     ensure("the logical device enables the selected extensions in exact order", logical_extensions_exact);
+    ensure("the SDL Vulkan branch automatically owns one swapchain configuration", swapchain_configuration_acquired);
+    ensure("the configuration retains the exact SDL drawable pixel extent", swapchain_drawable_extent_exact);
+    ensure("the selected surface format follows the bounded UNORM nonlinear-sRGB policy", swapchain_format_supported);
+    ensure("the selected present mode is FIFO", swapchain_present_mode_exact);
+    ensure("the selected image count, extent, transform, alpha, usage, and sharing policy are supported", swapchain_create_policy_exact);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
     ensure("explicit reset removes only the Vulkan surface child", surface_removed);
     ensure("surface reset first removes the presentation-device child", presentation_device_removed);
     ensure("surface reset first removes the logical-device child and borrowed queue", logical_device_removed);
+    ensure("surface reset first removes the swapchain-configuration child", swapchain_configuration_removed);
     ensure("the exact parent instance remains live after explicit surface reset", surface_parent_still_live);
     ensure("required validation remains live while the surface is explicitly destroyed", surface_validation_still_live);
     ensure("surface creation and destruction emit no validation messages", instance_validation_clean);

@@ -24,7 +24,10 @@
 
 #include <OpenGL/OpenGL.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -42,6 +45,43 @@ bool nativeSmokeRequested()
 {
     const char* value = std::getenv(NATIVE_SMOKE_ENVIRONMENT);
     return value && std::string_view(value) == "1";
+}
+
+std::uint32_t expectedImageCount(const VkSurfaceCapabilitiesKHR& capabilities)
+{
+    std::uint32_t image_count = capabilities.minImageCount;
+    if (image_count != std::numeric_limits<std::uint32_t>::max() &&
+        (capabilities.maxImageCount == 0 || image_count < capabilities.maxImageCount))
+    {
+        ++image_count;
+    }
+    return image_count;
+}
+
+VkExtent2D expectedImageExtent(const VkSurfaceCapabilitiesKHR& capabilities, VkExtent2D drawable_extent)
+{
+    if (capabilities.currentExtent.width != std::numeric_limits<std::uint32_t>::max())
+    {
+        return capabilities.currentExtent;
+    }
+    return { std::clamp(drawable_extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
+             std::clamp(drawable_extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height) };
+}
+
+VkCompositeAlphaFlagBitsKHR expectedCompositeAlpha(VkCompositeAlphaFlagsKHR supported)
+{
+    constexpr std::array<VkCompositeAlphaFlagBitsKHR, 4> priorities{ VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                                                     VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                                                                     VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+                                                                     VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR };
+    for (VkCompositeAlphaFlagBitsKHR priority : priorities)
+    {
+        if ((supported & priority) != 0)
+        {
+            return priority;
+        }
+    }
+    return static_cast<VkCompositeAlphaFlagBitsKHR>(0);
 }
 
 } // namespace
@@ -181,6 +221,32 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("logical-device acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("logical-device acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    const auto swapchain_configuration_error = owner->acquireSwapchainConfigurationGeneration();
+    ensure("the exact logical-device chain selects one swapchain configuration", !swapchain_configuration_error.has_value());
+    ensure("the instance parent owns one swapchain-configuration generation", instance_generation->hasSwapchainConfigurationGeneration());
+    const VkExtent2D drawable_extent = instance_generation->swapchainDrawableExtent();
+    ensure("the configuration retains refreshed Cocoa backing pixels",
+           drawable_extent.width == owner->drawableWidth() && drawable_extent.height == owner->drawableHeight());
+    const VkSurfaceFormatKHR surface_format = instance_generation->swapchainSurfaceFormat();
+    ensure("the MoltenVK format follows the bounded UNORM nonlinear-sRGB policy",
+           (surface_format.format == VK_FORMAT_B8G8R8A8_UNORM || surface_format.format == VK_FORMAT_R8G8B8A8_UNORM) &&
+               surface_format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+    const VkSurfaceCapabilitiesKHR capabilities    = instance_generation->swapchainSurfaceCapabilities();
+    const VkExtent2D               image_extent    = instance_generation->swapchainImageExtent();
+    const VkExtent2D               expected_extent = expectedImageExtent(capabilities, drawable_extent);
+    ensure("the MoltenVK create-ready configuration follows exact conservative policy",
+           instance_generation->swapchainPresentMode() == VK_PRESENT_MODE_FIFO_KHR &&
+               instance_generation->swapchainImageCount() == expectedImageCount(capabilities) &&
+               image_extent.width == expected_extent.width && image_extent.height == expected_extent.height &&
+               instance_generation->swapchainImageArrayLayers() == 1 &&
+               instance_generation->swapchainImageUsage() == VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &&
+               instance_generation->swapchainImageSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
+               instance_generation->swapchainPreTransform() == capabilities.currentTransform &&
+               instance_generation->swapchainCompositeAlpha() == expectedCompositeAlpha(capabilities.supportedCompositeAlpha) &&
+               instance_generation->swapchainClipped() == VK_TRUE);
+    ensure("swapchain configuration creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("swapchain configuration leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     ensure("the native smoke explicitly resets the Vulkan surface", owner->resetSurfaceGeneration());
     ensure("explicit reset removes only the surface child",
            !instance_generation->hasSurfaceGeneration() && instance_generation->surface() == VK_NULL_HANDLE);
@@ -190,6 +256,8 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("surface reset first destroys the logical-device generation and clears its borrowed queue",
            !instance_generation->hasLogicalDeviceGeneration() && instance_generation->logicalDevice() == VK_NULL_HANDLE &&
                instance_generation->presentationQueue() == VK_NULL_HANDLE);
+    ensure("surface reset first removes the swapchain-configuration generation",
+           !instance_generation->hasSwapchainConfigurationGeneration());
     ensure("the exact instance parent remains live after surface reset",
            owner->instanceGeneration() == instance_generation && instance_generation->instance() != VK_NULL_HANDLE);
     ensure("required validation remains live during explicit surface destruction", instance_generation->validationEnabled());

@@ -46,18 +46,19 @@ struct LLWindowSDLVulkanOperations
 {
     void* mUserdata = nullptr;
 
-    bool (*mLoadLibrary)(void* userdata) noexcept                                                  = nullptr;
-    void (*mUnloadLibrary)(void* userdata) noexcept                                                = nullptr;
-    SDL_Window* (*mCreateWindow)(void* userdata, const LLWindowSDLVulkanCreateInfo& info) noexcept = nullptr;
-    void (*mDestroyWindow)(void* userdata, SDL_Window* window) noexcept                            = nullptr;
-    SDL_WindowFlags (*mGetWindowFlags)(void* userdata, SDL_Window* window) noexcept                = nullptr;
-    LLWindowVulkanFunction (*mGetResolver)(void* userdata) noexcept                                = nullptr;
-    const char* const* (*mGetInstanceExtensions)(void* userdata, std::size_t* count) noexcept      = nullptr;
+    bool (*mLoadLibrary)(void* userdata) noexcept                                                        = nullptr;
+    void (*mUnloadLibrary)(void* userdata) noexcept                                                      = nullptr;
+    SDL_Window* (*mCreateWindow)(void* userdata, const LLWindowSDLVulkanCreateInfo& info) noexcept       = nullptr;
+    void (*mDestroyWindow)(void* userdata, SDL_Window* window) noexcept                                  = nullptr;
+    SDL_WindowFlags (*mGetWindowFlags)(void* userdata, SDL_Window* window) noexcept                      = nullptr;
+    bool (*mGetWindowSizeInPixels)(void* userdata, SDL_Window* window, int* width, int* height) noexcept = nullptr;
+    LLWindowVulkanFunction (*mGetResolver)(void* userdata) noexcept                                      = nullptr;
+    const char* const* (*mGetInstanceExtensions)(void* userdata, std::size_t* count) noexcept            = nullptr;
     bool (*mCreateSurface)(void*                        userdata,
                            SDL_Window*                  window,
                            VkInstance                   instance,
                            const VkAllocationCallbacks* allocator,
-                           VkSurfaceKHR*                surface) noexcept                                         = nullptr;
+                           VkSurfaceKHR*                surface) noexcept                                               = nullptr;
 };
 
 enum class LLWindowSDLVulkanAcquireCode : U8
@@ -109,11 +110,12 @@ public:
     std::optional<LLRenderVulkan::VulkanInstanceAcquireError> acquireInstanceGeneration(
         LLRenderVulkan::VulkanInstanceValidationMode  validation_mode,
         LLRenderVulkan::VulkanInstancePortabilityMode portability_mode) noexcept;
-    std::optional<LLRenderVulkan::VulkanSurfaceAcquireError> acquireSurfaceGeneration() noexcept;
-    LLRenderVulkan::VulkanPresentationDeviceAcquireResult    acquirePresentationDeviceGeneration() noexcept;
-    LLRenderVulkan::VulkanLogicalDeviceAcquireResult         acquireLogicalDeviceGeneration() noexcept;
-    const LLRenderVulkan::VulkanInstanceGeneration*          instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
-    bool                                                     resetSurfaceGeneration() noexcept;
+    std::optional<LLRenderVulkan::VulkanSurfaceAcquireError>  acquireSurfaceGeneration() noexcept;
+    LLRenderVulkan::VulkanPresentationDeviceAcquireResult     acquirePresentationDeviceGeneration() noexcept;
+    LLRenderVulkan::VulkanLogicalDeviceAcquireResult          acquireLogicalDeviceGeneration() noexcept;
+    LLRenderVulkan::VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfigurationGeneration() noexcept;
+    const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
+    bool                                                      resetSurfaceGeneration() noexcept;
 
     void reset() noexcept;
 

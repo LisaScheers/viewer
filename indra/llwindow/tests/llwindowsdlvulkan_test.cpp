@@ -35,6 +35,7 @@ enum class Event
     Load,
     Create,
     Flags,
+    DrawableSize,
     Resolver,
     Extensions,
     CreateInstance,
@@ -63,6 +64,10 @@ struct FakeState
     int                                mWindowLoaderReferences     = 0;
     SDL_WindowFlags                    mWindowFlags                = SDL_WINDOW_VULKAN;
     SDL_Window*                        mWindow                     = reinterpret_cast<SDL_Window*>(static_cast<std::uintptr_t>(0x12340));
+    bool                               mDrawableSizeSucceeds       = true;
+    int                                mDrawableWidth              = 1280;
+    int                                mDrawableHeight             = 720;
+    std::size_t                        mDrawableSizeCalls          = 0;
     const LLWindowSDLVulkanCreateInfo* mCreateInfo                 = nullptr;
     const char*                        mExtensionNames[2]          = { "VK_KHR_surface", "VK_KHR_xlib_surface" };
     std::size_t                        mExtensionCount             = 2;
@@ -313,6 +318,20 @@ SDL_WindowFlags getWindowFlags(void* userdata, SDL_Window*) noexcept
     return state.mWindowFlags;
 }
 
+bool getWindowSizeInPixels(void* userdata, SDL_Window* window, int* width, int* height) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::DrawableSize);
+    ++state.mDrawableSizeCalls;
+    if (!state.mDrawableSizeSucceeds || window != state.mWindow || !width || !height)
+    {
+        return false;
+    }
+    *width  = state.mDrawableWidth;
+    *height = state.mDrawableHeight;
+    return true;
+}
+
 LLWindowVulkanFunction getResolver(void* userdata) noexcept
 {
     auto& state = *static_cast<FakeState*>(userdata);
@@ -364,8 +383,8 @@ bool createSurface(void*                        userdata,
 
 LLWindowSDLVulkanOperations fakeOperations(FakeState& state) noexcept
 {
-    return { &state,         loadLibrary, unloadLibrary,         createWindow, destroyWindow,
-             getWindowFlags, getResolver, getInstanceExtensions, createSurface };
+    return { &state,         loadLibrary,           unloadLibrary, createWindow,          destroyWindow,
+             getWindowFlags, getWindowSizeInPixels, getResolver,   getInstanceExtensions, createSurface };
 }
 
 LLWindowSDLVulkanCreateInfo createInfo()
@@ -444,8 +463,9 @@ void window_sdl_vulkan_object::test<1>()
     ensure("the production operation table is complete",
            defaultLLWindowSDLVulkanOperations().mLoadLibrary && defaultLLWindowSDLVulkanOperations().mUnloadLibrary &&
                defaultLLWindowSDLVulkanOperations().mCreateWindow && defaultLLWindowSDLVulkanOperations().mDestroyWindow &&
-               defaultLLWindowSDLVulkanOperations().mGetWindowFlags && defaultLLWindowSDLVulkanOperations().mGetResolver &&
-               defaultLLWindowSDLVulkanOperations().mGetInstanceExtensions && defaultLLWindowSDLVulkanOperations().mCreateSurface);
+               defaultLLWindowSDLVulkanOperations().mGetWindowFlags && defaultLLWindowSDLVulkanOperations().mGetWindowSizeInPixels &&
+               defaultLLWindowSDLVulkanOperations().mGetResolver && defaultLLWindowSDLVulkanOperations().mGetInstanceExtensions &&
+               defaultLLWindowSDLVulkanOperations().mCreateSurface);
 }
 
 template<>
@@ -509,6 +529,14 @@ void window_sdl_vulkan_object::test<3>()
     auto missing_surface                     = acquireLLWindowSDLVulkan(info, 1, missing_surface_operation);
     ensureAcquireError("a missing SDL surface operation is rejected", missing_surface, LLWindowSDLVulkanAcquireCode::InvalidOperations);
     ensure_equals("a missing SDL surface operation is rejected before loading Vulkan", surface_operation_state.mEventCount,
+                  std::size_t{ 0 });
+
+    FakeState size_operation_state;
+    auto      missing_size_operation              = fakeOperations(size_operation_state);
+    missing_size_operation.mGetWindowSizeInPixels = nullptr;
+    auto missing_size                             = acquireLLWindowSDLVulkan(info, 1, missing_size_operation);
+    ensureAcquireError("a missing SDL drawable-size operation is rejected", missing_size, LLWindowSDLVulkanAcquireCode::InvalidOperations);
+    ensure_equals("a missing SDL drawable-size operation is rejected before loading Vulkan", size_operation_state.mEventCount,
                   std::size_t{ 0 });
 
     FakeState load_state;
@@ -942,6 +970,61 @@ void window_sdl_vulkan_object::test<12>()
     owner->reset();
     ensure_equals("post-allocation recovery destroys one surface", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("post-allocation recovery destroys one instance", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<13>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 101, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("swapchain-adapter fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainConfigurationGeneration();
+    ensure("swapchain configuration requires a live instance before querying drawable pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainConfigurationAcquireCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("swapchain-adapter fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mDrawableSizeSucceeds = false;
+    const auto failed_size      = owner->acquireSwapchainConfigurationGeneration();
+    ensure("an SDL drawable-size failure is mapped before parent acquisition",
+           failed_size && failed_size->mCode == VulkanSwapchainConfigurationAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 1);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = 0;
+    const auto zero_size        = owner->acquireSwapchainConfigurationGeneration();
+    ensure("a zero SDL drawable width is rejected",
+           zero_size && zero_size->mCode == VulkanSwapchainConfigurationAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 2);
+
+    state.mDrawableWidth       = 1600;
+    state.mDrawableHeight      = 900;
+    const auto missing_surface = owner->acquireSwapchainConfigurationGeneration();
+    ensure("valid SDL backing pixels are forwarded to the live instance parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainConfigurationAcquireCode::SurfaceNotLive &&
+               state.mDrawableSizeCalls == 3);
+
+    ensure("swapchain-adapter fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const auto missing_selection = owner->acquireSwapchainConfigurationGeneration();
+    ensure("the SDL adapter forwards current pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainConfigurationAcquireCode::PresentationDeviceNotLive &&
+               state.mDrawableSizeCalls == 4);
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
 } // namespace tut
