@@ -65,9 +65,10 @@ using window_graphics_api_test_group  = test_group<window_graphics_api_test>;
 using window_graphics_api_test_object = window_graphics_api_test_group::object;
 window_graphics_api_test_group window_graphics_api_tests("window graphics API");
 
+#if !defined(LL_VULKAN_SDL_WSI)
 template<>
 template<>
-void window_graphics_api_test_object::test<1>()
+void window_graphics_api_test_object::test<3>()
 {
     const std::size_t initial_instance_count = LLWindow::instanceCount();
 #if LL_SDL_WINDOW
@@ -97,10 +98,11 @@ void window_graphics_api_test_object::test<1>()
     ensure_equals("Vulkan rejection does not initialize an SDL subsystem", result_sdl_state.mInitialized, initial_sdl_state.mInitialized);
 #endif
 }
+#endif
 
 template<>
 template<>
-void window_graphics_api_test_object::test<2>()
+void window_graphics_api_test_object::test<1>()
 {
     const std::size_t initial_instance_count = LLWindow::instanceCount();
 #if LL_SDL_WINDOW
@@ -128,6 +130,44 @@ void window_graphics_api_test_object::test<2>()
     ensure("unknown selection does not change SDL's log callback",
            result_sdl_state.mLogOutput == initial_sdl_state.mLogOutput && result_sdl_state.mLogUserdata == initial_sdl_state.mLogUserdata);
     ensure_equals("unknown selection does not initialize an SDL subsystem", result_sdl_state.mInitialized, initial_sdl_state.mInitialized);
+#endif
+}
+
+template<>
+template<>
+void window_graphics_api_test_object::test<2>()
+{
+    const std::size_t initial_instance_count = LLWindow::instanceCount();
+#if LL_SDL_WINDOW
+    const SDLState initial_sdl_state = currentSDLState();
+#endif
+
+    LLWindow* window = LLWindowManager::createWindow(nullptr, "headless window", "llwindowgraphicsapi", 0, 0, 1, 1,
+                                                     LLWindow::GraphicsAPI::Headless);
+    ensure("a headless window is created", window != nullptr);
+    ensure("the headless selection is retained", window->getGraphicsAPI() == LLWindow::GraphicsAPI::Headless);
+    ensure("the headless window is tracked", LLWindowManager::isWindowValid(window));
+#if LL_SDL_WINDOW
+    LLWindow* second_window = LLWindowManager::createWindow(nullptr, "second headless window", "llwindowgraphicsapi", 0, 0, 1, 1,
+                                                            LLWindow::GraphicsAPI::Headless);
+    const bool second_rejected = second_window == nullptr;
+    const std::size_t count_after_second_request = LLWindow::instanceCount();
+    if (second_window && LLWindowManager::isWindowValid(second_window))
+    {
+        LLWindowManager::destroyWindow(second_window);
+    }
+    ensure("the process-global SDL path rejects a second live window", second_rejected);
+    ensure_equals("second-window rejection does not construct another LLWindow", count_after_second_request, initial_instance_count + 1);
+#endif
+    ensure("destroying the headless window succeeds", LLWindowManager::destroyWindow(window));
+
+    ensure_equals("headless teardown restores the LLWindow instance count", LLWindow::instanceCount(), initial_instance_count);
+    ensure("the destroyed headless window is no longer tracked", !LLWindowManager::isWindowValid(window));
+#if LL_SDL_WINDOW
+    const SDLState result_sdl_state = currentSDLState();
+    ensure("headless creation does not change SDL's log callback",
+           result_sdl_state.mLogOutput == initial_sdl_state.mLogOutput && result_sdl_state.mLogUserdata == initial_sdl_state.mLogUserdata);
+    ensure_equals("headless creation does not initialize an SDL subsystem", result_sdl_state.mInitialized, initial_sdl_state.mInitialized);
 #endif
 }
 

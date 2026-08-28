@@ -36,6 +36,8 @@
 #include "SDL3/SDL.h"
 #include "SDL3/SDL_endian.h"
 
+#include <memory>
+
 #ifdef LL_WAYLAND
 #include <wayland-client-protocol.h>
 #endif
@@ -46,6 +48,9 @@
 #endif
 
 class LLPreeditor;
+#if defined(LL_VULKAN_SDL_WSI)
+class LLWindowSDLVulkan;
+#endif
 
 class LLWindowSDL final : public LLWindow
 {
@@ -166,6 +171,11 @@ public:
 
     F32 getSystemUISize() override;
 
+#if defined(LL_VULKAN_SDL_WSI)
+    const LLWindowVulkanRequirements* getVulkanRequirements() const noexcept override;
+    bool isVulkanWindowGenerationCurrent(U64 generation) const noexcept override;
+#endif
+
     static std::vector<std::string> getDisplaysResolutionList();
 
 #if LL_DARWIN
@@ -178,7 +188,7 @@ public:
 protected:
     LLWindowSDL(LLWindowCallbacks *callbacks,
                 const std::string &title, const std::string& name, int x, int y, int width, int height, U32 flags,
-                bool fullscreen, bool clearBg, bool enable_vsync, bool use_gl,
+                bool fullscreen, bool clearBg, bool enable_vsync, GraphicsAPI graphics_api,
                 bool ignore_pixel_depth, U32 fsaa_samples);
 
     ~LLWindowSDL();
@@ -199,6 +209,11 @@ protected:
     bool createContext(int x, int y, int width, int height, int bits, bool fullscreen, bool enable_vsync);
     void destroyContext();
 
+#if defined(LL_VULKAN_SDL_WSI)
+    bool createVulkanWindow(int x, int y, int width, int height, bool fullscreen);
+    void destroyVulkanWindow() noexcept;
+#endif
+
     void setupFailure(const std::string &text, const std::string &caption, U32 type);
 
     bool SDLReallyCaptureInput(bool capture);
@@ -210,8 +225,12 @@ protected:
     U32 mGrabbyKeyFlags = 0;
     S32 mReallyCapturedCount = 0;
     SDL_Window *mWindow = nullptr;
-    SDL_GLContext mContext;
-    SDL_Cursor *mSDLCursors[UI_CURSOR_COUNT];
+    SDL_GLContext mContext = nullptr;
+    SDL_Cursor *mSDLCursors[UI_CURSOR_COUNT]{};
+
+#if defined(LL_VULKAN_SDL_WSI)
+    std::unique_ptr<LLWindowSDLVulkan> mVulkanWindow;
+#endif
 
     std::string mWindowTitle;
     F32 mNativeAspectRatio = 0.0f;

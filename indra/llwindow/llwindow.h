@@ -37,6 +37,7 @@
 class LLSplashScreen;
 class LLPreeditor;
 class LLWindowCallbacks;
+class LLWindowVulkanRequirements;
 
 // Result of an OS font-fallback query; empty mPath means no font was found.
 struct LLFontFallbackMatch
@@ -84,6 +85,9 @@ public:
     virtual void minimize() = 0;
     virtual void restore() = 0;
     bool getFullscreen()    { return mFullscreen; };
+    GraphicsAPI getGraphicsAPI() const noexcept { return mGraphicsAPI; }
+    virtual const LLWindowVulkanRequirements* getVulkanRequirements() const noexcept { return nullptr; }
+    virtual bool isVulkanWindowGenerationCurrent(U64) const noexcept { return false; }
     virtual bool getPosition(LLCoordScreen *position) = 0;
     virtual bool getSize(LLCoordScreen *size) = 0;
     virtual bool getSize(LLCoordWindow *size) = 0;
@@ -226,7 +230,7 @@ public:
 
     virtual void initWatchdog() {} // windows runs window as a thread and it needs a watchdog
 protected:
-    LLWindow(LLWindowCallbacks* callbacks, bool fullscreen, U32 flags);
+    LLWindow(LLWindowCallbacks* callbacks, bool fullscreen, U32 flags, GraphicsAPI graphics_api = GraphicsAPI::OpenGL);
     virtual ~LLWindow();
     // Defaults to true
     virtual bool isValid();
@@ -238,6 +242,7 @@ protected:
 
 protected:
     LLWindowCallbacks*  mCallbacks;
+    GraphicsAPI         mGraphicsAPI;
 
     bool        mPostQuit;      // should this window post a quit message when destroyed?
     bool        mFullscreen;

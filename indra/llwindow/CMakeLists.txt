@@ -21,6 +21,10 @@ include(ViewerMiscLibs)
 include(GLM)
 include(SDL3)
 
+if (LL_VULKAN_SDL_WSI AND NOT USE_SDL_WINDOW)
+  message(FATAL_ERROR "LL_VULKAN_SDL_WSI requires the Linux SDL window path")
+endif ()
+
 set(llwindow_SOURCE_FILES
     llcursortypes.cpp
     llkeyboard.cpp
@@ -28,6 +32,7 @@ set(llwindow_SOURCE_FILES
     llwindowheadless.cpp
     llwindowcallbacks.cpp
     llwindow.cpp
+    llwindowvulkanrequirements.cpp
     )
 
 set(llwindow_HEADER_FILES
@@ -38,6 +43,7 @@ set(llwindow_HEADER_FILES
     llkeyboardheadless.h
     llwindowheadless.h
     llwindowcallbacks.h
+    llwindowvulkanrequirements.h
     )
 
 set(viewer_SOURCE_FILES
@@ -108,6 +114,17 @@ set(llwindow_LINK_LIBRARIES
 if (USE_SDL_WINDOW)
   list(APPEND viewer_SOURCE_FILES ${linux_SOURCE_FILES})
   list(APPEND viewer_HEADER_FILES ${linux_HEADER_FILES})
+
+  if (LL_VULKAN_SDL_WSI)
+    if (NOT LINUX)
+      message(FATAL_ERROR "LL_VULKAN_SDL_WSI is supported only by the Linux SDL window path")
+    endif ()
+    if (NOT LL_TESTS OR NOT LL_VULKAN_RUNTIME_TEST)
+      message(FATAL_ERROR "LL_VULKAN_SDL_WSI requires LL_TESTS=ON and LL_VULKAN_RUNTIME_TEST=ON")
+    endif ()
+    list(APPEND viewer_SOURCE_FILES llwindowsdlvulkan.cpp)
+    list(APPEND viewer_HEADER_FILES llwindowsdlvulkan.h)
+  endif ()
 
   list(APPEND llwindow_LINK_LIBRARIES
        ll::SDL3
@@ -253,6 +270,10 @@ if (USE_SDL_WINDOW)
   target_compile_definitions( llwindow PUBLIC LL_SDL_WINDOW=1 )
 endif()
 
+if (LL_VULKAN_SDL_WSI)
+  target_compile_definitions(llwindow PUBLIC LL_VULKAN_SDL_WSI=1)
+endif ()
+
 if (USE_PRECOMPILED_HEADERS)
   target_precompile_headers(llwindow REUSE_FROM llprecompiled)
 endif ()
@@ -265,8 +286,27 @@ if (LL_TESTS)
   include(LLAddBuildTest)
   set_source_files_properties(
     tests/llwindowgraphicsapi_test.cpp
+    tests/llwindowvulkanrequirements_test.cpp
     PROPERTIES
     SKIP_PRECOMPILE_HEADERS TRUE
   )
   LL_ADD_INTEGRATION_TEST(llwindowgraphicsapi "" "llwindow;llcommon")
+  LL_ADD_INTEGRATION_TEST(llwindowvulkanrequirements "" "llwindow;llcommon")
+
+  if (LL_VULKAN_SDL_WSI)
+    set_source_files_properties(
+      tests/llwindowsdlvulkan_test.cpp
+      tests/llwindowvulkansdlwsi_test.cpp
+      PROPERTIES
+      SKIP_PRECOMPILE_HEADERS TRUE
+    )
+    LL_ADD_INTEGRATION_TEST(llwindowsdlvulkan "" "llwindow;llcommon")
+    LL_ADD_INTEGRATION_TEST(
+      llwindowvulkansdlwsi
+      ""
+      "llwindow;llrendervulkanglobaldispatch;llcommon")
+    target_compile_definitions(
+      INTEGRATION_TEST_llwindowvulkansdlwsi
+      PRIVATE VK_NO_PROTOTYPES)
+  endif ()
 endif ()
