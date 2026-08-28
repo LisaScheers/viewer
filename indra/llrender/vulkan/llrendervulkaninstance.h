@@ -19,6 +19,7 @@
 #include "llrendervulkanglobaldispatch.h"
 #include "llrendervulkanlogicaldevice.h"
 #include "llrendervulkanphysicaldevice.h"
+#include "llrendervulkanswapchain.h"
 #include "llrendervulkanswapchainconfiguration.h"
 
 #include <vulkan/vulkan.h>
@@ -301,6 +302,46 @@ struct VulkanSwapchainConfigurationAcquireError
 
 using VulkanSwapchainConfigurationAcquireResult = std::optional<VulkanSwapchainConfigurationAcquireError>;
 
+struct VulkanSwapchainRequest
+{
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent, native-window, and drawable-geometry changes.
+    std::uint64_t               mNativeWindowGeneration = 0;
+    VkExtent2D                  mDrawableExtent{};
+    VulkanInstanceOwnerCheck    mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck mWindowGenerationCheck;
+};
+
+enum class VulkanSwapchainAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InvalidDrawableExtent,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    SwapchainConfigurationNotLive,
+    SwapchainAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    DrawableExtentMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanSwapchainAcquireError
+{
+    VulkanSwapchainAcquireCode                    mCode = VulkanSwapchainAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanSwapchainResolutionError> mResolutionError;
+
+    friend constexpr bool operator==(const VulkanSwapchainAcquireError&, const VulkanSwapchainAcquireError&) = default;
+};
+
+using VulkanSwapchainAcquireResult = std::optional<VulkanSwapchainAcquireError>;
+
 // This generation owns the Vulkan objects but borrows the loader behind the
 // originating window's resolver. It must be reset before that window destroys
 // its requirements generation or releases its loader references.
@@ -358,12 +399,18 @@ public:
     VkSurfaceTransformFlagBitsKHR     swapchainPreTransform() const noexcept;
     VkCompositeAlphaFlagBitsKHR       swapchainCompositeAlpha() const noexcept;
     VkBool32                          swapchainClipped() const noexcept;
+    bool                              hasSwapchainGeneration() const noexcept;
+    VkSwapchainKHR                    swapchain() const noexcept;
+    VkDevice                          swapchainDevice() const noexcept;
+    VkSurfaceKHR                      swapchainSurface() const noexcept;
 
     VulkanSurfaceAcquireResult                acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept;
     VulkanPresentationDeviceAcquireResult     acquirePresentationDeviceGeneration(const VulkanPresentationDeviceRequest& request) noexcept;
     VulkanLogicalDeviceAcquireResult          acquireLogicalDeviceGeneration(const VulkanLogicalDeviceRequest& request) noexcept;
     VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfigurationGeneration(
         const VulkanSwapchainConfigurationRequest& request) noexcept;
+    VulkanSwapchainAcquireResult acquireSwapchainGeneration(const VulkanSwapchainRequest& request) noexcept;
+    void                         resetSwapchainGeneration() noexcept;
     void resetSwapchainConfigurationGeneration() noexcept;
     void resetLogicalDeviceGeneration() noexcept;
     void resetPresentationDeviceGeneration() noexcept;
@@ -401,6 +448,7 @@ private:
     std::unique_ptr<VulkanPhysicalDeviceGeneration>         mPresentationDeviceGeneration;
     std::unique_ptr<VulkanLogicalDeviceGeneration>          mLogicalDeviceGeneration;
     std::unique_ptr<VulkanSwapchainConfigurationGeneration> mSwapchainConfigurationGeneration;
+    std::unique_ptr<VulkanSwapchainGeneration>              mSwapchainGeneration;
 };
 
 using VulkanInstanceAcquireResult = std::variant<VulkanInstanceAcquireError, VulkanInstanceGeneration>;
@@ -431,6 +479,10 @@ namespace VulkanInstanceDetail
     VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfiguration(VulkanInstanceGeneration&                  instance_generation,
                                                                             const VulkanSwapchainConfigurationRequest& request,
                                                                             AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    VulkanSwapchainAcquireResult acquireSwapchain(VulkanInstanceGeneration&     instance_generation,
+                                                  const VulkanSwapchainRequest& request,
+                                                  AllocationCheckpoint          allocation_checkpoint) noexcept;
 
 } // namespace VulkanInstanceDetail
 

@@ -176,6 +176,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool swapchain_format_supported       = false;
     bool swapchain_present_mode_exact     = false;
     bool swapchain_create_policy_exact    = false;
+    bool swapchain_acquired               = false;
+    bool swapchain_nonnull                = false;
+    bool swapchain_provenance_exact       = false;
+    bool swapchain_removed                = false;
     bool swapchain_configuration_removed  = false;
     bool surface_explicitly_reset         = false;
     bool surface_removed                  = false;
@@ -280,6 +284,12 @@ void window_vulkan_sdl_wsi_object::test<1>()
                     instance_generation->swapchainPreTransform() == capabilities.currentTransform &&
                     instance_generation->swapchainCompositeAlpha() == expectedCompositeAlpha(capabilities.supportedCompositeAlpha) &&
                     instance_generation->swapchainClipped() == VK_TRUE;
+                swapchain_acquired         = instance_generation->hasSwapchainGeneration();
+                swapchain_nonnull          = instance_generation->swapchain() != VK_NULL_HANDLE;
+                swapchain_provenance_exact = instance_generation->swapchainDevice() != VK_NULL_HANDLE &&
+                                             instance_generation->swapchainDevice() == instance_generation->logicalDevice() &&
+                                             instance_generation->swapchainSurface() != VK_NULL_HANDLE &&
+                                             instance_generation->swapchainSurface() == instance_generation->surface();
 
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
                 const auto& enabled_extensions  = instance_generation->enabledExtensions();
@@ -319,6 +329,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
         logical_device_removed = !owned_instance_generation->hasLogicalDeviceGeneration() &&
                                  owned_instance_generation->logicalDevice() == VK_NULL_HANDLE &&
                                  owned_instance_generation->presentationQueue() == VK_NULL_HANDLE;
+        swapchain_removed = !owned_instance_generation->hasSwapchainGeneration() &&
+                            owned_instance_generation->swapchain() == VK_NULL_HANDLE &&
+                            owned_instance_generation->swapchainDevice() == VK_NULL_HANDLE &&
+                            owned_instance_generation->swapchainSurface() == VK_NULL_HANDLE;
         swapchain_configuration_removed = !owned_instance_generation->hasSwapchainConfigurationGeneration();
         surface_parent_still_live = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == owned_instance_generation &&
                                     owned_instance_generation->instance() != VK_NULL_HANDLE;
@@ -366,7 +380,11 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the selected surface format follows the bounded UNORM nonlinear-sRGB policy", swapchain_format_supported);
     ensure("the selected present mode is FIFO", swapchain_present_mode_exact);
     ensure("the selected image count, extent, transform, alpha, usage, and sharing policy are supported", swapchain_create_policy_exact);
+    ensure("the SDL Vulkan branch automatically owns one real swapchain", swapchain_acquired);
+    ensure("the automatically created swapchain handle is non-null", swapchain_nonnull);
+    ensure("the swapchain retains the exact logical-device and surface provenance", swapchain_provenance_exact);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
+    ensure("surface reset first removes the swapchain generation", swapchain_removed);
     ensure("explicit reset removes only the Vulkan surface child", surface_removed);
     ensure("surface reset first removes the presentation-device child", presentation_device_removed);
     ensure("surface reset first removes the logical-device child and borrowed queue", logical_device_removed);

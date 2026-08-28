@@ -55,7 +55,10 @@ enum class MissingCommand : std::uint8_t
     GetDeviceQueue,
     GetSurfaceCapabilities,
     GetSurfaceFormats,
-    GetSurfacePresentModes
+    GetSurfacePresentModes,
+    GetDeviceProcAddr,
+    CreateSwapchain,
+    DestroySwapchain
 };
 
 enum class Event : std::uint8_t
@@ -65,6 +68,8 @@ enum class Event : std::uint8_t
     CreateSurface,
     CreateDevice,
     GetDeviceQueue,
+    CreateSwapchain,
+    DestroySwapchain,
     DestroyDevice,
     DestroySurface,
     DestroyDebugMessenger,
@@ -134,6 +139,7 @@ struct FakeState
     VkSurfaceKHR                         mSurface        = fakeHandle<VkSurfaceKHR>(0x3333);
     VkDevice                             mDevice         = fakeHandle<VkDevice>(0x5555);
     VkQueue                              mQueue          = fakeHandle<VkQueue>(0x6666);
+    VkSwapchainKHR                       mSwapchain      = fakeHandle<VkSwapchainKHR>(0x7777);
     std::vector<Event>                   mEvents;
     std::vector<std::string>             mEnabledExtensions;
     std::vector<std::string>             mEnabledLayers;
@@ -164,6 +170,7 @@ struct FakeState
     bool                            mObservedPresentationAtSurfaceDestroy  = false;
     bool                            mObservedLogicalAtSurfaceDestroy       = false;
     bool                            mObservedConfigurationAtSurfaceDestroy = false;
+    bool                            mObservedSwapchainAtSurfaceDestroy     = false;
 
     std::size_t      mPhysicalCountCalls         = 0;
     std::size_t      mPhysicalListCalls          = 0;
@@ -190,11 +197,34 @@ struct FakeState
     bool                            mObservedPresentationAtDeviceDestroy  = false;
     bool                            mObservedSurfaceAtDeviceDestroy       = false;
     bool                            mObservedConfigurationAtDeviceDestroy = false;
+    bool                            mObservedSwapchainAtDeviceDestroy     = false;
     std::size_t                     mSwapchainCapabilitiesCalls           = 0;
     std::size_t                     mSwapchainFormatCountCalls            = 0;
     std::size_t                     mSwapchainFormatListCalls             = 0;
     std::size_t                     mSwapchainPresentModeCountCalls       = 0;
     std::size_t                     mSwapchainPresentModeListCalls        = 0;
+
+    VkResult                        mSwapchainCreateResult               = VK_SUCCESS;
+    bool                            mNullSwapchain                       = false;
+    bool                            mPoisonSwapchainOutput               = false;
+    std::size_t                     mGetDeviceProcAddrResolutionCalls    = 0;
+    VkInstance                      mGetDeviceProcAddrResolutionInstance = VK_NULL_HANDLE;
+    std::size_t                     mDeviceProcAddrCalls                 = 0;
+    VkDevice                        mDeviceProcAddrDevice                = VK_NULL_HANDLE;
+    std::vector<std::string>        mDeviceCommandLookups;
+    std::size_t                     mCreateSwapchainCalls  = 0;
+    VkDevice                        mCreateSwapchainDevice = VK_NULL_HANDLE;
+    VkSwapchainCreateInfoKHR        mSwapchainCreateInfo{};
+    const VkAllocationCallbacks*    mCreateSwapchainAllocationCallbacks      = nullptr;
+    std::size_t                     mDestroySwapchainCalls                   = 0;
+    VkDevice                        mDestroySwapchainDevice                  = VK_NULL_HANDLE;
+    VkSwapchainKHR                  mDestroyedSwapchain                      = VK_NULL_HANDLE;
+    const VkAllocationCallbacks*    mDestroySwapchainAllocationCallbacks     = nullptr;
+    const VulkanInstanceGeneration* mSwapchainDestroyOwner                   = nullptr;
+    bool                            mSwapchainDestroyObservationMade         = false;
+    bool                            mObservedConfigurationAtSwapchainDestroy = false;
+    bool                            mObservedLogicalAtSwapchainDestroy       = false;
+    bool                            mObservedSurfaceAtSwapchainDestroy       = false;
 
     bool        mGenerationCurrent   = true;
     std::size_t mGenerationChecks    = 0;
@@ -418,6 +448,7 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroySurface(VkInstance                   insta
         gFakeState->mObservedPresentationAtSurfaceDestroy  = gFakeState->mSurfaceDestroyOwner->hasPresentationDeviceGeneration();
         gFakeState->mObservedLogicalAtSurfaceDestroy       = gFakeState->mSurfaceDestroyOwner->hasLogicalDeviceGeneration();
         gFakeState->mObservedConfigurationAtSurfaceDestroy = gFakeState->mSurfaceDestroyOwner->hasSwapchainConfigurationGeneration();
+        gFakeState->mObservedSwapchainAtSurfaceDestroy     = gFakeState->mSurfaceDestroyOwner->hasSwapchainGeneration();
     }
     gFakeState->mEvents.push_back(Event::DestroySurface);
 }
@@ -562,6 +593,7 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyDevice(VkDevice device, const VkAllocation
         gFakeState->mObservedPresentationAtDeviceDestroy  = gFakeState->mDeviceDestroyOwner->hasPresentationDeviceGeneration();
         gFakeState->mObservedSurfaceAtDeviceDestroy       = gFakeState->mDeviceDestroyOwner->hasSurfaceGeneration();
         gFakeState->mObservedConfigurationAtDeviceDestroy = gFakeState->mDeviceDestroyOwner->hasSwapchainConfigurationGeneration();
+        gFakeState->mObservedSwapchainAtDeviceDestroy     = gFakeState->mDeviceDestroyOwner->hasSwapchainGeneration();
     }
     gFakeState->mEvents.push_back(Event::DestroyDevice);
 }
@@ -643,6 +675,71 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeGetPhysicalDeviceSurfacePresentModes(VkPhysic
     return written == gFakeState->mSwapchainPresentModes.size() ? VK_SUCCESS : VK_INCOMPLETE;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSwapchain(VkDevice                        device,
+                                                   const VkSwapchainCreateInfoKHR* create_info,
+                                                   const VkAllocationCallbacks*    allocation_callbacks,
+                                                   VkSwapchainKHR*                 swapchain) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !create_info || !swapchain)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    ++gFakeState->mCreateSwapchainCalls;
+    gFakeState->mCreateSwapchainDevice              = device;
+    gFakeState->mSwapchainCreateInfo                = *create_info;
+    gFakeState->mCreateSwapchainAllocationCallbacks = allocation_callbacks;
+    gFakeState->mEvents.push_back(Event::CreateSwapchain);
+
+    const bool failed = gFakeState->mSwapchainCreateResult != VK_SUCCESS;
+    *swapchain = gFakeState->mNullSwapchain || (failed && !gFakeState->mPoisonSwapchainOutput) ? VK_NULL_HANDLE : gFakeState->mSwapchain;
+    return gFakeState->mSwapchainCreateResult;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroySwapchain(VkDevice                     device,
+                                                VkSwapchainKHR               swapchain,
+                                                const VkAllocationCallbacks* allocation_callbacks) noexcept
+{
+    if (!gFakeState)
+    {
+        return;
+    }
+
+    ++gFakeState->mDestroySwapchainCalls;
+    gFakeState->mDestroySwapchainDevice              = device;
+    gFakeState->mDestroyedSwapchain                  = swapchain;
+    gFakeState->mDestroySwapchainAllocationCallbacks = allocation_callbacks;
+    if (gFakeState->mSwapchainDestroyOwner)
+    {
+        gFakeState->mSwapchainDestroyObservationMade         = true;
+        gFakeState->mObservedConfigurationAtSwapchainDestroy = gFakeState->mSwapchainDestroyOwner->hasSwapchainConfigurationGeneration();
+        gFakeState->mObservedLogicalAtSwapchainDestroy       = gFakeState->mSwapchainDestroyOwner->hasLogicalDeviceGeneration();
+        gFakeState->mObservedSurfaceAtSwapchainDestroy       = gFakeState->mSwapchainDestroyOwner->hasSurfaceGeneration();
+    }
+    gFakeState->mEvents.push_back(Event::DestroySwapchain);
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !name)
+    {
+        return nullptr;
+    }
+
+    ++gFakeState->mDeviceProcAddrCalls;
+    gFakeState->mDeviceProcAddrDevice = device;
+    gFakeState->mDeviceCommandLookups.emplace_back(name);
+    if (std::strcmp(name, "vkCreateSwapchainKHR") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CreateSwapchain ? nullptr : eraseFunctionType(fakeCreateSwapchain);
+    }
+    if (std::strcmp(name, "vkDestroySwapchainKHR") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::DestroySwapchain ? nullptr : eraseFunctionType(fakeDestroySwapchain);
+    }
+    return nullptr;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance instance, const char* name) noexcept
 {
     if (!gFakeState || !name)
@@ -671,6 +768,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
     if (instance != gFakeState->mInstance)
     {
         return nullptr;
+    }
+    if (std::strcmp(name, "vkGetDeviceProcAddr") == 0)
+    {
+        ++gFakeState->mGetDeviceProcAddrResolutionCalls;
+        gFakeState->mGetDeviceProcAddrResolutionInstance = instance;
+        return gFakeState->mMissing == MissingCommand::GetDeviceProcAddr ? nullptr : eraseFunctionType(fakeGetDeviceProcAddr);
     }
     if (std::strcmp(name, "vkDestroyInstance") == 0)
     {
@@ -833,6 +936,14 @@ VulkanSwapchainConfigurationRequest makeSwapchainConfigurationRequest(FakeState&
     return { 42, drawable_extent, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
 }
 
+VulkanSwapchainRequest makeSwapchainRequest(FakeState&                state,
+                                            VulkanInstanceGeneration& owner,
+                                            VkExtent2D                drawable_extent = { 800, 600 }) noexcept
+{
+    state.mExpectedInstanceOwner = &owner;
+    return { 42, drawable_extent, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
+}
+
 const VulkanInstanceAcquireError& requireError(const VulkanInstanceAcquireResult& result)
 {
     const auto* error = std::get_if<VulkanInstanceAcquireError>(&result);
@@ -895,6 +1006,17 @@ void ensureSwapchainConfigurationCode(const VulkanSwapchainConfigurationAcquireR
     tut::ensure("the exact swapchain-configuration error is reported", requireSwapchainConfigurationError(result).mCode == code);
 }
 
+const VulkanSwapchainAcquireError& requireSwapchainError(const VulkanSwapchainAcquireResult& result)
+{
+    tut::ensure("swapchain acquisition returns an error", result.has_value());
+    return *result;
+}
+
+void ensureSwapchainCode(const VulkanSwapchainAcquireResult& result, VulkanSwapchainAcquireCode code)
+{
+    tut::ensure("the exact swapchain error is reported", requireSwapchainError(result).mCode == code);
+}
+
 void acquireSelectionChain(FakeState& state, VulkanInstanceGeneration& owner)
 {
     tut::ensure("the surface fixture succeeds", !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
@@ -906,6 +1028,13 @@ void acquireLogicalChain(FakeState& state, VulkanInstanceGeneration& owner)
 {
     acquireSelectionChain(state, owner);
     tut::ensure("the logical-device fixture succeeds", !owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner)));
+}
+
+void acquireConfigurationChain(FakeState& state, VulkanInstanceGeneration& owner, VkExtent2D drawable_extent = { 800, 600 })
+{
+    acquireLogicalChain(state, owner);
+    tut::ensure("the swapchain-configuration fixture succeeds",
+                !owner.acquireSwapchainConfigurationGeneration(makeSwapchainConfigurationRequest(state, owner, drawable_extent)));
 }
 
 void failAllocation()
@@ -2366,6 +2495,274 @@ void render_vulkan_instance_test_object::test<38>()
     ensure("full reset preserves device-before-surface-before-instance teardown",
            state.mEvents == std::vector<Event>{ Event::CreateInstance, Event::CreateSurface, Event::CreateDevice, Event::GetDeviceQueue,
                                                 Event::DestroyDevice, Event::DestroySurface, Event::DestroyInstance });
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<39>()
+{
+    static_assert(std::is_same_v<VulkanSwapchainAcquireResult, std::optional<VulkanSwapchainAcquireError>>);
+    static_assert(
+        noexcept(std::declval<VulkanInstanceGeneration&>().acquireSwapchainGeneration(std::declval<const VulkanSwapchainRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().resetSwapchainGeneration()));
+
+    const VulkanSwapchainAcquireError value{ VulkanSwapchainAcquireCode::ResolutionFailure,
+                                             VulkanSwapchainResolutionError{ VulkanSwapchainResolutionCode::MissingRequiredCommand,
+                                                                             VulkanSwapchainCommand::DestroySwapchain } };
+    ensure("identical swapchain errors compare equal", value == value);
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("an owner without a swapchain exposes neutral observations",
+           !owner.hasSwapchainGeneration() && owner.swapchain() == VK_NULL_HANDLE && owner.swapchainDevice() == VK_NULL_HANDLE &&
+               owner.swapchainSurface() == VK_NULL_HANDLE);
+
+    VulkanSwapchainRequest request = makeSwapchainRequest(state, owner);
+    request.mInstanceOwnerCheck    = {};
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(request), VulkanSwapchainAcquireCode::InvalidInstanceOwnerCheck);
+    request                        = makeSwapchainRequest(state, owner);
+    request.mWindowGenerationCheck = {};
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(request), VulkanSwapchainAcquireCode::InvalidWindowGenerationCheck);
+    request                         = makeSwapchainRequest(state, owner);
+    request.mNativeWindowGeneration = 0;
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(request), VulkanSwapchainAcquireCode::InvalidNativeWindowGeneration);
+    request                 = makeSwapchainRequest(state, owner);
+    request.mDrawableExtent = { 800, 0 };
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(request), VulkanSwapchainAcquireCode::InvalidDrawableExtent);
+
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner)), VulkanSwapchainAcquireCode::SurfaceNotLive);
+    ensure("surface acquisition succeeds for swapchain preflight", !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner)),
+                        VulkanSwapchainAcquireCode::PresentationDeviceNotLive);
+    ensure("selection succeeds for swapchain preflight",
+           !owner.acquirePresentationDeviceGeneration(makePresentationDeviceRequest(state, owner)));
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner)),
+                        VulkanSwapchainAcquireCode::LogicalDeviceNotLive);
+    ensure("logical device succeeds for swapchain preflight",
+           !owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner)));
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner)),
+                        VulkanSwapchainAcquireCode::SwapchainConfigurationNotLive);
+    ensure("configuration succeeds for swapchain preflight",
+           !owner.acquireSwapchainConfigurationGeneration(makeSwapchainConfigurationRequest(state, owner)));
+
+    request                         = makeSwapchainRequest(state, owner);
+    request.mNativeWindowGeneration = 41;
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(request), VulkanSwapchainAcquireCode::NativeWindowGenerationMismatch);
+    request                 = makeSwapchainRequest(state, owner);
+    request.mDrawableExtent = { 801, 600 };
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(request), VulkanSwapchainAcquireCode::DrawableExtentMismatch);
+
+    request                     = makeSwapchainRequest(state, owner);
+    state.mInstanceOwnerCurrent = false;
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(request), VulkanSwapchainAcquireCode::StaleInstanceOwner);
+    state.mInstanceOwnerCurrent = true;
+    state.mSurfaceWindowCurrent = false;
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(request), VulkanSwapchainAcquireCode::StaleWindowGeneration);
+    state.mSurfaceWindowCurrent = true;
+    ensure("every stale or malformed preflight fails before device dispatch and creation",
+           state.mGetDeviceProcAddrResolutionCalls == 0 && state.mCreateSwapchainCalls == 0 && state.mDestroySwapchainCalls == 0 &&
+               !owner.hasSwapchainGeneration());
+
+    owner.reset();
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner)), VulkanSwapchainAcquireCode::InstanceNotLive);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<40>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireConfigurationChain(state, owner, { 1280, 720 });
+    const VulkanSwapchainRequest request = makeSwapchainRequest(state, owner, { 1280, 720 });
+
+    constexpr std::array missing_commands{ std::pair{ MissingCommand::GetDeviceProcAddr, VulkanSwapchainCommand::GetDeviceProcAddr },
+                                           std::pair{ MissingCommand::CreateSwapchain, VulkanSwapchainCommand::CreateSwapchain },
+                                           std::pair{ MissingCommand::DestroySwapchain, VulkanSwapchainCommand::DestroySwapchain } };
+    for (const auto& [missing, command] : missing_commands)
+    {
+        state.mMissing                            = missing;
+        const VulkanSwapchainAcquireResult result = owner.acquireSwapchainGeneration(request);
+        const VulkanSwapchainAcquireError& error  = requireSwapchainError(result);
+        ensure("the parent preserves exact nested swapchain dispatch identity",
+               error.mCode == VulkanSwapchainAcquireCode::ResolutionFailure && error.mResolutionError &&
+                   error.mResolutionError->mCode == VulkanSwapchainResolutionCode::MissingRequiredCommand &&
+                   error.mResolutionError->mCommand == command);
+        ensure("a missing swapchain command publishes and creates nothing",
+               !owner.hasSwapchainGeneration() && state.mCreateSwapchainCalls == 0 && state.mDestroySwapchainCalls == 0);
+    }
+
+    state.mMissing                                   = MissingCommand::None;
+    state.mSwapchainCreateResult                     = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    state.mPoisonSwapchainOutput                     = true;
+    const VulkanSwapchainAcquireResult failed_create = owner.acquireSwapchainGeneration(request);
+    const VulkanSwapchainAcquireError& create_error  = requireSwapchainError(failed_create);
+    ensure("the parent preserves exact swapchain creation failure and VkResult",
+           create_error.mCode == VulkanSwapchainAcquireCode::ResolutionFailure && create_error.mResolutionError &&
+               create_error.mResolutionError->mCode == VulkanSwapchainResolutionCode::SwapchainCreationFailure &&
+               create_error.mResolutionError->mCommand == VulkanSwapchainCommand::CreateSwapchain &&
+               create_error.mResolutionError->mResult == VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    ensure("an undefined failed output is neither published nor destroyed",
+           !owner.hasSwapchainGeneration() && state.mCreateSwapchainCalls == 1 && state.mDestroySwapchainCalls == 0);
+
+    state.mSwapchainCreateResult                   = VK_SUCCESS;
+    state.mPoisonSwapchainOutput                   = false;
+    state.mNullSwapchain                           = true;
+    const VulkanSwapchainAcquireResult null_create = owner.acquireSwapchainGeneration(request);
+    const VulkanSwapchainAcquireError& null_error  = requireSwapchainError(null_create);
+    ensure("a null successful output is propagated exactly without a destruction obligation",
+           null_error.mCode == VulkanSwapchainAcquireCode::ResolutionFailure && null_error.mResolutionError &&
+               null_error.mResolutionError->mCode == VulkanSwapchainResolutionCode::NullSwapchainOnSuccess &&
+               null_error.mResolutionError->mCommand == VulkanSwapchainCommand::CreateSwapchain && state.mDestroySwapchainCalls == 0 &&
+               !owner.hasSwapchainGeneration());
+
+    state.mNullSwapchain                       = false;
+    state.mGetDeviceProcAddrResolutionCalls    = 0;
+    state.mGetDeviceProcAddrResolutionInstance = VK_NULL_HANDLE;
+    state.mDeviceProcAddrCalls                 = 0;
+    state.mDeviceProcAddrDevice                = VK_NULL_HANDLE;
+    state.mDeviceCommandLookups.clear();
+    state.mCreateSwapchainCalls = 0;
+    ensure("the exact parent chain publishes one swapchain", !owner.acquireSwapchainGeneration(request));
+    ensure("the parent exposes the exact swapchain provenance",
+           owner.hasSwapchainGeneration() && owner.swapchain() == state.mSwapchain && owner.swapchainDevice() == state.mDevice &&
+               owner.swapchainSurface() == state.mSurface);
+    ensure("swapchain dispatch resolves through the exact instance and logical device",
+           state.mGetDeviceProcAddrResolutionCalls == 1 && state.mGetDeviceProcAddrResolutionInstance == state.mInstance &&
+               state.mDeviceProcAddrCalls == 2 && state.mDeviceProcAddrDevice == state.mDevice &&
+               state.mDeviceCommandLookups == std::vector<std::string>{ "vkCreateSwapchainKHR", "vkDestroySwapchainKHR" });
+
+    const VkSwapchainCreateInfoKHR& create_info = state.mSwapchainCreateInfo;
+    ensure("the published swapchain consumed the exact Stage 40 create contract",
+           state.mCreateSwapchainCalls == 1 && state.mCreateSwapchainDevice == state.mDevice &&
+               state.mCreateSwapchainAllocationCallbacks == nullptr && create_info.sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR &&
+               create_info.pNext == nullptr && create_info.flags == 0 && create_info.surface == state.mSurface &&
+               create_info.minImageCount == owner.swapchainImageCount() &&
+               create_info.imageFormat == owner.swapchainSurfaceFormat().format &&
+               create_info.imageColorSpace == owner.swapchainSurfaceFormat().colorSpace &&
+               create_info.imageExtent.width == owner.swapchainImageExtent().width &&
+               create_info.imageExtent.height == owner.swapchainImageExtent().height &&
+               create_info.imageArrayLayers == owner.swapchainImageArrayLayers() && create_info.imageUsage == owner.swapchainImageUsage() &&
+               create_info.imageSharingMode == owner.swapchainImageSharingMode() && create_info.queueFamilyIndexCount == 0 &&
+               create_info.pQueueFamilyIndices == nullptr && create_info.preTransform == owner.swapchainPreTransform() &&
+               create_info.compositeAlpha == owner.swapchainCompositeAlpha() && create_info.presentMode == owner.swapchainPresentMode() &&
+               create_info.clipped == owner.swapchainClipped() && create_info.oldSwapchain == VK_NULL_HANDLE);
+
+    ensureSwapchainCode(owner.acquireSwapchainGeneration(request), VulkanSwapchainAcquireCode::SwapchainAlreadyOwned);
+    ensure_equals("duplicate acquisition performs no second create", state.mCreateSwapchainCalls, std::size_t{ 1 });
+
+    state.mSwapchainDestroyOwner = &owner;
+    owner.resetSwapchainGeneration();
+    ensure("explicit swapchain reset preserves its configuration and all older parents",
+           !owner.hasSwapchainGeneration() && owner.swapchain() == VK_NULL_HANDLE && owner.hasSwapchainConfigurationGeneration() &&
+               owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration() && state.mDestroySwapchainCalls == 1 &&
+               state.mDestroySwapchainDevice == state.mDevice && state.mDestroyedSwapchain == state.mSwapchain &&
+               state.mDestroySwapchainAllocationCallbacks == nullptr && state.mSwapchainDestroyObservationMade &&
+               state.mObservedConfigurationAtSwapchainDestroy && state.mObservedLogicalAtSwapchainDestroy &&
+               state.mObservedSurfaceAtSwapchainDestroy);
+    owner.resetSwapchainGeneration();
+    ensure_equals("a second explicit swapchain reset is idempotent", state.mDestroySwapchainCalls, std::size_t{ 1 });
+    ensure("the same parent chain can reacquire after explicit swapchain reset", !owner.acquireSwapchainGeneration(request));
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<41>()
+{
+    for (bool fail_instance_owner : { true, false })
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireConfigurationChain(state, owner);
+
+        state.mInstanceOwnerChecks                = 0;
+        state.mSurfaceWindowChecks                = 0;
+        state.mFailInstanceOwnerCheck             = fail_instance_owner ? 2 : 0;
+        state.mFailSurfaceWindowCheck             = fail_instance_owner ? 0 : 2;
+        const VulkanSwapchainAcquireResult result = owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner));
+        ensureSwapchainCode(result, fail_instance_owner ? VulkanSwapchainAcquireCode::StaleInstanceOwner
+                                                        : VulkanSwapchainAcquireCode::StaleWindowGeneration);
+        ensure("swapchain freshness is reauthenticated after native creation",
+               state.mCreateSwapchainCalls == 1 && state.mDestroySwapchainCalls == 1 && state.mInstanceOwnerChecks == 2 &&
+                   state.mSurfaceWindowChecks == (fail_instance_owner ? 1 : 2));
+        ensure("stale publication rolls back the pending swapchain and preserves every parent",
+               !owner.hasSwapchainGeneration() && owner.hasSwapchainConfigurationGeneration() && owner.hasLogicalDeviceGeneration() &&
+                   owner.hasSurfaceGeneration() && state.mDestroyDeviceCalls == 0 && state.mDestroySurfaceCalls == 0);
+
+        state.mFailInstanceOwnerCheck = 0;
+        state.mFailSurfaceWindowCheck = 0;
+        ensure("current parents retry after stale swapchain publication",
+               !owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner)) && owner.hasSwapchainGeneration() &&
+                   state.mCreateSwapchainCalls == 2 && state.mDestroySwapchainCalls == 1);
+        owner.resetSwapchainGeneration();
+        ensure_equals("the retried owner destroys its swapchain exactly once", state.mDestroySwapchainCalls, std::size_t{ 2 });
+    }
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireConfigurationChain(state, owner);
+    const VulkanSwapchainRequest request = makeSwapchainRequest(state, owner);
+
+    const VulkanSwapchainAcquireResult result = VulkanInstanceDetail::acquireSwapchain(owner, request, failAllocation);
+    ensureSwapchainCode(result, VulkanSwapchainAcquireCode::AllocationFailure);
+    ensure("parent allocation failure rolls back the created swapchain and preserves every parent",
+           state.mCreateSwapchainCalls == 1 && state.mDestroySwapchainCalls == 1 && !owner.hasSwapchainGeneration() &&
+               owner.hasSwapchainConfigurationGeneration() && owner.hasLogicalDeviceGeneration() &&
+               owner.logicalDevice() == state.mDevice && state.mDestroyDeviceCalls == 0);
+    ensure("the live chain retries after swapchain allocation failure",
+           !owner.acquireSwapchainGeneration(request) && owner.hasSwapchainGeneration() && state.mCreateSwapchainCalls == 2 &&
+               state.mDestroySwapchainCalls == 1);
+    owner.resetSwapchainGeneration();
+    ensure_equals("the allocation retry owns one independent destruction", state.mDestroySwapchainCalls, std::size_t{ 2 });
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<42>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration first = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireConfigurationChain(state, first);
+    ensure("swapchain acquisition succeeds before parent move", !first.acquireSwapchainGeneration(makeSwapchainRequest(state, first)));
+
+    VulkanInstanceGeneration moved(std::move(first));
+    ensure("the parent move transfers the complete swapchain chain",
+           !first.hasSwapchainGeneration() && first.swapchain() == VK_NULL_HANDLE && !first.hasSwapchainConfigurationGeneration() &&
+               !first.hasLogicalDeviceGeneration() && moved.hasSwapchainGeneration() && moved.swapchain() == state.mSwapchain &&
+               moved.swapchainDevice() == state.mDevice && moved.swapchainSurface() == state.mSurface &&
+               moved.hasSwapchainConfigurationGeneration() && moved.hasLogicalDeviceGeneration());
+    first.reset();
+    ensure("resetting the moved-from parent destroys no Vulkan object",
+           state.mDestroySwapchainCalls == 0 && state.mDestroyDeviceCalls == 0 && state.mDestroySurfaceCalls == 0 &&
+               state.mDestroyInstanceCalls == 0);
+
+    state.mSwapchainDestroyOwner = &moved;
+    state.mDeviceDestroyOwner    = &moved;
+    state.mSurfaceDestroyOwner   = &moved;
+    moved.reset();
+    ensure("swapchain destruction observes its configuration, device, and surface parents still live",
+           state.mSwapchainDestroyObservationMade && state.mObservedConfigurationAtSwapchainDestroy &&
+               state.mObservedLogicalAtSwapchainDestroy && state.mObservedSurfaceAtSwapchainDestroy);
+    ensure("device destruction observes swapchain and configuration already removed while older parents remain live",
+           state.mDeviceDestroyObservationMade && !state.mObservedSwapchainAtDeviceDestroy &&
+               !state.mObservedConfigurationAtDeviceDestroy && state.mObservedPresentationAtDeviceDestroy &&
+               state.mObservedSurfaceAtDeviceDestroy);
+    ensure("surface destruction observes every younger child already removed",
+           state.mSurfaceDestroyObservationMade && !state.mObservedSwapchainAtSurfaceDestroy &&
+               !state.mObservedConfigurationAtSurfaceDestroy && !state.mObservedLogicalAtSurfaceDestroy &&
+               !state.mObservedPresentationAtSurfaceDestroy);
+    ensure("full reset destroys swapchain before device, surface, and instance exactly once",
+           state.mEvents == std::vector<Event>{ Event::CreateInstance, Event::CreateSurface, Event::CreateDevice, Event::GetDeviceQueue,
+                                                Event::CreateSwapchain, Event::DestroySwapchain, Event::DestroyDevice,
+                                                Event::DestroySurface, Event::DestroyInstance } &&
+               state.mDestroySwapchainCalls == 1 && state.mDestroyDeviceCalls == 1 && state.mDestroySurfaceCalls == 1 &&
+               state.mDestroyInstanceCalls == 1 && state.mDestroySwapchainDevice == state.mDevice &&
+               state.mDestroyedSwapchain == state.mSwapchain && state.mDestroySwapchainAllocationCallbacks == nullptr);
 }
 
 } // namespace tut

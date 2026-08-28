@@ -150,7 +150,9 @@ public:
     LLRenderVulkan::VulkanPresentationDeviceAcquireResult     acquirePresentationDeviceGeneration() noexcept;
     LLRenderVulkan::VulkanLogicalDeviceAcquireResult          acquireLogicalDeviceGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfigurationGeneration() noexcept;
+    LLRenderVulkan::VulkanSwapchainAcquireResult              acquireSwapchainGeneration() noexcept;
     const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
+    bool                                                      resetSwapchainGeneration() noexcept;
     bool                                                      resetSurfaceGeneration() noexcept;
 
     // AppKit ownership is main-thread-affine. An explicit off-main reset

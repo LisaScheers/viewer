@@ -382,6 +382,46 @@ LLRenderVulkan::VulkanSwapchainConfigurationAcquireResult LLWindowSDLVulkan::acq
     return mInstanceGeneration->acquireSwapchainConfigurationGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainAcquireResult LLWindowSDLVulkan::acquireSwapchainGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainAcquireError{ VulkanSwapchainAcquireCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mWindow || !mOperations.mGetWindowSizeInPixels)
+    {
+        return VulkanSwapchainAcquireError{ VulkanSwapchainAcquireCode::StaleWindowGeneration, std::nullopt };
+    }
+
+    int drawable_width  = 0;
+    int drawable_height = 0;
+    if (!mOperations.mGetWindowSizeInPixels(mOperations.mUserdata, mWindow, &drawable_width, &drawable_height) || drawable_width <= 0 ||
+        drawable_height <= 0)
+    {
+        return VulkanSwapchainAcquireError{ VulkanSwapchainAcquireCode::InvalidDrawableExtent, std::nullopt };
+    }
+
+    SurfaceAcquireContext  context{ this, mInstanceGeneration.get(), &mOperations, mWindow };
+    VulkanSwapchainRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = { static_cast<std::uint32_t>(drawable_width), static_cast<std::uint32_t>(drawable_height) };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquireSwapchainGeneration(request);
+}
+
+bool LLWindowSDLVulkan::resetSwapchainGeneration() noexcept
+{
+    if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainGeneration())
+    {
+        return false;
+    }
+    mInstanceGeneration->resetSwapchainGeneration();
+    return true;
+}
+
 bool LLWindowSDLVulkan::resetSurfaceGeneration() noexcept
 {
     if (!mInstanceGeneration || !mInstanceGeneration->hasSurfaceGeneration())

@@ -457,6 +457,10 @@ void window_sdl_vulkan_object::test<1>()
     static_assert(std::is_nothrow_move_assignable_v<LLWindowSDLVulkan>);
     static_assert(std::is_nothrow_destructible_v<LLWindowSDLVulkan>);
     static_assert(std::is_same_v<decltype(std::declval<const LLWindowSDLVulkan&>().requirements()), const LLWindowVulkanRequirements*>);
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainGeneration()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainGeneration()));
     static_assert(noexcept(acquireLLWindowSDLVulkan(std::declval<const LLWindowSDLVulkanCreateInfo&>(), U64{},
                                                     std::declval<const LLWindowSDLVulkanOperations&>())));
 
@@ -1025,6 +1029,58 @@ void window_sdl_vulkan_object::test<13>()
     owner->reset();
     ensure_equals("adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<14>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 111, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("swapchain-owner fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainGeneration();
+    ensure("swapchain acquisition requires a live instance before querying drawable pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainAcquireCode::InstanceNotLive && state.mDrawableSizeCalls == 0);
+
+    ensure("swapchain-owner fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mDrawableSizeSucceeds = false;
+    const auto failed_size      = owner->acquireSwapchainGeneration();
+    ensure("an SDL drawable-size failure is mapped before swapchain acquisition",
+           failed_size && failed_size->mCode == VulkanSwapchainAcquireCode::InvalidDrawableExtent && state.mDrawableSizeCalls == 1);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableHeight       = 0;
+    const auto zero_size        = owner->acquireSwapchainGeneration();
+    ensure("a zero SDL drawable height is rejected before swapchain acquisition",
+           zero_size && zero_size->mCode == VulkanSwapchainAcquireCode::InvalidDrawableExtent && state.mDrawableSizeCalls == 2);
+
+    state.mDrawableWidth       = 1920;
+    state.mDrawableHeight      = 1080;
+    const auto missing_surface = owner->acquireSwapchainGeneration();
+    ensure("current SDL backing pixels are forwarded to the swapchain parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainAcquireCode::SurfaceNotLive && state.mDrawableSizeCalls == 3);
+
+    ensure("swapchain-owner fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const auto missing_selection = owner->acquireSwapchainGeneration();
+    ensure("the swapchain adapter re-queries pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainAcquireCode::PresentationDeviceNotLive &&
+               state.mDrawableSizeCalls == 4);
+    ensure("an unowned swapchain reports no explicit reset", !owner->resetSwapchainGeneration());
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("swapchain adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("swapchain adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
 } // namespace tut
