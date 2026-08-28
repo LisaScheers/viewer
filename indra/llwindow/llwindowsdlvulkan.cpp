@@ -19,6 +19,7 @@
 
 #include "SDL3/SDL_vulkan.h"
 
+#include <new>
 #include <utility>
 
 namespace
@@ -95,6 +96,12 @@ bool validOperations(const LLWindowSDLVulkanOperations& operations) noexcept
            operations.mGetWindowFlags && operations.mGetResolver && operations.mGetInstanceExtensions;
 }
 
+bool isInstanceWindowGenerationCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto* window = static_cast<const LLWindowSDLVulkan*>(userdata);
+    return window && window->isGenerationCurrent(native_window_generation);
+}
+
 LLWindowSDLVulkanAcquireError failure(LLWindowSDLVulkanAcquireCode code) noexcept
 {
     return { code, std::nullopt };
@@ -152,6 +159,7 @@ LLWindowSDLVulkan::LLWindowSDLVulkan(LLWindowSDLVulkan&& other) noexcept :
     mOperations(other.mOperations),
     mWindow(std::exchange(other.mWindow, nullptr)),
     mRequirements(std::move(other.mRequirements)),
+    mInstanceGeneration(std::move(other.mInstanceGeneration)),
     mExplicitLoaderReference(std::exchange(other.mExplicitLoaderReference, false))
 {
     other.mRequirements.reset();
@@ -165,6 +173,7 @@ LLWindowSDLVulkan& LLWindowSDLVulkan::operator=(LLWindowSDLVulkan&& other) noexc
         mOperations              = other.mOperations;
         mWindow                  = std::exchange(other.mWindow, nullptr);
         mRequirements            = std::move(other.mRequirements);
+        mInstanceGeneration      = std::move(other.mInstanceGeneration);
         mExplicitLoaderReference = std::exchange(other.mExplicitLoaderReference, false);
         other.mRequirements.reset();
     }
@@ -176,8 +185,52 @@ bool LLWindowSDLVulkan::isGenerationCurrent(U64 native_window_generation) const 
     return native_window_generation != 0 && mRequirements && mRequirements->nativeWindowGeneration() == native_window_generation;
 }
 
+std::optional<LLRenderVulkan::VulkanInstanceAcquireError> LLWindowSDLVulkan::acquireInstanceGeneration(
+    LLRenderVulkan::VulkanInstanceValidationMode  validation_mode,
+    LLRenderVulkan::VulkanInstancePortabilityMode portability_mode) noexcept
+{
+    if (mInstanceGeneration)
+    {
+        LLRenderVulkan::VulkanInstanceAcquireError error;
+        error.mCode = LLRenderVulkan::VulkanInstanceAcquireCode::InstanceAlreadyOwned;
+        return error;
+    }
+    if (!mRequirements)
+    {
+        LLRenderVulkan::VulkanInstanceAcquireError error;
+        error.mCode = LLRenderVulkan::VulkanInstanceAcquireCode::StaleWindowGeneration;
+        return error;
+    }
+
+    LLRenderVulkan::VulkanInstanceRequest request;
+    request.mGetInstanceProcAddr      = reinterpret_cast<PFN_vkGetInstanceProcAddr>(mRequirements->resolver());
+    request.mRequiredWindowExtensions = std::span<const std::string>(mRequirements->requiredInstanceExtensions());
+    request.mNativeWindowGeneration   = mRequirements->nativeWindowGeneration();
+    request.mGenerationCheck          = { this, isInstanceWindowGenerationCurrent };
+    request.mValidationMode           = validation_mode;
+    request.mPortabilityMode          = portability_mode;
+
+    LLRenderVulkan::VulkanInstanceAcquireResult result = LLRenderVulkan::acquireVulkanInstanceGeneration(request);
+    if (const auto* error = std::get_if<LLRenderVulkan::VulkanInstanceAcquireError>(&result))
+    {
+        return *error;
+    }
+
+    auto* generation =
+        new (std::nothrow) LLRenderVulkan::VulkanInstanceGeneration(std::move(std::get<LLRenderVulkan::VulkanInstanceGeneration>(result)));
+    if (!generation)
+    {
+        LLRenderVulkan::VulkanInstanceAcquireError error;
+        error.mCode = LLRenderVulkan::VulkanInstanceAcquireCode::AllocationFailure;
+        return error;
+    }
+    mInstanceGeneration.reset(generation);
+    return std::nullopt;
+}
+
 void LLWindowSDLVulkan::reset() noexcept
 {
+    mInstanceGeneration.reset();
     mRequirements.reset();
     if (mWindow)
     {

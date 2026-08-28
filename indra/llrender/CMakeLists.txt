@@ -240,6 +240,30 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
   target_compile_definitions(
       INTEGRATION_TEST_llrendervulkanglobaldispatch
       PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkaninstance STATIC
+      vulkan/llrendervulkaninstance.cpp
+      vulkan/llrendervulkaninstance.h)
+  target_include_directories(llrendervulkaninstance
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkaninstance SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkaninstance
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkaninstance
+      PUBLIC llrendervulkanglobaldispatch)
+  set_target_properties(llrendervulkaninstance PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkaninstance_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkaninstance
+      ""
+      "llrendervulkaninstance;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkaninstance
+      PRIVATE VK_NO_PROTOTYPES)
 endif ()
 
 if (LL_VULKAN_TONEMAP_TEST)

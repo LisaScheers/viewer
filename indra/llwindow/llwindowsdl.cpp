@@ -208,7 +208,18 @@ bool LLWindowSDL::createVulkanWindow(int x, int y, int width, int height, bool f
         return false;
     }
 
-    mVulkanWindow = std::make_unique<LLWindowSDLVulkan>(std::move(std::get<LLWindowSDLVulkan>(result)));
+    auto vulkan_window = std::make_unique<LLWindowSDLVulkan>(std::move(std::get<LLWindowSDLVulkan>(result)));
+    const auto instance_error = vulkan_window->acquireInstanceGeneration(
+        LLRenderVulkan::VulkanInstanceValidationMode::Required,
+        LLRenderVulkan::VulkanInstancePortabilityMode::EnableIfAvailable);
+    if (instance_error)
+    {
+        LL_WARNS("Window") << "Vulkan instance acquisition failed with code "
+                           << static_cast<U32>(instance_error->mCode) << LL_ENDL;
+        return false;
+    }
+
+    mVulkanWindow = std::move(vulkan_window);
     mWindow       = mVulkanWindow->window();
     mFullscreen   = fullscreen;
     SDL_StartTextInput(mWindow);
@@ -237,6 +248,11 @@ const LLWindowVulkanRequirements* LLWindowSDL::getVulkanRequirements() const noe
 bool LLWindowSDL::isVulkanWindowGenerationCurrent(U64 generation) const noexcept
 {
     return mVulkanWindow && mVulkanWindow->isGenerationCurrent(generation);
+}
+
+const LLRenderVulkan::VulkanInstanceGeneration* LLWindowSDL::getVulkanInstanceGeneration() const noexcept
+{
+    return mVulkanWindow ? mVulkanWindow->instanceGeneration() : nullptr;
 }
 #endif
 

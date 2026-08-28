@@ -50,6 +50,10 @@
 class LLPreeditor;
 #if defined(LL_VULKAN_SDL_WSI)
 class LLWindowSDLVulkan;
+namespace LLRenderVulkan
+{
+class VulkanInstanceGeneration;
+}
 #endif
 
 class LLWindowSDL final : public LLWindow
@@ -174,6 +178,7 @@ public:
 #if defined(LL_VULKAN_SDL_WSI)
     const LLWindowVulkanRequirements* getVulkanRequirements() const noexcept override;
     bool isVulkanWindowGenerationCurrent(U64 generation) const noexcept override;
+    const LLRenderVulkan::VulkanInstanceGeneration* getVulkanInstanceGeneration() const noexcept;
 #endif
 
     static std::vector<std::string> getDisplaysResolutionList();

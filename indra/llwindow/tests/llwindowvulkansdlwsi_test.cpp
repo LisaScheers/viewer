@@ -17,7 +17,9 @@
 
 #include "llgl.h"
 #include "llrendervulkanglobaldispatch.h"
+#include "llrendervulkaninstance.h"
 #include "llwindow.h"
+#include "llwindowsdl.h"
 #include "llwindowvulkanrequirements.h"
 #include "lltut.h"
 
@@ -75,8 +77,7 @@ template<>
 template<>
 void window_vulkan_sdl_wsi_object::test<1>()
 {
-    static_assert(std::is_same_v<decltype(std::declval<const LLWindow&>().getVulkanRequirements()),
-                                 const LLWindowVulkanRequirements*>);
+    static_assert(std::is_same_v<decltype(std::declval<const LLWindow&>().getVulkanRequirements()), const LLWindowVulkanRequirements*>);
     static_assert(noexcept(std::declval<const LLWindow&>().getVulkanRequirements()));
     static_assert(noexcept(std::declval<const LLWindow&>().isVulkanWindowGenerationCurrent(U64{})));
 
@@ -87,53 +88,85 @@ void window_vulkan_sdl_wsi_object::test<1>()
     }
 
     const std::size_t initial_instance_count = LLWindow::instanceCount();
-    const SDLState    initial_sdl_state       = currentSDLState();
-    const bool        initial_gl_manager      = gGLManager.mInited;
+    const SDLState    initial_sdl_state      = currentSDLState();
+    const bool        initial_gl_manager     = gGLManager.mInited;
 
     LLWindow* window = LLWindowManager::createWindow(nullptr, "SDL Vulkan native smoke", "llwindowvulkansdlwsi", 0, 0, 64, 64,
                                                      LLWindow::GraphicsAPI::Vulkan, LLWindow::FLAG_CREATE_HIDDEN);
 
-    bool created                     = window != nullptr;
-    bool tracked                     = created && LLWindowManager::isWindowValid(window);
-    bool selected_vulkan             = created && window->getGraphicsAPI() == LLWindow::GraphicsAPI::Vulkan;
-    bool x11_driver                  = created && SDL_GetCurrentVideoDriver() && std::strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0;
-    bool no_gl_context               = created && SDL_GL_GetCurrentContext() == nullptr;
-    bool no_gl_manager               = created && !gGLManager.mInited;
-    bool requirements_published      = false;
-    bool generation_current          = false;
-    bool resolver_identity           = false;
-    bool extensions_identical        = false;
-    bool global_dispatch_resolved    = false;
+    bool created                  = window != nullptr;
+    bool tracked                  = created && LLWindowManager::isWindowValid(window);
+    bool selected_vulkan          = created && window->getGraphicsAPI() == LLWindow::GraphicsAPI::Vulkan;
+    bool x11_driver               = created && SDL_GetCurrentVideoDriver() && std::strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0;
+    bool no_gl_context            = created && SDL_GL_GetCurrentContext() == nullptr;
+    bool no_gl_manager            = created && !gGLManager.mInited;
+    bool requirements_published   = false;
+    bool generation_current       = false;
+    bool resolver_identity        = false;
+    bool extensions_identical     = false;
+    bool global_dispatch_resolved = false;
+
+    bool instance_acquired           = false;
+    bool instance_nonnull            = false;
+    bool instance_api_1_1            = false;
+    bool instance_generation_exact   = false;
+    bool instance_extensions_ordered = false;
+    bool instance_validation_enabled = false;
+    bool instance_validation_clean   = false;
+    bool instance_window_owned       = false;
     bool mixed_opengl_rejected       = false;
     bool vulkan_context_switch_fails = false;
     bool vulkan_shared_context_fails = false;
 
+    const LLRenderVulkan::VulkanInstanceGeneration* owned_instance_generation = nullptr;
+
     if (created)
     {
         const LLWindowVulkanRequirements* requirements = window->getVulkanRequirements();
-        requirements_published = requirements != nullptr;
+        requirements_published                         = requirements != nullptr;
         if (requirements)
         {
             generation_current = window->isVulkanWindowGenerationCurrent(requirements->nativeWindowGeneration()) &&
                                  !window->isVulkanWindowGenerationCurrent(0);
             resolver_identity = requirements->resolver() == SDL_Vulkan_GetVkGetInstanceProcAddr();
 
-            Uint32 extension_count = 0;
+            Uint32             extension_count = 0;
             const char* const* extension_names = SDL_Vulkan_GetInstanceExtensions(&extension_count);
-            extensions_identical = extension_names && requirements->requiredInstanceExtensions().size() == extension_count;
+            extensions_identical               = extension_names && requirements->requiredInstanceExtensions().size() == extension_count;
             for (std::size_t index = 0; extensions_identical && index < extension_count; ++index)
             {
-                extensions_identical = extension_names[index] && requirements->requiredInstanceExtensions()[index] == extension_names[index];
+                extensions_identical =
+                    extension_names[index] && requirements->requiredInstanceExtensions()[index] == extension_names[index];
             }
 
             const auto dispatch_result = LLRenderVulkan::resolveVulkanGlobalDispatchGeneration(
                 reinterpret_cast<PFN_vkGetInstanceProcAddr>(requirements->resolver()));
             global_dispatch_resolved = std::holds_alternative<LLRenderVulkan::VulkanGlobalDispatchGeneration>(dispatch_result);
+
+            const auto* instance_generation = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration();
+            if (instance_generation)
+            {
+                owned_instance_generation = instance_generation;
+                instance_acquired         = true;
+                instance_nonnull          = instance_generation->instance() != VK_NULL_HANDLE;
+                instance_api_1_1          = instance_generation->apiVersion() == VK_API_VERSION_1_1;
+                instance_generation_exact = instance_generation->nativeWindowGeneration() == requirements->nativeWindowGeneration() &&
+                                            window->isVulkanWindowGenerationCurrent(instance_generation->nativeWindowGeneration());
+                instance_validation_enabled = instance_generation->validationEnabled();
+
+                const auto& required_extensions = requirements->requiredInstanceExtensions();
+                const auto& enabled_extensions  = instance_generation->enabledExtensions();
+                instance_extensions_ordered     = enabled_extensions.size() >= required_extensions.size();
+                for (std::size_t index = 0; instance_extensions_ordered && index < required_extensions.size(); ++index)
+                {
+                    instance_extensions_ordered = enabled_extensions[index] == required_extensions[index];
+                }
+            }
         }
 
         const std::size_t count_before_mixed_request = LLWindow::instanceCount();
-        LLWindow* mixed = LLWindowManager::createWindow(nullptr, "forbidden mixed OpenGL window", "llwindowvulkansdlwsi", 0, 0, 1, 1,
-                                                        LLWindow::GraphicsAPI::OpenGL, LLWindow::FLAG_CREATE_HIDDEN);
+        LLWindow* mixed       = LLWindowManager::createWindow(nullptr, "forbidden mixed OpenGL window", "llwindowvulkansdlwsi", 0, 0, 1, 1,
+                                                              LLWindow::GraphicsAPI::OpenGL, LLWindow::FLAG_CREATE_HIDDEN);
         mixed_opengl_rejected = mixed == nullptr && LLWindow::instanceCount() == count_before_mixed_request;
         if (mixed && LLWindowManager::isWindowValid(mixed))
         {
@@ -146,7 +179,14 @@ void window_vulkan_sdl_wsi_object::test<1>()
         window->swapBuffers();
     }
 
-    const bool destroyed = created && LLWindowManager::destroyWindow(window);
+    if (owned_instance_generation)
+    {
+        instance_window_owned = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == owned_instance_generation &&
+                                owned_instance_generation->instance() != VK_NULL_HANDLE;
+        instance_validation_clean = owned_instance_generation->validationSnapshot().mMessageCount == 0;
+    }
+
+    const bool     destroyed       = created && LLWindowManager::destroyWindow(window);
     const SDLState final_sdl_state = currentSDLState();
 
     ensure("a real SDL Vulkan window is created", created);
@@ -160,6 +200,14 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the requirements retain SDL's exact resolver", resolver_identity);
     ensure("the requirements deep-copy SDL's exact extension sequence", extensions_identical);
     ensure("the SDL resolver satisfies the Stage 30 global-dispatch contract", global_dispatch_resolved);
+    ensure("the current SDL requirements acquire a validation-enabled Vulkan instance", instance_acquired);
+    ensure("the acquired Vulkan instance handle is non-null", instance_nonnull);
+    ensure("the acquired Vulkan instance requests API 1.1", instance_api_1_1);
+    ensure("the Vulkan instance retains the exact current native-window generation", instance_generation_exact);
+    ensure("the Vulkan instance enables SDL's required extensions in order", instance_extensions_ordered);
+    ensure("the Vulkan instance enables required validation", instance_validation_enabled);
+    ensure("the Vulkan instance emits no validation messages", instance_validation_clean);
+    ensure("the Vulkan instance is owned by its SDL Vulkan window", instance_window_owned);
     ensure("a live Vulkan window rejects an OpenGL window before construction", mixed_opengl_rejected);
     ensure("Vulkan native-window recreation fails closed", vulkan_context_switch_fails);
     ensure("Vulkan shared OpenGL contexts fail closed", vulkan_shared_context_fails);
@@ -167,8 +215,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure_equals("native teardown restores the LLWindow instance count", LLWindow::instanceCount(), initial_instance_count);
     ensure("native teardown removes the manager entry", !LLWindowManager::isWindowValid(window));
     ensure("native teardown restores SDL's log callback",
-           final_sdl_state.mLogOutput == initial_sdl_state.mLogOutput &&
-               final_sdl_state.mLogUserdata == initial_sdl_state.mLogUserdata);
+           final_sdl_state.mLogOutput == initial_sdl_state.mLogOutput && final_sdl_state.mLogUserdata == initial_sdl_state.mLogUserdata);
     ensure_equals("native teardown restores SDL subsystem state", final_sdl_state.mInitialized, initial_sdl_state.mInitialized);
     ensure("native teardown leaves no current OpenGL context", final_sdl_state.mGLContext == initial_sdl_state.mGLContext);
     ensure_equals("native teardown leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);

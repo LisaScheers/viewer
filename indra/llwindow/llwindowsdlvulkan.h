@@ -16,10 +16,12 @@
 #ifndef LL_LLWINDOWSDLVULKAN_H
 #define LL_LLWINDOWSDLVULKAN_H
 
+#include "llrendervulkaninstance.h"
 #include "llwindowvulkanrequirements.h"
 
 #include "SDL3/SDL.h"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <variant>
@@ -85,12 +87,13 @@ public:
     LLWindowSDLVulkan(LLWindowSDLVulkan&& other) noexcept;
     LLWindowSDLVulkan& operator=(LLWindowSDLVulkan&& other) noexcept;
 
-    bool hasRequirements() const noexcept { return mRequirements.has_value(); }
-    const LLWindowVulkanRequirements* requirements() const noexcept
-    {
-        return mRequirements ? &*mRequirements : nullptr;
-    }
-    bool isGenerationCurrent(U64 native_window_generation) const noexcept;
+    bool                              hasRequirements() const noexcept { return mRequirements.has_value(); }
+    const LLWindowVulkanRequirements* requirements() const noexcept { return mRequirements ? &*mRequirements : nullptr; }
+    bool                              isGenerationCurrent(U64 native_window_generation) const noexcept;
+    std::optional<LLRenderVulkan::VulkanInstanceAcquireError> acquireInstanceGeneration(
+        LLRenderVulkan::VulkanInstanceValidationMode  validation_mode,
+        LLRenderVulkan::VulkanInstancePortabilityMode portability_mode) noexcept;
+    const LLRenderVulkan::VulkanInstanceGeneration* instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
 
     void reset() noexcept;
 
@@ -107,10 +110,11 @@ private:
                       SDL_Window*                        window,
                       LLWindowVulkanRequirements&&       requirements) noexcept;
 
-    LLWindowSDLVulkanOperations               mOperations;
-    SDL_Window*                               mWindow = nullptr;
-    std::optional<LLWindowVulkanRequirements> mRequirements;
-    bool                                      mExplicitLoaderReference = false;
+    LLWindowSDLVulkanOperations                               mOperations;
+    SDL_Window*                                               mWindow = nullptr;
+    std::optional<LLWindowVulkanRequirements>                 mRequirements;
+    std::unique_ptr<LLRenderVulkan::VulkanInstanceGeneration> mInstanceGeneration;
+    bool                                                      mExplicitLoaderReference = false;
 };
 
 using LLWindowSDLVulkanAcquireResult = std::variant<LLWindowSDLVulkanAcquireError, LLWindowSDLVulkan>;

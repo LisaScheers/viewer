@@ -124,6 +124,7 @@ if (USE_SDL_WINDOW)
     endif ()
     list(APPEND viewer_SOURCE_FILES llwindowsdlvulkan.cpp)
     list(APPEND viewer_HEADER_FILES llwindowsdlvulkan.h)
+    list(APPEND llwindow_LINK_LIBRARIES llrendervulkaninstance)
   endif ()
 
   list(APPEND llwindow_LINK_LIBRARIES
@@ -304,7 +305,7 @@ if (LL_TESTS)
     LL_ADD_INTEGRATION_TEST(
       llwindowvulkansdlwsi
       ""
-      "llwindow;llrendervulkanglobaldispatch;llcommon")
+      "llwindow;llrendervulkaninstance;llrendervulkanglobaldispatch;llcommon")
     target_compile_definitions(
       INTEGRATION_TEST_llwindowvulkansdlwsi
       PRIVATE VK_NO_PROTOTYPES)
