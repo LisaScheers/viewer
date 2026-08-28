@@ -20,6 +20,7 @@
 #include <limits>
 #include <mutex>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 namespace LLRenderVulkan
@@ -44,9 +45,29 @@ namespace
         return { code, result, global_dispatch_error, command, required_extension_index, property_index, observed_count };
     }
 
+    VulkanSurfaceAcquireError surfaceFailure(VulkanSurfaceAcquireCode            code,
+                                             std::optional<VkResult>             result  = std::nullopt,
+                                             std::optional<VulkanSurfaceCommand> command = std::nullopt) noexcept
+    {
+        return { code, result, command };
+    }
+
     bool current(const VulkanWindowGenerationCheck& check, std::uint64_t generation) noexcept
     {
         return generation != 0 && check.mIsCurrent && check.mIsCurrent(check.mUserdata, generation);
+    }
+
+    VulkanSurfaceAcquireResult surfaceFreshness(const VulkanSurfaceRequest& request, const VulkanInstanceGeneration& generation) noexcept
+    {
+        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        {
+            return surfaceFailure(VulkanSurfaceAcquireCode::StaleInstanceOwner);
+        }
+        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        {
+            return surfaceFailure(VulkanSurfaceAcquireCode::StaleWindowGeneration);
+        }
+        return std::nullopt;
     }
 
     template<std::size_t Size>
@@ -184,8 +205,58 @@ struct VulkanInstanceGeneration::ValidationState
     std::array<char, VULKAN_VALIDATION_MESSAGE_CAPACITY> mFirstMessage{};
 };
 
+class VulkanInstanceGeneration::VulkanSurfaceGeneration final
+{
+public:
+    VulkanSurfaceGeneration() noexcept = default;
+    ~VulkanSurfaceGeneration() noexcept { reset(); }
+
+    VulkanSurfaceGeneration(const VulkanSurfaceGeneration&)            = delete;
+    VulkanSurfaceGeneration& operator=(const VulkanSurfaceGeneration&) = delete;
+    VulkanSurfaceGeneration(VulkanSurfaceGeneration&&)                 = delete;
+    VulkanSurfaceGeneration& operator=(VulkanSurfaceGeneration&&)      = delete;
+
+    VkSurfaceKHR  surface() const noexcept { return mSurface; }
+    std::uint64_t nativeWindowGeneration() const noexcept { return mNativeWindowGeneration; }
+
+    void adopt(VkInstance              instance,
+               VkSurfaceKHR            surface,
+               PFN_vkDestroySurfaceKHR destroy_surface,
+               std::uint64_t           native_window_generation) noexcept
+    {
+        mInstance               = instance;
+        mSurface                = surface;
+        mDestroySurface         = destroy_surface;
+        mNativeWindowGeneration = native_window_generation;
+    }
+
+    void reset() noexcept
+    {
+        const VkInstance              instance        = std::exchange(mInstance, VK_NULL_HANDLE);
+        const VkSurfaceKHR            surface         = std::exchange(mSurface, VK_NULL_HANDLE);
+        const PFN_vkDestroySurfaceKHR destroy_surface = std::exchange(mDestroySurface, nullptr);
+        mNativeWindowGeneration                       = 0;
+
+        if (surface != VK_NULL_HANDLE && destroy_surface)
+        {
+            destroy_surface(instance, surface, nullptr);
+        }
+    }
+
+private:
+    VkInstance              mInstance               = VK_NULL_HANDLE;
+    VkSurfaceKHR            mSurface                = VK_NULL_HANDLE;
+    PFN_vkDestroySurfaceKHR mDestroySurface         = nullptr;
+    std::uint64_t           mNativeWindowGeneration = 0;
+};
+
 struct VulkanInstanceGenerationFactory
 {
+    static_assert(!std::is_copy_constructible_v<VulkanInstanceGeneration::VulkanSurfaceGeneration>);
+    static_assert(!std::is_copy_assignable_v<VulkanInstanceGeneration::VulkanSurfaceGeneration>);
+    static_assert(!std::is_move_constructible_v<VulkanInstanceGeneration::VulkanSurfaceGeneration>);
+    static_assert(!std::is_move_assignable_v<VulkanInstanceGeneration::VulkanSurfaceGeneration>);
+
     static std::unique_ptr<VulkanInstanceGeneration::ValidationState> allocateValidationState()
     {
         return std::make_unique<VulkanInstanceGeneration::ValidationState>();
@@ -243,6 +314,10 @@ struct VulkanInstanceGenerationFactory
                                         std::move(enabled_layers), native_window_generation, portability_enumeration, instance,
                                         destroy_instance, debug_messenger, destroy_debug_messenger);
     }
+
+    static VulkanSurfaceAcquireResult acquireSurface(VulkanInstanceGeneration&                  instance_generation,
+                                                     const VulkanSurfaceRequest&                request,
+                                                     VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
 };
 
 VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
@@ -283,7 +358,8 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& ot
     mInstance(std::exchange(other.mInstance, VK_NULL_HANDLE)),
     mDestroyInstance(std::exchange(other.mDestroyInstance, nullptr)),
     mDebugMessenger(std::exchange(other.mDebugMessenger, VK_NULL_HANDLE)),
-    mDestroyDebugMessenger(std::exchange(other.mDestroyDebugMessenger, nullptr))
+    mDestroyDebugMessenger(std::exchange(other.mDestroyDebugMessenger, nullptr)),
+    mSurfaceGeneration(std::move(other.mSurfaceGeneration))
 {
     other.mGlobalDispatch.reset();
 }
@@ -316,8 +392,35 @@ VulkanValidationSnapshot VulkanInstanceGeneration::validationSnapshot() const no
     return snapshot;
 }
 
+bool VulkanInstanceGeneration::hasSurfaceGeneration() const noexcept
+{
+    return mSurfaceGeneration != nullptr;
+}
+
+VkSurfaceKHR VulkanInstanceGeneration::surface() const noexcept
+{
+    return mSurfaceGeneration ? mSurfaceGeneration->surface() : VK_NULL_HANDLE;
+}
+
+std::uint64_t VulkanInstanceGeneration::surfaceNativeWindowGeneration() const noexcept
+{
+    return mSurfaceGeneration ? mSurfaceGeneration->nativeWindowGeneration() : 0;
+}
+
+VulkanSurfaceAcquireResult VulkanInstanceGeneration::acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept
+{
+    return VulkanInstanceDetail::acquireSurface(*this, request, nullptr);
+}
+
+void VulkanInstanceGeneration::resetSurfaceGeneration() noexcept
+{
+    mSurfaceGeneration.reset();
+}
+
 void VulkanInstanceGeneration::reset() noexcept
 {
+    resetSurfaceGeneration();
+
     if (mDebugMessenger != VK_NULL_HANDLE && mDestroyDebugMessenger)
     {
         mDestroyDebugMessenger(mInstance, mDebugMessenger, nullptr);
@@ -338,6 +441,122 @@ void VulkanInstanceGeneration::reset() noexcept
     mNativeWindowGeneration = 0;
     mPortabilityEnumeration = false;
     mValidationState.reset();
+}
+
+VulkanSurfaceAcquireResult VulkanInstanceGenerationFactory::acquireSurface(
+    VulkanInstanceGeneration&                  instance_generation,
+    const VulkanSurfaceRequest&                request,
+    VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept
+{
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::InvalidInstanceOwnerCheck);
+    }
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::InvalidWindowGenerationCheck);
+    }
+    if (!request.mCreateOperation.mCreate)
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::InvalidCreateOperation);
+    }
+    if (request.mNativeWindowGeneration == 0)
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::InvalidNativeWindowGeneration);
+    }
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance || !instance_generation.mGlobalDispatch ||
+        instance_generation.mNativeWindowGeneration == 0)
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::InstanceNotLive);
+    }
+    if (instance_generation.mSurfaceGeneration)
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::SurfaceAlreadyOwned);
+    }
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration)
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::NativeWindowGenerationMismatch);
+    }
+
+    // Boundary 1: the exact instance owner and native window must both still
+    // own the generation before its extension policy is consulted.
+    if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+    {
+        return freshness;
+    }
+    if (!instance_generation.isExtensionEnabled(VK_KHR_SURFACE_EXTENSION_NAME))
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::MissingSurfaceExtension);
+    }
+
+    // Boundary 2: do not consult the loader after either owner becomes stale.
+    if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+    {
+        return freshness;
+    }
+    const PFN_vkDestroySurfaceKHR destroy_surface = resolveInstanceCommand<PFN_vkDestroySurfaceKHR>(
+        instance_generation.mGlobalDispatch->getInstanceProcAddr(), instance_generation.mInstance, "vkDestroySurfaceKHR");
+    if (!destroy_surface)
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::MissingRequiredInstanceCommand, std::nullopt, VulkanSurfaceCommand::DestroySurface);
+    }
+
+    // Boundary 3: destruction capability is available, but no platform object
+    // exists yet.
+    if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+    {
+        return freshness;
+    }
+
+    try
+    {
+        if (allocation_checkpoint)
+        {
+            allocation_checkpoint();
+        }
+        auto pending = std::make_unique<VulkanInstanceGeneration::VulkanSurfaceGeneration>();
+
+        // Boundary 4: allocation cannot leave a created surface without an
+        // owner, and freshness is checked once more immediately before create.
+        if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+        {
+            return freshness;
+        }
+
+        VkSurfaceKHR                     surface = VK_NULL_HANDLE;
+        const VulkanSurfaceCreateOutcome outcome =
+            request.mCreateOperation.mCreate(request.mCreateOperation.mUserdata, instance_generation.mInstance, nullptr, &surface);
+        if (std::holds_alternative<VulkanSurfacePlatformFailure>(outcome))
+        {
+            return surfaceFailure(VulkanSurfaceAcquireCode::PlatformCreationFailure);
+        }
+
+        const VkResult result = std::get<VkResult>(outcome);
+        if (result != VK_SUCCESS)
+        {
+            return surfaceFailure(VulkanSurfaceAcquireCode::SurfaceCreationFailure, result);
+        }
+        if (surface == VK_NULL_HANDLE)
+        {
+            return surfaceFailure(VulkanSurfaceAcquireCode::NullSurfaceOnSuccess, VK_SUCCESS);
+        }
+
+        pending->adopt(instance_generation.mInstance, surface, destroy_surface, request.mNativeWindowGeneration);
+
+        // Boundary 5: the pending child owns rollback before either freshness
+        // callback can reject publication.
+        if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+        {
+            return freshness;
+        }
+
+        instance_generation.mSurfaceGeneration = std::move(pending);
+        return std::nullopt;
+    }
+    catch (const std::bad_alloc&)
+    {
+        return surfaceFailure(VulkanSurfaceAcquireCode::AllocationFailure);
+    }
 }
 
 namespace VulkanInstanceDetail
@@ -643,6 +862,13 @@ namespace VulkanInstanceDetail
         {
             return failure(VulkanInstanceAcquireCode::AllocationFailure);
         }
+    }
+
+    VulkanSurfaceAcquireResult acquireSurface(VulkanInstanceGeneration&   instance_generation,
+                                              const VulkanSurfaceRequest& request,
+                                              AllocationCheckpoint        allocation_checkpoint) noexcept
+    {
+        return VulkanInstanceGenerationFactory::acquireSurface(instance_generation, request, allocation_checkpoint);
     }
 
 } // namespace VulkanInstanceDetail

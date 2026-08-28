@@ -90,16 +90,61 @@ const char* const* getInstanceExtensions(void*, std::size_t* count) noexcept
     return extensions;
 }
 
+bool createSurface(void*, SDL_Window* window, VkInstance instance, const VkAllocationCallbacks* allocator, VkSurfaceKHR* surface) noexcept
+{
+    SDL_assert(SDL_IsMainThread());
+    return SDL_Vulkan_CreateSurface(window, instance, allocator, surface);
+}
+
 bool validOperations(const LLWindowSDLVulkanOperations& operations) noexcept
 {
     return operations.mLoadLibrary && operations.mUnloadLibrary && operations.mCreateWindow && operations.mDestroyWindow &&
-           operations.mGetWindowFlags && operations.mGetResolver && operations.mGetInstanceExtensions;
+           operations.mGetWindowFlags && operations.mGetResolver && operations.mGetInstanceExtensions && operations.mCreateSurface;
 }
 
 bool isInstanceWindowGenerationCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
 {
     const auto* window = static_cast<const LLWindowSDLVulkan*>(userdata);
     return window && window->isGenerationCurrent(native_window_generation);
+}
+
+struct SurfaceAcquireContext
+{
+    const LLWindowSDLVulkan*                        mOwner              = nullptr;
+    const LLRenderVulkan::VulkanInstanceGeneration* mInstanceGeneration = nullptr;
+    const LLWindowSDLVulkanOperations*              mOperations         = nullptr;
+    SDL_Window*                                     mWindow             = nullptr;
+};
+
+bool isSurfaceInstanceOwnerCurrent(void* userdata, const LLRenderVulkan::VulkanInstanceGeneration& generation) noexcept
+{
+    const auto* context = static_cast<const SurfaceAcquireContext*>(userdata);
+    return context && context->mOwner && context->mInstanceGeneration == &generation &&
+           context->mOwner->instanceGeneration() == &generation;
+}
+
+bool isSurfaceWindowGenerationCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto* context = static_cast<const SurfaceAcquireContext*>(userdata);
+    return context && context->mOwner && context->mOwner->isGenerationCurrent(native_window_generation);
+}
+
+LLRenderVulkan::VulkanSurfaceCreateOutcome createSurfaceGeneration(void*                        userdata,
+                                                                   VkInstance                   instance,
+                                                                   const VkAllocationCallbacks* allocator,
+                                                                   VkSurfaceKHR*                surface) noexcept
+{
+    const auto* context = static_cast<const SurfaceAcquireContext*>(userdata);
+    if (!context || !context->mOperations || !context->mOperations->mCreateSurface || !context->mWindow)
+    {
+        return LLRenderVulkan::VulkanSurfacePlatformFailure{};
+    }
+
+    if (!context->mOperations->mCreateSurface(context->mOperations->mUserdata, context->mWindow, instance, allocator, surface))
+    {
+        return LLRenderVulkan::VulkanSurfacePlatformFailure{};
+    }
+    return VkResult{ VK_SUCCESS };
 }
 
 LLWindowSDLVulkanAcquireError failure(LLWindowSDLVulkanAcquireCode code) noexcept
@@ -228,6 +273,58 @@ std::optional<LLRenderVulkan::VulkanInstanceAcquireError> LLWindowSDLVulkan::acq
     return std::nullopt;
 }
 
+std::optional<LLRenderVulkan::VulkanSurfaceAcquireError> LLWindowSDLVulkan::acquireSurfaceGeneration() noexcept
+{
+    return acquireSurfaceGeneration(nullptr);
+}
+
+LLRenderVulkan::VulkanSurfaceAcquireResult LLWindowSDLVulkan::acquireSurfaceGeneration(
+    LLRenderVulkan::VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSurfaceAcquireError{ VulkanSurfaceAcquireCode::InstanceNotLive, std::nullopt, std::nullopt };
+    }
+    if (!mRequirements || !mWindow)
+    {
+        return VulkanSurfaceAcquireError{ VulkanSurfaceAcquireCode::StaleWindowGeneration, std::nullopt, std::nullopt };
+    }
+
+    SurfaceAcquireContext context{ this, mInstanceGeneration.get(), &mOperations, mWindow };
+
+    VulkanSurfaceRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    request.mCreateOperation        = { &context, createSurfaceGeneration };
+
+    return VulkanInstanceDetail::acquireSurface(*mInstanceGeneration, request, allocation_checkpoint);
+}
+
+bool LLWindowSDLVulkan::resetSurfaceGeneration() noexcept
+{
+    if (!mInstanceGeneration || !mInstanceGeneration->hasSurfaceGeneration())
+    {
+        return false;
+    }
+    mInstanceGeneration->resetSurfaceGeneration();
+    return true;
+}
+
+namespace LLWindowSDLVulkanDetail
+{
+
+LLRenderVulkan::VulkanSurfaceAcquireResult acquireSurfaceGeneration(
+    LLWindowSDLVulkan&                                         owner,
+    LLRenderVulkan::VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept
+{
+    return owner.acquireSurfaceGeneration(allocation_checkpoint);
+}
+
+} // namespace LLWindowSDLVulkanDetail
+
 void LLWindowSDLVulkan::reset() noexcept
 {
     mInstanceGeneration.reset();
@@ -246,8 +343,8 @@ void LLWindowSDLVulkan::reset() noexcept
 
 const LLWindowSDLVulkanOperations& defaultLLWindowSDLVulkanOperations() noexcept
 {
-    static const LLWindowSDLVulkanOperations operations{ nullptr,       loadLibrary,    unloadLibrary, createWindow,
-                                                         destroyWindow, getWindowFlags, getResolver,   getInstanceExtensions };
+    static const LLWindowSDLVulkanOperations operations{ nullptr,        loadLibrary, unloadLibrary,         createWindow, destroyWindow,
+                                                         getWindowFlags, getResolver, getInstanceExtensions, createSurface };
     return operations;
 }
 

@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <new>
 #include <type_traits>
 #include <utility>
 
@@ -37,6 +38,8 @@ enum class Event
     Resolver,
     Extensions,
     CreateInstance,
+    CreateSurface,
+    DestroySurface,
     DestroyInstance,
     Destroy,
     Unload
@@ -53,7 +56,7 @@ enum class Failure
 
 struct FakeState
 {
-    std::array<Event, 16>              mEvents{};
+    std::array<Event, 32>              mEvents{};
     std::size_t                        mEventCount                 = 0;
     Failure                            mFailure                    = Failure::None;
     int                                mExplicitLoaderReferences   = 0;
@@ -68,8 +71,23 @@ struct FakeState
     bool                               mRequirementsInvalidatedBeforeDestroy  = false;
     bool                               mRequirementsLiveDuringInstanceDestroy = false;
     bool                               mLoaderLiveDuringInstanceDestroy       = false;
+    bool                               mSurfaceAbsentDuringInstanceDestroy    = false;
     bool                               mFailInstanceCreation                  = false;
+    bool                               mFailSurfaceCreation                   = false;
+    bool                               mNullSurfaceOnSuccess                  = false;
+    bool                               mPoisonSurfaceOnFailure                = false;
+    bool                               mExposeDestroySurface                  = true;
     std::size_t                        mDestroyInstanceCount                  = 0;
+    std::size_t                        mCreateSurfaceCount                    = 0;
+    std::size_t                        mDestroySurfaceCount                   = 0;
+    std::size_t                        mLiveSurfaceCount                      = 0;
+    SDL_Window*                        mSurfaceWindow                         = nullptr;
+    VkInstance                         mSurfaceInstance                       = VK_NULL_HANDLE;
+    const VkAllocationCallbacks*       mSurfaceAllocator                      = reinterpret_cast<const VkAllocationCallbacks*>(1);
+    const LLWindowSDLVulkan*           mOwnerDuringSurfaceDestroy             = nullptr;
+    bool                               mRequirementsLiveDuringSurfaceDestroy  = false;
+    bool                               mInstanceLiveDuringSurfaceDestroy      = false;
+    bool                               mLoaderLiveDuringSurfaceDestroy        = false;
 
     void record(Event event) noexcept { mEvents[mEventCount++] = event; }
 };
@@ -97,6 +115,11 @@ PFN_vkVoidFunction eraseFunctionType(Function function) noexcept
 VkInstance fakeInstance() noexcept
 {
     return reinterpret_cast<VkInstance>(static_cast<std::uintptr_t>(0x98760));
+}
+
+VkSurfaceKHR fakeSurface() noexcept
+{
+    return reinterpret_cast<VkSurfaceKHR>(static_cast<std::uintptr_t>(0x76540));
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateInstanceVersion(std::uint32_t* version) noexcept
@@ -171,8 +194,31 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyInstance(VkInstance instance, const VkAllo
     if (gVulkanState->mOwnerDuringInstanceDestroy)
     {
         gVulkanState->mRequirementsLiveDuringInstanceDestroy = gVulkanState->mOwnerDuringInstanceDestroy->hasRequirements();
+        gVulkanState->mSurfaceAbsentDuringInstanceDestroy    = gVulkanState->mLiveSurfaceCount == 0;
     }
     gVulkanState->mLoaderLiveDuringInstanceDestroy =
+        gVulkanState->mExplicitLoaderReferences == 1 && gVulkanState->mWindowLoaderReferences == 1;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroySurface(VkInstance instance, VkSurfaceKHR surface, const VkAllocationCallbacks* allocator) noexcept
+{
+    if (!gVulkanState || instance != fakeInstance() || surface != fakeSurface() || allocator)
+    {
+        return;
+    }
+
+    gVulkanState->record(Event::DestroySurface);
+    ++gVulkanState->mDestroySurfaceCount;
+    if (gVulkanState->mLiveSurfaceCount != 0)
+    {
+        --gVulkanState->mLiveSurfaceCount;
+    }
+    if (gVulkanState->mOwnerDuringSurfaceDestroy)
+    {
+        gVulkanState->mRequirementsLiveDuringSurfaceDestroy = gVulkanState->mOwnerDuringSurfaceDestroy->hasRequirements();
+        gVulkanState->mInstanceLiveDuringSurfaceDestroy     = instance == fakeInstance();
+    }
+    gVulkanState->mLoaderLiveDuringSurfaceDestroy =
         gVulkanState->mExplicitLoaderReferences == 1 && gVulkanState->mWindowLoaderReferences == 1;
 }
 
@@ -201,6 +247,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
     if (instance == fakeInstance() && std::strcmp(name, "vkDestroyInstance") == 0)
     {
         return eraseFunctionType(fakeDestroyInstance);
+    }
+    if (instance == fakeInstance() && std::strcmp(name, "vkDestroySurfaceKHR") == 0)
+    {
+        return gVulkanState && gVulkanState->mExposeDestroySurface ? eraseFunctionType(fakeDestroySurface) : nullptr;
     }
     return nullptr;
 }
@@ -282,9 +332,40 @@ const char* const* getInstanceExtensions(void* userdata, std::size_t* count) noe
     return state.mExtensionNames;
 }
 
+bool createSurface(void*                        userdata,
+                   SDL_Window*                  window,
+                   VkInstance                   instance,
+                   const VkAllocationCallbacks* allocator,
+                   VkSurfaceKHR*                surface) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::CreateSurface);
+    ++state.mCreateSurfaceCount;
+    state.mSurfaceWindow    = window;
+    state.mSurfaceInstance  = instance;
+    state.mSurfaceAllocator = allocator;
+
+    if (!surface)
+    {
+        return false;
+    }
+    if (state.mFailSurfaceCreation)
+    {
+        *surface = state.mPoisonSurfaceOnFailure ? fakeSurface() : VK_NULL_HANDLE;
+        return false;
+    }
+    *surface = state.mNullSurfaceOnSuccess ? VK_NULL_HANDLE : fakeSurface();
+    if (*surface != VK_NULL_HANDLE)
+    {
+        ++state.mLiveSurfaceCount;
+    }
+    return true;
+}
+
 LLWindowSDLVulkanOperations fakeOperations(FakeState& state) noexcept
 {
-    return { &state, loadLibrary, unloadLibrary, createWindow, destroyWindow, getWindowFlags, getResolver, getInstanceExtensions };
+    return { &state,         loadLibrary, unloadLibrary,         createWindow, destroyWindow,
+             getWindowFlags, getResolver, getInstanceExtensions, createSurface };
 }
 
 LLWindowSDLVulkanCreateInfo createInfo()
@@ -322,6 +403,18 @@ void ensureAcquireError(const char* message, const LLWindowSDLVulkanAcquireResul
     tut::ensure(message, error && error->mCode == code);
 }
 
+void ensureSurfaceError(const char*                                       message,
+                        const LLRenderVulkan::VulkanSurfaceAcquireResult& result,
+                        LLRenderVulkan::VulkanSurfaceAcquireCode          code)
+{
+    tut::ensure(message, result && result->mCode == code);
+}
+
+void failAllocation()
+{
+    throw std::bad_alloc();
+}
+
 } // namespace
 
 namespace tut
@@ -352,7 +445,7 @@ void window_sdl_vulkan_object::test<1>()
            defaultLLWindowSDLVulkanOperations().mLoadLibrary && defaultLLWindowSDLVulkanOperations().mUnloadLibrary &&
                defaultLLWindowSDLVulkanOperations().mCreateWindow && defaultLLWindowSDLVulkanOperations().mDestroyWindow &&
                defaultLLWindowSDLVulkanOperations().mGetWindowFlags && defaultLLWindowSDLVulkanOperations().mGetResolver &&
-               defaultLLWindowSDLVulkanOperations().mGetInstanceExtensions);
+               defaultLLWindowSDLVulkanOperations().mGetInstanceExtensions && defaultLLWindowSDLVulkanOperations().mCreateSurface);
 }
 
 template<>
@@ -409,6 +502,14 @@ void window_sdl_vulkan_object::test<3>()
     LLWindowSDLVulkanOperations invalid_operations;
     auto                        invalid = acquireLLWindowSDLVulkan(info, 1, invalid_operations);
     ensureAcquireError("an incomplete operation table is rejected", invalid, LLWindowSDLVulkanAcquireCode::InvalidOperations);
+
+    FakeState surface_operation_state;
+    auto      missing_surface_operation      = fakeOperations(surface_operation_state);
+    missing_surface_operation.mCreateSurface = nullptr;
+    auto missing_surface                     = acquireLLWindowSDLVulkan(info, 1, missing_surface_operation);
+    ensureAcquireError("a missing SDL surface operation is rejected", missing_surface, LLWindowSDLVulkanAcquireCode::InvalidOperations);
+    ensure_equals("a missing SDL surface operation is rejected before loading Vulkan", surface_operation_state.mEventCount,
+                  std::size_t{ 0 });
 
     FakeState load_state;
     load_state.mFailure = Failure::Load;
@@ -557,6 +658,18 @@ void window_sdl_vulkan_object::test<7>()
                owner->instanceGeneration()->apiVersion() == VK_API_VERSION_1_1 &&
                owner->instanceGeneration()->nativeWindowGeneration() == 31 && !owner->instanceGeneration()->validationEnabled());
 
+    const auto surface_error = owner->acquireSurfaceGeneration();
+    ensure("the fake SDL surface is acquired", !surface_error);
+    ensure("the instance parent owns the exact fake surface generation",
+           owner->instanceGeneration()->hasSurfaceGeneration() && owner->instanceGeneration()->surface() == fakeSurface() &&
+               owner->instanceGeneration()->surfaceNativeWindowGeneration() == 31);
+    ensure("SDL receives the exact private window, instance, and null allocator",
+           state.mSurfaceWindow == state.mWindow && state.mSurfaceInstance == fakeInstance() && !state.mSurfaceAllocator);
+
+    const auto duplicate_surface = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("a duplicate surface acquisition is rejected", duplicate_surface, VulkanSurfaceAcquireCode::SurfaceAlreadyOwned);
+    ensure_equals("duplicate acquisition makes no second SDL call", state.mCreateSurfaceCount, std::size_t{ 1 });
+
     const auto duplicate =
         owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled);
     ensure("a duplicate instance acquisition is rejected without replacing the owner",
@@ -564,26 +677,34 @@ void window_sdl_vulkan_object::test<7>()
                owner->instanceGeneration()->instance() == fakeInstance());
 
     LLWindowSDLVulkan moved(std::move(*owner));
-    ensure("move construction transfers the instance generation",
-           moved.instanceGeneration() && moved.instanceGeneration()->instance() == fakeInstance());
+    ensure("move construction transfers the instance and surface generations",
+           moved.instanceGeneration() && moved.instanceGeneration()->instance() == fakeInstance() &&
+               moved.instanceGeneration()->surface() == fakeSurface());
     ensure("the moved-from SDL owner publishes no instance generation", owner->instanceGeneration() == nullptr);
 
+    state.mOwnerDuringSurfaceDestroy  = &moved;
     state.mOwnerDuringInstanceDestroy = &moved;
     state.mOwnerDuringDestroy         = &moved;
     moved.reset();
 
-    ensureEvents("reset destroys the Vulkan instance before requirements, window, and loader teardown", state,
+    ensureEvents("reset destroys the Vulkan surface and instance before requirements, window, and loader teardown", state,
                  { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
-                   Event::DestroyInstance, Event::Destroy, Event::Unload });
+                   Event::CreateSurface, Event::DestroySurface, Event::DestroyInstance, Event::Destroy, Event::Unload });
+    ensure_equals("the Vulkan surface is destroyed exactly once", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("the Vulkan instance is destroyed exactly once", state.mDestroyInstanceCount, std::size_t{ 1 });
+    ensure("requirements and the parent instance remain live while Vulkan destroys the surface",
+           state.mRequirementsLiveDuringSurfaceDestroy && state.mInstanceLiveDuringSurfaceDestroy);
+    ensure("both SDL loader references remain live while Vulkan destroys the surface", state.mLoaderLiveDuringSurfaceDestroy);
     ensure("requirements remain live while Vulkan destroys the instance", state.mRequirementsLiveDuringInstanceDestroy);
+    ensure("the surface child is absent before Vulkan destroys the instance", state.mSurfaceAbsentDuringInstanceDestroy);
     ensure("both SDL loader references remain live while Vulkan destroys the instance", state.mLoaderLiveDuringInstanceDestroy);
     ensure("requirements are invalidated before SDL destroys the window", state.mRequirementsInvalidatedBeforeDestroy);
     ensure_equals("instance reset releases the explicit loader reference", state.mExplicitLoaderReferences, 0);
     ensure_equals("instance reset releases the window loader reference", state.mWindowLoaderReferences, 0);
 
     moved.reset();
-    ensure_equals("a second instance-owner reset performs no teardown", state.mEventCount, std::size_t{ 9 });
+    ensure_equals("a second instance-owner reset performs no teardown", state.mEventCount, std::size_t{ 11 });
+    ensure_equals("a second instance-owner reset does not destroy the surface again", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("a second instance-owner reset does not destroy the instance again", state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
@@ -603,6 +724,7 @@ void window_sdl_vulkan_object::test<8>()
     ensure("move-assignment source acquired a Vulkan window", source != nullptr);
     ensure("move-assignment source acquired an instance",
            !source->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    ensure("move-assignment source acquired a surface", !source->acquireSurfaceGeneration());
 
     destination_state.mWindow = reinterpret_cast<SDL_Window*>(static_cast<std::uintptr_t>(0x56780));
     vulkan_state.use(destination_state);
@@ -611,39 +733,55 @@ void window_sdl_vulkan_object::test<8>()
     ensure("move-assignment destination acquired a Vulkan window", destination != nullptr);
     ensure("move-assignment destination acquired an instance",
            !destination->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    ensure("move-assignment destination acquired a surface", !destination->acquireSurfaceGeneration());
 
+    destination_state.mOwnerDuringSurfaceDestroy  = destination;
     destination_state.mOwnerDuringInstanceDestroy = destination;
     destination_state.mOwnerDuringDestroy         = destination;
     *destination                                  = std::move(*source);
 
     ensure("move assignment clears both source generations", !source->hasRequirements() && source->instanceGeneration() == nullptr);
-    ensure("move assignment transfers the source window and instance generations",
+    ensure("move assignment transfers the source window, instance, and surface generations",
            destination->isGenerationCurrent(51) && destination->instanceGeneration() &&
-               destination->instanceGeneration()->nativeWindowGeneration() == 51);
-    ensureEvents("move assignment tears down the replaced instance before its SDL resources", destination_state,
+               destination->instanceGeneration()->nativeWindowGeneration() == 51 &&
+               destination->instanceGeneration()->surfaceNativeWindowGeneration() == 51);
+    ensureEvents("move assignment tears down the replaced surface and instance before its SDL resources", destination_state,
                  { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
-                   Event::DestroyInstance, Event::Destroy, Event::Unload });
+                   Event::CreateSurface, Event::DestroySurface, Event::DestroyInstance, Event::Destroy, Event::Unload });
+    ensure("replaced requirements and instance remain live while the replaced surface is destroyed",
+           destination_state.mRequirementsLiveDuringSurfaceDestroy && destination_state.mInstanceLiveDuringSurfaceDestroy);
+    ensure("replaced loader references remain live while the replaced surface is destroyed",
+           destination_state.mLoaderLiveDuringSurfaceDestroy);
     ensure("replaced requirements remain live while the replaced instance is destroyed",
            destination_state.mRequirementsLiveDuringInstanceDestroy);
+    ensure("the replaced surface is absent before its instance is destroyed", destination_state.mSurfaceAbsentDuringInstanceDestroy);
     ensure("replaced loader references remain live while the replaced instance is destroyed",
            destination_state.mLoaderLiveDuringInstanceDestroy);
     ensure("replaced requirements are invalid before the replaced SDL window is destroyed",
            destination_state.mRequirementsInvalidatedBeforeDestroy);
+    ensure_equals("move assignment destroys the replaced surface once", destination_state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("move assignment destroys the replaced instance once", destination_state.mDestroyInstanceCount, std::size_t{ 1 });
 
     vulkan_state.use(source_state);
+    source_state.mOwnerDuringSurfaceDestroy  = destination;
     source_state.mOwnerDuringInstanceDestroy = destination;
     source_state.mOwnerDuringDestroy         = destination;
     destination->reset();
-    ensureEvents("the transferred owner preserves instance-first teardown for the source resources", source_state,
+    ensureEvents("the transferred owner preserves surface-first teardown for the source resources", source_state,
                  { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
-                   Event::DestroyInstance, Event::Destroy, Event::Unload });
+                   Event::CreateSurface, Event::DestroySurface, Event::DestroyInstance, Event::Destroy, Event::Unload });
+    ensure("transferred requirements and instance remain live while the transferred surface is destroyed",
+           source_state.mRequirementsLiveDuringSurfaceDestroy && source_state.mInstanceLiveDuringSurfaceDestroy);
+    ensure("transferred loader references remain live while the transferred surface is destroyed",
+           source_state.mLoaderLiveDuringSurfaceDestroy);
     ensure("transferred requirements remain live while the transferred instance is destroyed",
            source_state.mRequirementsLiveDuringInstanceDestroy);
+    ensure("the transferred surface is absent before its instance is destroyed", source_state.mSurfaceAbsentDuringInstanceDestroy);
     ensure("transferred loader references remain live while the transferred instance is destroyed",
            source_state.mLoaderLiveDuringInstanceDestroy);
     ensure("transferred requirements are invalid before the source SDL window is destroyed",
            source_state.mRequirementsInvalidatedBeforeDestroy);
+    ensure_equals("the transferred surface is destroyed once", source_state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("the transferred instance is destroyed once", source_state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
@@ -675,6 +813,135 @@ void window_sdl_vulkan_object::test<9>()
     ensure("failed acquisition invalidates requirements before SDL destroys the window", state.mRequirementsInvalidatedBeforeDestroy);
     ensure_equals("failed acquisition releases the explicit loader reference", state.mExplicitLoaderReferences, 0);
     ensure_equals("failed acquisition releases the window loader reference", state.mWindowLoaderReferences, 0);
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<10>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 71, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("surface-reset fixture acquired a Vulkan window", owner != nullptr);
+    ensure("surface-reset fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    ensure("surface-reset fixture acquired a surface", !owner->acquireSurfaceGeneration());
+
+    state.mOwnerDuringSurfaceDestroy = owner;
+    ensure("explicit surface reset reports an owned generation", owner->resetSurfaceGeneration());
+    ensureEvents("explicit surface reset destroys only the surface", state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
+                   Event::CreateSurface, Event::DestroySurface });
+    ensure("explicit surface reset leaves the parent instance and requirements live",
+           owner->instanceGeneration() && owner->instanceGeneration()->instance() == fakeInstance() && owner->hasRequirements());
+    ensure("explicit surface reset publishes no child", !owner->instanceGeneration()->hasSurfaceGeneration());
+    ensure("a second explicit surface reset is idempotent", !owner->resetSurfaceGeneration());
+    ensure_equals("idempotent surface reset performs no Vulkan call", state.mEventCount, std::size_t{ 8 });
+
+    ensure("the same current generations may reacquire a surface", !owner->acquireSurfaceGeneration());
+    ensure("the reacquired surface is published", owner->instanceGeneration()->surface() == fakeSurface());
+
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensureEvents("full reset destroys the reacquired surface before its parent and SDL resources", state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
+                   Event::CreateSurface, Event::DestroySurface, Event::CreateSurface, Event::DestroySurface, Event::DestroyInstance,
+                   Event::Destroy, Event::Unload });
+    ensure_equals("both earned surface generations are destroyed once", state.mDestroySurfaceCount, std::size_t{ 2 });
+    ensure_equals("the shared parent instance is destroyed once", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<11>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 81, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("surface-failure fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto missing_parent = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("surface acquisition rejects a missing instance parent", missing_parent, VulkanSurfaceAcquireCode::InstanceNotLive);
+    ensure_equals("a missing instance parent makes no SDL surface call", state.mCreateSurfaceCount, std::size_t{ 0 });
+
+    ensure("surface-failure fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mExposeDestroySurface = false;
+    const auto missing_destroy  = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("a missing surface destroy command fails before SDL creation", missing_destroy,
+                       VulkanSurfaceAcquireCode::MissingRequiredInstanceCommand);
+    ensure("the exact missing destroy command is retained",
+           missing_destroy && missing_destroy->mCommand && *missing_destroy->mCommand == VulkanSurfaceCommand::DestroySurface);
+    ensure_equals("a missing destroy command makes no SDL surface call", state.mCreateSurfaceCount, std::size_t{ 0 });
+
+    state.mExposeDestroySurface   = true;
+    state.mFailSurfaceCreation    = true;
+    state.mPoisonSurfaceOnFailure = true;
+    const auto platform_failure   = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("SDL false maps to a platform failure", platform_failure, VulkanSurfaceAcquireCode::PlatformCreationFailure);
+    ensure("SDL platform failure carries no invented Vulkan result", platform_failure && !platform_failure->mResult);
+    ensure("a poisoned failed output is neither published nor destroyed",
+           !owner->instanceGeneration()->hasSurfaceGeneration() && state.mDestroySurfaceCount == 0);
+
+    state.mFailSurfaceCreation  = false;
+    state.mNullSurfaceOnSuccess = true;
+    const auto null_success     = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("SDL success with a null handle is rejected", null_success, VulkanSurfaceAcquireCode::NullSurfaceOnSuccess);
+    ensure("a null success publishes no child and destroys no surface",
+           !owner->instanceGeneration()->hasSurfaceGeneration() && state.mDestroySurfaceCount == 0);
+
+    state.mNullSurfaceOnSuccess = false;
+    ensure("a prior platform or null-output failure does not poison later acquisition", !owner->acquireSurfaceGeneration());
+    ensure_equals("the three creator paths call SDL exactly three times", state.mCreateSurfaceCount, std::size_t{ 3 });
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("only the earned surface is destroyed", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("failure recovery retains one parent destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<12>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 91, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("surface-allocation fixture acquired a Vulkan window", owner != nullptr);
+    ensure("surface-allocation fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    const auto allocation_failure = LLWindowSDLVulkanDetail::acquireSurfaceGeneration(*owner, failAllocation);
+    ensureSurfaceError("child allocation failure is returned through the SDL adapter", allocation_failure,
+                       VulkanSurfaceAcquireCode::AllocationFailure);
+    ensure("allocation failure leaves the existing parent and requirements live",
+           owner->instanceGeneration() && owner->instanceGeneration()->instance() == fakeInstance() && owner->hasRequirements());
+    ensure("allocation failure runs no SDL creator and publishes no child",
+           state.mCreateSurfaceCount == 0 && !owner->instanceGeneration()->hasSurfaceGeneration());
+
+    ensure("normal acquisition still succeeds after allocation failure", !owner->acquireSurfaceGeneration());
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("post-allocation recovery destroys one surface", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("post-allocation recovery destroys one instance", state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
 } // namespace tut

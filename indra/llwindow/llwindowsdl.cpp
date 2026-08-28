@@ -219,6 +219,14 @@ bool LLWindowSDL::createVulkanWindow(int x, int y, int width, int height, bool f
         return false;
     }
 
+    const auto surface_error = vulkan_window->acquireSurfaceGeneration();
+    if (surface_error)
+    {
+        LL_WARNS("Window") << "Vulkan surface acquisition failed with code "
+                           << static_cast<U32>(surface_error->mCode) << LL_ENDL;
+        return false;
+    }
+
     mVulkanWindow = std::move(vulkan_window);
     mWindow       = mVulkanWindow->window();
     mFullscreen   = fullscreen;
@@ -253,6 +261,11 @@ bool LLWindowSDL::isVulkanWindowGenerationCurrent(U64 generation) const noexcept
 const LLRenderVulkan::VulkanInstanceGeneration* LLWindowSDL::getVulkanInstanceGeneration() const noexcept
 {
     return mVulkanWindow ? mVulkanWindow->instanceGeneration() : nullptr;
+}
+
+bool LLWindowSDL::resetVulkanSurfaceGeneration() noexcept
+{
+    return mVulkanWindow && mVulkanWindow->resetSurfaceGeneration();
 }
 #endif
 

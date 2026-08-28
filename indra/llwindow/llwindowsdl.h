@@ -179,6 +179,7 @@ public:
     const LLWindowVulkanRequirements* getVulkanRequirements() const noexcept override;
     bool isVulkanWindowGenerationCurrent(U64 generation) const noexcept override;
     const LLRenderVulkan::VulkanInstanceGeneration* getVulkanInstanceGeneration() const noexcept;
+    bool resetVulkanSurfaceGeneration() noexcept;
 #endif
 
     static std::vector<std::string> getDisplaysResolutionList();

@@ -53,6 +53,11 @@ struct LLWindowSDLVulkanOperations
     SDL_WindowFlags (*mGetWindowFlags)(void* userdata, SDL_Window* window) noexcept                = nullptr;
     LLWindowVulkanFunction (*mGetResolver)(void* userdata) noexcept                                = nullptr;
     const char* const* (*mGetInstanceExtensions)(void* userdata, std::size_t* count) noexcept      = nullptr;
+    bool (*mCreateSurface)(void*                        userdata,
+                           SDL_Window*                  window,
+                           VkInstance                   instance,
+                           const VkAllocationCallbacks* allocator,
+                           VkSurfaceKHR*                surface) noexcept                                         = nullptr;
 };
 
 enum class LLWindowSDLVulkanAcquireCode : U8
@@ -74,6 +79,17 @@ struct LLWindowSDLVulkanAcquireError
     friend constexpr bool operator==(const LLWindowSDLVulkanAcquireError&, const LLWindowSDLVulkanAcquireError&) = default;
 };
 
+class LLWindowSDLVulkan;
+
+namespace LLWindowSDLVulkanDetail
+{
+
+LLRenderVulkan::VulkanSurfaceAcquireResult acquireSurfaceGeneration(
+    LLWindowSDLVulkan&                                         owner,
+    LLRenderVulkan::VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+
+} // namespace LLWindowSDLVulkanDetail
+
 // Owns both references involved in an SDL Vulkan window. SDL owns one loader
 // reference through the window, while this object owns the explicit reference
 // acquired before window creation.
@@ -93,7 +109,9 @@ public:
     std::optional<LLRenderVulkan::VulkanInstanceAcquireError> acquireInstanceGeneration(
         LLRenderVulkan::VulkanInstanceValidationMode  validation_mode,
         LLRenderVulkan::VulkanInstancePortabilityMode portability_mode) noexcept;
-    const LLRenderVulkan::VulkanInstanceGeneration* instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
+    std::optional<LLRenderVulkan::VulkanSurfaceAcquireError> acquireSurfaceGeneration() noexcept;
+    const LLRenderVulkan::VulkanInstanceGeneration*          instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
+    bool                                                     resetSurfaceGeneration() noexcept;
 
     void reset() noexcept;
 
@@ -103,12 +121,17 @@ private:
         const LLWindowSDLVulkanCreateInfo&,
         U64,
         const LLWindowSDLVulkanOperations&) noexcept;
+    friend LLRenderVulkan::VulkanSurfaceAcquireResult LLWindowSDLVulkanDetail::acquireSurfaceGeneration(
+        LLWindowSDLVulkan&,
+        LLRenderVulkan::VulkanInstanceDetail::AllocationCheckpoint) noexcept;
 
     SDL_Window* window() const noexcept { return mWindow; }
 
     LLWindowSDLVulkan(const LLWindowSDLVulkanOperations& operations,
                       SDL_Window*                        window,
                       LLWindowVulkanRequirements&&       requirements) noexcept;
+    LLRenderVulkan::VulkanSurfaceAcquireResult acquireSurfaceGeneration(
+        LLRenderVulkan::VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
 
     LLWindowSDLVulkanOperations                               mOperations;
     SDL_Window*                                               mWindow = nullptr;

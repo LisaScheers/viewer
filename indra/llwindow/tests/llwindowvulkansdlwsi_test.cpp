@@ -106,17 +106,25 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool extensions_identical     = false;
     bool global_dispatch_resolved = false;
 
-    bool instance_acquired           = false;
-    bool instance_nonnull            = false;
-    bool instance_api_1_1            = false;
-    bool instance_generation_exact   = false;
-    bool instance_extensions_ordered = false;
-    bool instance_validation_enabled = false;
-    bool instance_validation_clean   = false;
-    bool instance_window_owned       = false;
-    bool mixed_opengl_rejected       = false;
-    bool vulkan_context_switch_fails = false;
-    bool vulkan_shared_context_fails = false;
+    bool instance_acquired             = false;
+    bool instance_nonnull              = false;
+    bool instance_api_1_1              = false;
+    bool instance_generation_exact     = false;
+    bool instance_extensions_ordered   = false;
+    bool instance_validation_enabled   = false;
+    bool instance_validation_clean     = false;
+    bool instance_window_owned         = false;
+    bool surface_acquired              = false;
+    bool surface_nonnull               = false;
+    bool surface_generation_exact      = false;
+    bool surface_window_owned          = false;
+    bool surface_explicitly_reset      = false;
+    bool surface_removed               = false;
+    bool surface_parent_still_live     = false;
+    bool surface_validation_still_live = false;
+    bool mixed_opengl_rejected         = false;
+    bool vulkan_context_switch_fails   = false;
+    bool vulkan_shared_context_fails   = false;
 
     const LLRenderVulkan::VulkanInstanceGeneration* owned_instance_generation = nullptr;
 
@@ -153,6 +161,11 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 instance_generation_exact = instance_generation->nativeWindowGeneration() == requirements->nativeWindowGeneration() &&
                                             window->isVulkanWindowGenerationCurrent(instance_generation->nativeWindowGeneration());
                 instance_validation_enabled = instance_generation->validationEnabled();
+                surface_acquired            = instance_generation->hasSurfaceGeneration();
+                surface_nonnull             = instance_generation->surface() != VK_NULL_HANDLE;
+                surface_generation_exact =
+                    instance_generation->surfaceNativeWindowGeneration() == requirements->nativeWindowGeneration() &&
+                    instance_generation->surfaceNativeWindowGeneration() == instance_generation->nativeWindowGeneration();
 
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
                 const auto& enabled_extensions  = instance_generation->enabledExtensions();
@@ -183,7 +196,13 @@ void window_vulkan_sdl_wsi_object::test<1>()
     {
         instance_window_owned = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == owned_instance_generation &&
                                 owned_instance_generation->instance() != VK_NULL_HANDLE;
-        instance_validation_clean = owned_instance_generation->validationSnapshot().mMessageCount == 0;
+        surface_window_owned = owned_instance_generation->hasSurfaceGeneration() && owned_instance_generation->surface() != VK_NULL_HANDLE;
+        surface_explicitly_reset = static_cast<LLWindowSDL*>(window)->resetVulkanSurfaceGeneration();
+        surface_removed = !owned_instance_generation->hasSurfaceGeneration() && owned_instance_generation->surface() == VK_NULL_HANDLE;
+        surface_parent_still_live = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == owned_instance_generation &&
+                                    owned_instance_generation->instance() != VK_NULL_HANDLE;
+        surface_validation_still_live = owned_instance_generation->validationEnabled();
+        instance_validation_clean     = owned_instance_generation->validationSnapshot().mMessageCount == 0;
     }
 
     const bool     destroyed       = created && LLWindowManager::destroyWindow(window);
@@ -206,7 +225,15 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the Vulkan instance retains the exact current native-window generation", instance_generation_exact);
     ensure("the Vulkan instance enables SDL's required extensions in order", instance_extensions_ordered);
     ensure("the Vulkan instance enables required validation", instance_validation_enabled);
-    ensure("the Vulkan instance emits no validation messages", instance_validation_clean);
+    ensure("the current instance owns one SDL-created Vulkan surface", surface_acquired);
+    ensure("the SDL-created Vulkan surface handle is non-null", surface_nonnull);
+    ensure("the Vulkan surface retains the exact instance and native-window generation", surface_generation_exact);
+    ensure("the Vulkan surface is owned by the SDL window's exact instance parent", surface_window_owned);
+    ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
+    ensure("explicit reset removes only the Vulkan surface child", surface_removed);
+    ensure("the exact parent instance remains live after explicit surface reset", surface_parent_still_live);
+    ensure("required validation remains live while the surface is explicitly destroyed", surface_validation_still_live);
+    ensure("surface creation and destruction emit no validation messages", instance_validation_clean);
     ensure("the Vulkan instance is owned by its SDL Vulkan window", instance_window_owned);
     ensure("a live Vulkan window rejects an OpenGL window before construction", mixed_opengl_rejected);
     ensure("Vulkan native-window recreation fails closed", vulkan_context_switch_fails);

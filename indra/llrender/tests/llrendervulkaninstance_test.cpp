@@ -47,13 +47,16 @@ enum class MissingCommand : std::uint8_t
     GlobalEnumerateVersion,
     DestroyInstance,
     CreateDebugMessenger,
-    DestroyDebugMessenger
+    DestroyDebugMessenger,
+    DestroySurface
 };
 
 enum class Event : std::uint8_t
 {
     CreateInstance,
     CreateDebugMessenger,
+    CreateSurface,
+    DestroySurface,
     DestroyDebugMessenger,
     DestroyInstance
 };
@@ -99,8 +102,14 @@ struct FakeState
     VkResult mDebugResult        = VK_SUCCESS;
     bool     mNullDebugMessenger = false;
 
+    bool     mSurfacePlatformFailure = false;
+    VkResult mSurfaceResult          = VK_SUCCESS;
+    bool     mNullSurface            = false;
+    bool     mPoisonSurfaceOutput    = false;
+
     VkInstance                           mInstance       = fakeHandle<VkInstance>(0x1111);
     VkDebugUtilsMessengerEXT             mDebugMessenger = fakeHandle<VkDebugUtilsMessengerEXT>(0x2222);
+    VkSurfaceKHR                         mSurface        = fakeHandle<VkSurfaceKHR>(0x3333);
     std::vector<Event>                   mEvents;
     std::vector<std::string>             mEnabledExtensions;
     std::vector<std::string>             mEnabledLayers;
@@ -117,9 +126,27 @@ struct FakeState
     std::size_t mDestroyInstanceCalls = 0;
     std::size_t mDestroyDebugCalls    = 0;
 
+    std::size_t                  mDestroySurfaceResolutionCalls     = 0;
+    VkInstance                   mDestroySurfaceResolutionInstance  = VK_NULL_HANDLE;
+    std::size_t                  mCreateSurfaceCalls                = 0;
+    VkInstance                   mCreateSurfaceInstance             = VK_NULL_HANDLE;
+    const VkAllocationCallbacks* mCreateSurfaceAllocationCallbacks  = nullptr;
+    std::size_t                  mDestroySurfaceCalls               = 0;
+    VkInstance                   mDestroySurfaceInstance            = VK_NULL_HANDLE;
+    VkSurfaceKHR                 mDestroyedSurface                  = VK_NULL_HANDLE;
+    const VkAllocationCallbacks* mDestroySurfaceAllocationCallbacks = nullptr;
+
     bool        mGenerationCurrent   = true;
     std::size_t mGenerationChecks    = 0;
     std::size_t mFailGenerationCheck = 0;
+
+    const VulkanInstanceGeneration* mExpectedInstanceOwner  = nullptr;
+    bool                            mInstanceOwnerCurrent   = true;
+    std::size_t                     mInstanceOwnerChecks    = 0;
+    std::size_t                     mFailInstanceOwnerCheck = 0;
+    bool                            mSurfaceWindowCurrent   = true;
+    std::size_t                     mSurfaceWindowChecks    = 0;
+    std::size_t                     mFailSurfaceWindowCheck = 0;
 };
 
 FakeState* gFakeState = nullptr;
@@ -293,6 +320,21 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyDebugUtilsMessenger(VkInstance instance, V
     }
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeDestroySurface(VkInstance                   instance,
+                                              VkSurfaceKHR                 surface,
+                                              const VkAllocationCallbacks* allocation_callbacks) noexcept
+{
+    if (!gFakeState)
+    {
+        return;
+    }
+    ++gFakeState->mDestroySurfaceCalls;
+    gFakeState->mDestroySurfaceInstance            = instance;
+    gFakeState->mDestroyedSurface                  = surface;
+    gFakeState->mDestroySurfaceAllocationCallbacks = allocation_callbacks;
+    gFakeState->mEvents.push_back(Event::DestroySurface);
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance instance, const char* name) noexcept
 {
     if (!gFakeState || !name)
@@ -326,6 +368,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
     {
         return gFakeState->mMissing == MissingCommand::DestroyInstance ? nullptr : eraseFunctionType(fakeDestroyInstance);
     }
+    if (std::strcmp(name, "vkDestroySurfaceKHR") == 0)
+    {
+        ++gFakeState->mDestroySurfaceResolutionCalls;
+        gFakeState->mDestroySurfaceResolutionInstance = instance;
+        return gFakeState->mMissing == MissingCommand::DestroySurface ? nullptr : eraseFunctionType(fakeDestroySurface);
+    }
     if (std::strcmp(name, "vkCreateDebugUtilsMessengerEXT") == 0)
     {
         return gFakeState->mMissing == MissingCommand::CreateDebugMessenger ? nullptr : eraseFunctionType(fakeCreateDebugUtilsMessenger);
@@ -350,6 +398,45 @@ VulkanWindowGenerationCheck generationCheck(FakeState& state) noexcept
     return { &state, generationIsCurrent };
 }
 
+bool instanceOwnerIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    ++state.mInstanceOwnerChecks;
+    return state.mExpectedInstanceOwner == &generation && state.mInstanceOwnerCurrent &&
+           (state.mFailInstanceOwnerCheck == 0 || state.mInstanceOwnerChecks != state.mFailInstanceOwnerCheck);
+}
+
+bool surfaceWindowIsCurrent(void* userdata, std::uint64_t generation) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    ++state.mSurfaceWindowChecks;
+    return generation == 42 && state.mSurfaceWindowCurrent &&
+           (state.mFailSurfaceWindowCheck == 0 || state.mSurfaceWindowChecks != state.mFailSurfaceWindowCheck);
+}
+
+VulkanSurfaceCreateOutcome createSurface(void*                        userdata,
+                                         VkInstance                   instance,
+                                         const VkAllocationCallbacks* allocation_callbacks,
+                                         VkSurfaceKHR*                surface) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    ++state.mCreateSurfaceCalls;
+    state.mCreateSurfaceInstance            = instance;
+    state.mCreateSurfaceAllocationCallbacks = allocation_callbacks;
+    state.mEvents.push_back(Event::CreateSurface);
+
+    if (surface)
+    {
+        const bool failed = state.mSurfacePlatformFailure || state.mSurfaceResult != VK_SUCCESS;
+        *surface          = state.mNullSurface || (failed && !state.mPoisonSurfaceOutput) ? VK_NULL_HANDLE : state.mSurface;
+    }
+    if (state.mSurfacePlatformFailure)
+    {
+        return VulkanSurfacePlatformFailure{};
+    }
+    return state.mSurfaceResult;
+}
+
 const std::vector<std::string> REQUIRED_SURFACE{ VK_KHR_SURFACE_EXTENSION_NAME };
 constexpr char                 PORTABILITY_EXTENSION[] = "VK_KHR_portability_enumeration";
 
@@ -359,6 +446,12 @@ VulkanInstanceRequest makeRequest(FakeState&                    state,
                                   std::span<const std::string>  required_extensions = REQUIRED_SURFACE) noexcept
 {
     return { fakeGetInstanceProcAddr, required_extensions, 42, generationCheck(state), validation_mode, portability_mode };
+}
+
+VulkanSurfaceRequest makeSurfaceRequest(FakeState& state, VulkanInstanceGeneration& owner) noexcept
+{
+    state.mExpectedInstanceOwner = &owner;
+    return { 42, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent }, { &state, createSurface } };
 }
 
 const VulkanInstanceAcquireError& requireError(const VulkanInstanceAcquireResult& result)
@@ -377,6 +470,17 @@ VulkanInstanceGeneration takeGeneration(VulkanInstanceAcquireResult&& result)
 void ensureCode(const VulkanInstanceAcquireResult& result, VulkanInstanceAcquireCode code)
 {
     tut::ensure("the exact instance error is reported", requireError(result).mCode == code);
+}
+
+const VulkanSurfaceAcquireError& requireSurfaceError(const VulkanSurfaceAcquireResult& result)
+{
+    tut::ensure("surface acquisition returns an error", result.has_value());
+    return *result;
+}
+
+void ensureSurfaceCode(const VulkanSurfaceAcquireResult& result, VulkanSurfaceAcquireCode code)
+{
+    tut::ensure("the exact surface error is reported", requireSurfaceError(result).mCode == code);
 }
 
 void failAllocation()
@@ -920,6 +1024,284 @@ void render_vulkan_instance_test_object::test<13>()
     const auto      result = VulkanInstanceDetail::acquire(makeRequest(state), failAllocation);
     ensureCode(result, VulkanInstanceAcquireCode::AllocationFailure);
     ensure("allocation failure occurs before instance ownership", state.mEvents.empty() && state.mDestroyInstanceCalls == 0);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<14>()
+{
+    static_assert(std::variant_size_v<VulkanSurfaceCreateOutcome> == 2);
+    static_assert(std::is_same_v<std::variant_alternative_t<0, VulkanSurfaceCreateOutcome>, VulkanSurfacePlatformFailure>);
+    static_assert(std::is_same_v<std::variant_alternative_t<1, VulkanSurfaceCreateOutcome>, VkResult>);
+    static_assert(std::is_same_v<VulkanSurfaceAcquireResult, std::optional<VulkanSurfaceAcquireError>>);
+    static_assert(
+        noexcept(std::declval<VulkanInstanceGeneration&>().acquireSurfaceGeneration(std::declval<const VulkanSurfaceRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().resetSurfaceGeneration()));
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().hasSurfaceGeneration()));
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().surface()));
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().surfaceNativeWindowGeneration()));
+
+    const VulkanSurfaceAcquireError left{ VulkanSurfaceAcquireCode::MissingRequiredInstanceCommand, std::nullopt,
+                                          VulkanSurfaceCommand::DestroySurface };
+    ensure("identical surface errors compare equal", left == left);
+    ensure("the platform marker is a distinct success-free outcome", VulkanSurfacePlatformFailure{} == VulkanSurfacePlatformFailure{});
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<15>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+
+    VulkanSurfaceRequest request = makeSurfaceRequest(state, owner);
+    request.mInstanceOwnerCheck  = {};
+    ensureSurfaceCode(owner.acquireSurfaceGeneration(request), VulkanSurfaceAcquireCode::InvalidInstanceOwnerCheck);
+
+    request                        = makeSurfaceRequest(state, owner);
+    request.mWindowGenerationCheck = {};
+    ensureSurfaceCode(owner.acquireSurfaceGeneration(request), VulkanSurfaceAcquireCode::InvalidWindowGenerationCheck);
+
+    request                          = makeSurfaceRequest(state, owner);
+    request.mCreateOperation.mCreate = nullptr;
+    ensureSurfaceCode(owner.acquireSurfaceGeneration(request), VulkanSurfaceAcquireCode::InvalidCreateOperation);
+
+    request                         = makeSurfaceRequest(state, owner);
+    request.mNativeWindowGeneration = 0;
+    ensureSurfaceCode(owner.acquireSurfaceGeneration(request), VulkanSurfaceAcquireCode::InvalidNativeWindowGeneration);
+
+    request                         = makeSurfaceRequest(state, owner);
+    request.mNativeWindowGeneration = 41;
+    ensureSurfaceCode(owner.acquireSurfaceGeneration(request), VulkanSurfaceAcquireCode::NativeWindowGenerationMismatch);
+
+    owner.reset();
+    request = makeSurfaceRequest(state, owner);
+    ensureSurfaceCode(owner.acquireSurfaceGeneration(request), VulkanSurfaceAcquireCode::InstanceNotLive);
+    ensure("invalid requests never resolve, create, or destroy a surface",
+           state.mDestroySurfaceResolutionCalls == 0 && state.mCreateSurfaceCalls == 0 && state.mDestroySurfaceCalls == 0);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<16>()
+{
+    {
+        FakeState state;
+        state.mExtensions = { "VK_EXT_stage_34_fake" };
+        ScopedFakeState                scope(state);
+        const std::vector<std::string> required{ "VK_EXT_stage_34_fake" };
+        VulkanInstanceGeneration       owner = takeGeneration(acquireVulkanInstanceGeneration(
+            makeRequest(state, VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled, required)));
+        ensureSurfaceCode(owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)),
+                          VulkanSurfaceAcquireCode::MissingSurfaceExtension);
+        ensure("the extension gate precedes command resolution and platform creation",
+               state.mDestroySurfaceResolutionCalls == 0 && state.mCreateSurfaceCalls == 0);
+    }
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner          = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        state.mMissing                          = MissingCommand::DestroySurface;
+        const VulkanSurfaceAcquireResult result = owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner));
+        const VulkanSurfaceAcquireError& error  = requireSurfaceError(result);
+        ensure("a missing destroy command is exact and fails before platform creation",
+               error.mCode == VulkanSurfaceAcquireCode::MissingRequiredInstanceCommand &&
+                   error.mCommand == VulkanSurfaceCommand::DestroySurface && !error.mResult && state.mDestroySurfaceResolutionCalls == 1 &&
+                   state.mCreateSurfaceCalls == 0);
+    }
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner   = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        VulkanSurfaceRequest     request = makeSurfaceRequest(state, owner);
+        ensure("the first surface acquisition succeeds", !owner.acquireSurfaceGeneration(request));
+        ensureSurfaceCode(owner.acquireSurfaceGeneration(request), VulkanSurfaceAcquireCode::SurfaceAlreadyOwned);
+        ensure("duplicate acquisition preserves the first child and performs no second create",
+               owner.hasSurfaceGeneration() && owner.surface() == state.mSurface && state.mCreateSurfaceCalls == 1);
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<17>()
+{
+    for (std::size_t scenario = 0; scenario < 5; ++scenario)
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner   = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        VulkanSurfaceRequest     request = makeSurfaceRequest(state, owner);
+
+        if (scenario <= 1)
+        {
+            state.mSurfacePlatformFailure = true;
+            state.mPoisonSurfaceOutput    = scenario == 1;
+        }
+        else if (scenario <= 3)
+        {
+            state.mSurfaceResult       = VK_ERROR_OUT_OF_HOST_MEMORY;
+            state.mPoisonSurfaceOutput = scenario == 3;
+        }
+        else
+        {
+            state.mNullSurface = true;
+        }
+
+        const VulkanSurfaceAcquireResult result = owner.acquireSurfaceGeneration(request);
+        const VulkanSurfaceAcquireError& error  = requireSurfaceError(result);
+        if (scenario <= 1)
+        {
+            ensure("a platform failure has no invented Vulkan result",
+                   error.mCode == VulkanSurfaceAcquireCode::PlatformCreationFailure && !error.mResult);
+        }
+        else if (scenario <= 3)
+        {
+            ensure("a Vulkan surface failure retains its exact result",
+                   error.mCode == VulkanSurfaceAcquireCode::SurfaceCreationFailure && error.mResult == VK_ERROR_OUT_OF_HOST_MEMORY);
+        }
+        else
+        {
+            ensure("a null success is distinct and retains VK_SUCCESS",
+                   error.mCode == VulkanSurfaceAcquireCode::NullSurfaceOnSuccess && error.mResult == VK_SUCCESS);
+        }
+        ensure("failed and null outputs publish no child and never destroy poisoned handles",
+               !owner.hasSurfaceGeneration() && owner.surface() == VK_NULL_HANDLE && state.mDestroySurfaceCalls == 0);
+
+        state.mSurfacePlatformFailure = false;
+        state.mSurfaceResult          = VK_SUCCESS;
+        state.mNullSurface            = false;
+        state.mPoisonSurfaceOutput    = false;
+        ensure("the parent remains reusable after a failed platform transaction", !owner.acquireSurfaceGeneration(request));
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<18>()
+{
+    for (std::size_t boundary = 1; boundary <= 5; ++boundary)
+    {
+        for (bool fail_instance_owner : { true, false })
+        {
+            FakeState                state;
+            ScopedFakeState          scope(state);
+            VulkanInstanceGeneration owner   = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+            VulkanSurfaceRequest     request = makeSurfaceRequest(state, owner);
+            if (fail_instance_owner)
+            {
+                state.mFailInstanceOwnerCheck = boundary;
+            }
+            else
+            {
+                state.mFailSurfaceWindowCheck = boundary;
+            }
+
+            const VulkanSurfaceAcquireResult result = owner.acquireSurfaceGeneration(request);
+            ensureSurfaceCode(result, fail_instance_owner ? VulkanSurfaceAcquireCode::StaleInstanceOwner
+                                                          : VulkanSurfaceAcquireCode::StaleWindowGeneration);
+            ensure_equals("the selected freshness boundary is reached exactly", state.mInstanceOwnerChecks, boundary);
+            ensure_equals("window freshness short-circuits only after a stale instance owner", state.mSurfaceWindowChecks,
+                          fail_instance_owner ? boundary - 1 : boundary);
+
+            const std::size_t expected_resolution_calls = boundary >= 3 ? 1 : 0;
+            const std::size_t expected_native_calls     = boundary == 5 ? 1 : 0;
+            ensure("freshness stops at the exact native-object boundary",
+                   state.mDestroySurfaceResolutionCalls == expected_resolution_calls &&
+                       state.mCreateSurfaceCalls == expected_native_calls && state.mDestroySurfaceCalls == expected_native_calls &&
+                       !owner.hasSurfaceGeneration());
+        }
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<19>()
+{
+    FakeState state;
+    state.mExtensions = { VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
+    state.mLayers     = { "VK_LAYER_KHRONOS_validation" };
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner =
+        takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state, VulkanInstanceValidationMode::Required)));
+
+    ensure("validated surface acquisition succeeds", !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+    ensure("the child retains exact scalar identity",
+           owner.hasSurfaceGeneration() && owner.surface() == state.mSurface && owner.surfaceNativeWindowGeneration() == 42);
+    ensure("creation and destroy resolution use the exact parent with null allocation policy",
+           state.mDestroySurfaceResolutionInstance == state.mInstance && state.mCreateSurfaceInstance == state.mInstance &&
+               state.mCreateSurfaceAllocationCallbacks == nullptr && state.mDestroySurfaceCalls == 0);
+
+    owner.resetSurfaceGeneration();
+    ensure("explicit child reset leaves validation and the instance live",
+           !owner.hasSurfaceGeneration() && owner.surface() == VK_NULL_HANDLE && owner.surfaceNativeWindowGeneration() == 0 &&
+               owner.validationEnabled() && owner.instance() == state.mInstance && state.mDestroySurfaceCalls == 1 &&
+               state.mDestroyDebugCalls == 0 && state.mDestroyInstanceCalls == 0);
+    emitValidationMessage(state, "validation after surface reset");
+    const VulkanValidationSnapshot snapshot = owner.validationSnapshot();
+    ensure("validation remains observable after surface destruction",
+           snapshot.mMessageCount == 1 && snapshot.firstMessage() == "validation after surface reset");
+
+    owner.resetSurfaceGeneration();
+    owner.reset();
+    ensure("surface teardown is idempotent and precedes validation and instance teardown",
+           state.mDestroySurfaceCalls == 1 && state.mDestroySurfaceInstance == state.mInstance &&
+               state.mDestroyedSurface == state.mSurface && state.mDestroySurfaceAllocationCallbacks == nullptr &&
+               state.mEvents == std::vector<Event>{ Event::CreateInstance, Event::CreateDebugMessenger, Event::CreateSurface,
+                                                    Event::DestroySurface, Event::DestroyDebugMessenger, Event::DestroyInstance });
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<20>()
+{
+    {
+        FakeState state;
+        state.mExtensions = { VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
+        state.mLayers     = { "VK_LAYER_KHRONOS_validation" };
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration first =
+            takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state, VulkanInstanceValidationMode::Required)));
+        ensure("surface acquisition before a parent move succeeds", !first.acquireSurfaceGeneration(makeSurfaceRequest(state, first)));
+
+        VulkanInstanceGeneration moved(std::move(first));
+        ensure("the parent move transfers the private child allocation",
+               !first.hasSurfaceGeneration() && first.surface() == VK_NULL_HANDLE && moved.hasSurfaceGeneration() &&
+                   moved.surface() == state.mSurface && moved.surfaceNativeWindowGeneration() == 42);
+        first.reset();
+        ensure_equals("resetting the moved-from parent destroys no surface", state.mDestroySurfaceCalls, std::size_t{ 0 });
+        moved.reset();
+        ensure("the moved-to parent owns the one complete teardown chain",
+               state.mEvents == std::vector<Event>{ Event::CreateInstance, Event::CreateDebugMessenger, Event::CreateSurface,
+                                                    Event::DestroySurface, Event::DestroyDebugMessenger, Event::DestroyInstance } &&
+                   state.mDestroySurfaceCalls == 1 && state.mDestroyDebugCalls == 1 && state.mDestroyInstanceCalls == 1);
+    }
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration first = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        VulkanInstanceGeneration moved(std::move(first));
+        ensure("a request bound after the parent move succeeds", !moved.acquireSurfaceGeneration(makeSurfaceRequest(state, moved)));
+        ensure("the post-move owner check receives the exact moved-to object",
+               state.mExpectedInstanceOwner == &moved && moved.hasSurfaceGeneration());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<21>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner   = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    VulkanSurfaceRequest     request = makeSurfaceRequest(state, owner);
+
+    const VulkanSurfaceAcquireResult result = VulkanInstanceDetail::acquireSurface(owner, request, failAllocation);
+    ensureSurfaceCode(result, VulkanSurfaceAcquireCode::AllocationFailure);
+    ensure("allocation fails after safe destroy resolution but before platform creation",
+           state.mDestroySurfaceResolutionCalls == 1 && state.mCreateSurfaceCalls == 0 && state.mDestroySurfaceCalls == 0 &&
+               !owner.hasSurfaceGeneration() && owner.instance() == state.mInstance);
+    ensure("the live parent can retry after allocation failure", !owner.acquireSurfaceGeneration(request));
 }
 
 } // namespace tut

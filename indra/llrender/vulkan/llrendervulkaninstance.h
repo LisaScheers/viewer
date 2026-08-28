@@ -36,6 +36,8 @@ namespace LLRenderVulkan
 
 inline constexpr std::size_t VULKAN_VALIDATION_MESSAGE_CAPACITY = 1024;
 
+class VulkanInstanceGeneration;
+
 enum class VulkanInstanceValidationMode : std::uint8_t
 {
     Disabled,
@@ -121,6 +123,73 @@ struct VulkanValidationSnapshot
     std::string_view firstMessage() const noexcept { return std::string_view(mFirstMessage.data(), mFirstMessageSize); }
 };
 
+struct VulkanInstanceOwnerCheck
+{
+    void* mUserdata                                                                         = nullptr;
+    bool (*mIsCurrent)(void* userdata, const VulkanInstanceGeneration& generation) noexcept = nullptr;
+};
+
+struct VulkanSurfacePlatformFailure
+{
+    friend constexpr bool operator==(VulkanSurfacePlatformFailure, VulkanSurfacePlatformFailure) = default;
+};
+
+using VulkanSurfaceCreateOutcome = std::variant<VulkanSurfacePlatformFailure, VkResult>;
+
+struct VulkanSurfaceCreateOperation
+{
+    void* mUserdata                                                       = nullptr;
+    VulkanSurfaceCreateOutcome (*mCreate)(void*                        userdata,
+                                          VkInstance                   instance,
+                                          const VkAllocationCallbacks* allocation_callbacks,
+                                          VkSurfaceKHR*                surface) noexcept = nullptr;
+};
+
+struct VulkanSurfaceRequest
+{
+    // All callbacks are synchronous and are not retained by the generation.
+    // The caller must serialize parent and native-window lifetime changes.
+    std::uint64_t                mNativeWindowGeneration = 0;
+    VulkanInstanceOwnerCheck     mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck  mWindowGenerationCheck;
+    VulkanSurfaceCreateOperation mCreateOperation;
+};
+
+enum class VulkanSurfaceCommand : std::uint8_t
+{
+    DestroySurface
+};
+
+enum class VulkanSurfaceAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidCreateOperation,
+    InvalidNativeWindowGeneration,
+    InstanceNotLive,
+    SurfaceAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    MissingSurfaceExtension,
+    MissingRequiredInstanceCommand,
+    AllocationFailure,
+    PlatformCreationFailure,
+    SurfaceCreationFailure,
+    NullSurfaceOnSuccess
+};
+
+struct VulkanSurfaceAcquireError
+{
+    VulkanSurfaceAcquireCode            mCode = VulkanSurfaceAcquireCode::InvalidCreateOperation;
+    std::optional<VkResult>             mResult;
+    std::optional<VulkanSurfaceCommand> mCommand;
+
+    friend constexpr bool operator==(const VulkanSurfaceAcquireError&, const VulkanSurfaceAcquireError&) = default;
+};
+
+using VulkanSurfaceAcquireResult = std::optional<VulkanSurfaceAcquireError>;
+
 // This generation owns the Vulkan objects but borrows the loader behind the
 // originating window's resolver. It must be reset before that window destroys
 // its requirements generation or releases its loader references.
@@ -145,11 +214,19 @@ public:
     const std::vector<std::string>& enabledLayers() const noexcept { return mEnabledLayers; }
     bool                            isExtensionEnabled(std::string_view extension_name) const noexcept;
     VulkanValidationSnapshot        validationSnapshot() const noexcept;
+    bool                            hasSurfaceGeneration() const noexcept;
+    VkSurfaceKHR                    surface() const noexcept;
+    std::uint64_t                   surfaceNativeWindowGeneration() const noexcept;
+
+    VulkanSurfaceAcquireResult acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept;
+    void                       resetSurfaceGeneration() noexcept;
 
     void reset() noexcept;
 
 private:
     friend struct VulkanInstanceGenerationFactory;
+
+    class VulkanSurfaceGeneration;
 
     VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
                              std::unique_ptr<ValidationState>&&  validation_state,
@@ -172,6 +249,7 @@ private:
     PFN_vkDestroyInstance                         mDestroyInstance        = nullptr;
     VkDebugUtilsMessengerEXT                      mDebugMessenger         = VK_NULL_HANDLE;
     PFN_vkDestroyDebugUtilsMessengerEXT           mDestroyDebugMessenger  = nullptr;
+    std::unique_ptr<VulkanSurfaceGeneration>      mSurfaceGeneration;
 };
 
 using VulkanInstanceAcquireResult = std::variant<VulkanInstanceAcquireError, VulkanInstanceGeneration>;
@@ -186,6 +264,10 @@ namespace VulkanInstanceDetail
     using AllocationCheckpoint = void (*)();
 
     VulkanInstanceAcquireResult acquire(const VulkanInstanceRequest& request, AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    VulkanSurfaceAcquireResult acquireSurface(VulkanInstanceGeneration&   instance_generation,
+                                              const VulkanSurfaceRequest& request,
+                                              AllocationCheckpoint        allocation_checkpoint) noexcept;
 
 } // namespace VulkanInstanceDetail
 
