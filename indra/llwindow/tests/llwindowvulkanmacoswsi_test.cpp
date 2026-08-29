@@ -259,6 +259,42 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("swapchain acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("swapchain acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    const auto swapchain_images_error = owner->acquireSwapchainImagesGeneration();
+    ensure("the exact live swapchain resolves its real images and creates matching views", !swapchain_images_error.has_value());
+    ensure("the instance parent owns one swapchain-image generation", instance_generation->hasSwapchainImagesGeneration());
+    const std::uint32_t resolved_image_count = instance_generation->resolvedSwapchainImageCount();
+    ensure("the real MoltenVK swapchain image collection is nonempty", resolved_image_count != 0);
+    for (std::uint32_t index = 0; index < resolved_image_count; ++index)
+    {
+        ensure("every real MoltenVK swapchain image handle is non-null", instance_generation->swapchainImage(index) != VK_NULL_HANDLE);
+        ensure("every real MoltenVK swapchain image has one non-null matching view",
+               instance_generation->swapchainImageView(index) != VK_NULL_HANDLE);
+    }
+    ensure("swapchain image and view lookup reject the first out-of-range index",
+           instance_generation->swapchainImage(resolved_image_count) == VK_NULL_HANDLE &&
+               instance_generation->swapchainImageView(resolved_image_count) == VK_NULL_HANDLE);
+    ensure("the image collection retains the exact swapchain, device, configuration, and selected-format parents",
+           instance_generation->hasSwapchainGeneration() && instance_generation->swapchain() != VK_NULL_HANDLE &&
+               instance_generation->swapchainDevice() == instance_generation->logicalDevice() &&
+               instance_generation->hasSwapchainConfigurationGeneration() &&
+               instance_generation->swapchainSurfaceFormat().format == surface_format.format);
+    ensure("swapchain-image acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("swapchain-image acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    ensure("the native smoke explicitly resets the swapchain images before the swapchain", owner->resetSwapchainImagesGeneration());
+    ensure("explicit image reset removes every borrowed image and owned image view",
+           !instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() == 0 &&
+               instance_generation->swapchainImage(0) == VK_NULL_HANDLE && instance_generation->swapchainImageView(0) == VK_NULL_HANDLE);
+    ensure("swapchain-image reset leaves its exact swapchain, configuration, device, and surface parents live",
+           instance_generation->hasSwapchainGeneration() && instance_generation->swapchain() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasLogicalDeviceGeneration() &&
+               instance_generation->logicalDevice() != VK_NULL_HANDLE && instance_generation->hasSurfaceGeneration() &&
+               instance_generation->surface() != VK_NULL_HANDLE);
+    ensure_equals("swapchain-image creation and destruction emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+    ensure("swapchain-image reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("swapchain-image reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     ensure("the native smoke explicitly resets the swapchain before its older parents", owner->resetSwapchainGeneration());
     ensure("explicit reset removes the swapchain handle and provenance",
            !instance_generation->hasSwapchainGeneration() && instance_generation->swapchain() == VK_NULL_HANDLE &&
@@ -285,6 +321,9 @@ void window_vulkan_macos_wsi_object::test<1>()
            !instance_generation->hasSwapchainConfigurationGeneration());
     ensure("surface reset leaves no swapchain generation",
            !instance_generation->hasSwapchainGeneration() && instance_generation->swapchain() == VK_NULL_HANDLE);
+    ensure("surface reset leaves no swapchain-image generation",
+           !instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() == 0 &&
+               instance_generation->swapchainImage(0) == VK_NULL_HANDLE && instance_generation->swapchainImageView(0) == VK_NULL_HANDLE);
     ensure("the exact instance parent remains live after surface reset",
            owner->instanceGeneration() == instance_generation && instance_generation->instance() != VK_NULL_HANDLE);
     ensure("required validation remains live during explicit surface destruction", instance_generation->validationEnabled());

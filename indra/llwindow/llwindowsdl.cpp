@@ -258,6 +258,14 @@ bool LLWindowSDL::createVulkanWindow(int x, int y, int width, int height, bool f
         return false;
     }
 
+    const auto swapchain_images_error = vulkan_window->acquireSwapchainImagesGeneration();
+    if (swapchain_images_error)
+    {
+        LL_WARNS("Window") << "Vulkan swapchain-image acquisition failed with code " << static_cast<U32>(swapchain_images_error->mCode)
+                           << LL_ENDL;
+        return false;
+    }
+
     mVulkanWindow = std::move(vulkan_window);
     mWindow       = mVulkanWindow->window();
     mFullscreen   = fullscreen;
@@ -300,6 +308,7 @@ bool LLWindowSDL::resetVulkanSurfaceGeneration() noexcept
     {
         return false;
     }
+    mVulkanWindow->resetSwapchainImagesGeneration();
     mVulkanWindow->resetSwapchainGeneration();
     return mVulkanWindow->resetSurfaceGeneration();
 }

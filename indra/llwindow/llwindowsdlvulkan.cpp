@@ -412,6 +412,46 @@ LLRenderVulkan::VulkanSwapchainAcquireResult LLWindowSDLVulkan::acquireSwapchain
     return mInstanceGeneration->acquireSwapchainGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainImagesAcquireResult LLWindowSDLVulkan::acquireSwapchainImagesGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainImagesAcquireError{ VulkanSwapchainImagesAcquireCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mWindow || !mOperations.mGetWindowSizeInPixels)
+    {
+        return VulkanSwapchainImagesAcquireError{ VulkanSwapchainImagesAcquireCode::StaleWindowGeneration, std::nullopt };
+    }
+
+    int drawable_width  = 0;
+    int drawable_height = 0;
+    if (!mOperations.mGetWindowSizeInPixels(mOperations.mUserdata, mWindow, &drawable_width, &drawable_height) || drawable_width <= 0 ||
+        drawable_height <= 0)
+    {
+        return VulkanSwapchainImagesAcquireError{ VulkanSwapchainImagesAcquireCode::InvalidDrawableExtent, std::nullopt };
+    }
+
+    SurfaceAcquireContext        context{ this, mInstanceGeneration.get(), &mOperations, mWindow };
+    VulkanSwapchainImagesRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = { static_cast<std::uint32_t>(drawable_width), static_cast<std::uint32_t>(drawable_height) };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquireSwapchainImagesGeneration(request);
+}
+
+bool LLWindowSDLVulkan::resetSwapchainImagesGeneration() noexcept
+{
+    if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainImagesGeneration())
+    {
+        return false;
+    }
+    mInstanceGeneration->resetSwapchainImagesGeneration();
+    return true;
+}
+
 bool LLWindowSDLVulkan::resetSwapchainGeneration() noexcept
 {
     if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainGeneration())

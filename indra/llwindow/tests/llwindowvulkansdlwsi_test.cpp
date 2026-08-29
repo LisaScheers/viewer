@@ -179,6 +179,12 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool swapchain_acquired               = false;
     bool swapchain_nonnull                = false;
     bool swapchain_provenance_exact       = false;
+    bool swapchain_images_acquired         = false;
+    bool swapchain_images_nonempty         = false;
+    bool swapchain_image_views_complete    = false;
+    bool swapchain_image_bounds_exact      = false;
+    bool swapchain_images_provenance_exact = false;
+    bool swapchain_images_removed          = false;
     bool swapchain_removed                = false;
     bool swapchain_configuration_removed  = false;
     bool surface_explicitly_reset         = false;
@@ -290,6 +296,19 @@ void window_vulkan_sdl_wsi_object::test<1>()
                                              instance_generation->swapchainDevice() == instance_generation->logicalDevice() &&
                                              instance_generation->swapchainSurface() != VK_NULL_HANDLE &&
                                              instance_generation->swapchainSurface() == instance_generation->surface();
+                swapchain_images_acquired       = instance_generation->hasSwapchainImagesGeneration();
+                const std::uint32_t image_count = instance_generation->resolvedSwapchainImageCount();
+                swapchain_images_nonempty       = image_count != 0;
+                swapchain_image_views_complete  = swapchain_images_nonempty;
+                for (std::uint32_t index = 0; swapchain_image_views_complete && index < image_count; ++index)
+                {
+                    swapchain_image_views_complete = instance_generation->swapchainImage(index) != VK_NULL_HANDLE &&
+                                                     instance_generation->swapchainImageView(index) != VK_NULL_HANDLE;
+                }
+                swapchain_image_bounds_exact = instance_generation->swapchainImage(image_count) == VK_NULL_HANDLE &&
+                                               instance_generation->swapchainImageView(image_count) == VK_NULL_HANDLE;
+                swapchain_images_provenance_exact = swapchain_images_acquired && swapchain_acquired && logical_device_acquired &&
+                                                    swapchain_configuration_acquired && swapchain_format_supported;
 
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
                 const auto& enabled_extensions  = instance_generation->enabledExtensions();
@@ -329,6 +348,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
         logical_device_removed = !owned_instance_generation->hasLogicalDeviceGeneration() &&
                                  owned_instance_generation->logicalDevice() == VK_NULL_HANDLE &&
                                  owned_instance_generation->presentationQueue() == VK_NULL_HANDLE;
+        swapchain_images_removed = !owned_instance_generation->hasSwapchainImagesGeneration() &&
+                                   owned_instance_generation->resolvedSwapchainImageCount() == 0 &&
+                                   owned_instance_generation->swapchainImage(0) == VK_NULL_HANDLE &&
+                                   owned_instance_generation->swapchainImageView(0) == VK_NULL_HANDLE;
         swapchain_removed = !owned_instance_generation->hasSwapchainGeneration() &&
                             owned_instance_generation->swapchain() == VK_NULL_HANDLE &&
                             owned_instance_generation->swapchainDevice() == VK_NULL_HANDLE &&
@@ -383,7 +406,14 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the SDL Vulkan branch automatically owns one real swapchain", swapchain_acquired);
     ensure("the automatically created swapchain handle is non-null", swapchain_nonnull);
     ensure("the swapchain retains the exact logical-device and surface provenance", swapchain_provenance_exact);
+    ensure("the SDL Vulkan branch automatically owns one swapchain-image generation", swapchain_images_acquired);
+    ensure("the resolved swapchain image collection is nonempty", swapchain_images_nonempty);
+    ensure("every resolved swapchain image has one non-null matching view", swapchain_image_views_complete);
+    ensure("swapchain image and view lookup reject the first out-of-range index", swapchain_image_bounds_exact);
+    ensure("the image collection retains its exact swapchain, device, configuration, and format parents",
+           swapchain_images_provenance_exact);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
+    ensure("surface reset first removes every swapchain image and view", swapchain_images_removed);
     ensure("surface reset first removes the swapchain generation", swapchain_removed);
     ensure("explicit reset removes only the Vulkan surface child", surface_removed);
     ensure("surface reset first removes the presentation-device child", presentation_device_removed);

@@ -564,6 +564,10 @@ void window_macosx_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainGeneration()),
                                  LLRenderVulkan::VulkanSwapchainAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainImagesGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainImagesAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainImagesGeneration()));
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainImagesGeneration()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainGeneration()));
     static_assert(std::is_same_v<decltype(std::declval<const LLWindowMacOSXVulkan&>().requirements()), const LLWindowVulkanRequirements*>);
     static_assert(noexcept(acquireLLWindowMacOSXVulkan(std::declval<const LLWindowMacOSXVulkanCreateInfo&>(),
@@ -1270,6 +1274,63 @@ void window_macosx_vulkan_object::test<14>()
     ensure("swapchain-owner fixture teardown succeeds", owner->reset());
     ensure_equals("swapchain adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("swapchain adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_macosx_vulkan_object::test<15>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState   state;
+    ScopedState active(state);
+    const auto  info   = createInfo();
+    auto        result = acquireLLWindowMacOSXVulkan(info, 151, fakeOperations(state));
+    auto*       owner  = acquiredWindow(result);
+    ensure("swapchain-image adapter fixture acquired a native owner", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainImagesGeneration();
+    ensure("swapchain-image acquisition requires a live instance before refreshing geometry",
+           missing_instance && missing_instance->mCode == VulkanSwapchainImagesAcquireCode::InstanceNotLive && state.mRefreshCount == 0);
+
+    ensure("swapchain-image adapter fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    const std::size_t refreshes_after_instance = state.mRefreshCount;
+
+    state.mRefreshSucceeds    = false;
+    const auto failed_refresh = owner->acquireSwapchainImagesGeneration();
+    ensure("a failed Cocoa geometry refresh maps to a stale swapchain-image window",
+           failed_refresh && failed_refresh->mCode == VulkanSwapchainImagesAcquireCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance + 1);
+
+    state.mRefreshSucceeds     = true;
+    state.mRefreshMutation     = RefreshMutation::ZeroHeight;
+    const auto invalid_refresh = owner->acquireSwapchainImagesGeneration();
+    ensure("an invalid refreshed backing height maps to a stale swapchain-image window",
+           invalid_refresh && invalid_refresh->mCode == VulkanSwapchainImagesAcquireCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance + 2);
+
+    state.mRefreshMutation     = RefreshMutation::None;
+    state.mRefreshScale        = 2.0;
+    state.mRefreshWidth        = 2560;
+    state.mRefreshHeight       = 1440;
+    const auto missing_surface = owner->acquireSwapchainImagesGeneration();
+    ensure("current Cocoa backing pixels are forwarded to the swapchain-image parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainImagesAcquireCode::SurfaceNotLive &&
+               state.mRefreshCount == refreshes_after_instance + 3 && owner->drawableWidth() == 2560 && owner->drawableHeight() == 1440);
+
+    ensure("swapchain-image adapter fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const std::size_t refreshes_after_surface = state.mRefreshCount;
+    const auto        missing_selection       = owner->acquireSwapchainImagesGeneration();
+    ensure("the swapchain-image adapter refreshes pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainImagesAcquireCode::PresentationDeviceNotLive &&
+               state.mRefreshCount == refreshes_after_surface + 1 && owner->drawableWidth() == 2560 && owner->drawableHeight() == 1440);
+    ensure("an unowned swapchain-image generation reports no explicit reset", !owner->resetSwapchainImagesGeneration());
+
+    state.mOwnerDuringDestroy = owner;
+    ensure("swapchain-image adapter fixture teardown succeeds", owner->reset());
+    ensure_equals("swapchain-image adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("swapchain-image adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
 } // namespace tut

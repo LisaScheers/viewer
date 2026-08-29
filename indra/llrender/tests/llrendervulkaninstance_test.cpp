@@ -58,7 +58,10 @@ enum class MissingCommand : std::uint8_t
     GetSurfacePresentModes,
     GetDeviceProcAddr,
     CreateSwapchain,
-    DestroySwapchain
+    DestroySwapchain,
+    GetSwapchainImages,
+    CreateImageView,
+    DestroyImageView
 };
 
 enum class Event : std::uint8_t
@@ -69,6 +72,8 @@ enum class Event : std::uint8_t
     CreateDevice,
     GetDeviceQueue,
     CreateSwapchain,
+    CreateImageView,
+    DestroyImageView,
     DestroySwapchain,
     DestroyDevice,
     DestroySurface,
@@ -140,6 +145,9 @@ struct FakeState
     VkDevice                             mDevice         = fakeHandle<VkDevice>(0x5555);
     VkQueue                              mQueue          = fakeHandle<VkQueue>(0x6666);
     VkSwapchainKHR                       mSwapchain      = fakeHandle<VkSwapchainKHR>(0x7777);
+    std::vector<VkImage>     mSwapchainImages{ fakeHandle<VkImage>(0x8001), fakeHandle<VkImage>(0x8002), fakeHandle<VkImage>(0x8003) };
+    std::vector<VkImageView> mSwapchainImageViews{ fakeHandle<VkImageView>(0x9001), fakeHandle<VkImageView>(0x9002),
+                                                   fakeHandle<VkImageView>(0x9003) };
     std::vector<Event>                   mEvents;
     std::vector<std::string>             mEnabledExtensions;
     std::vector<std::string>             mEnabledLayers;
@@ -171,6 +179,7 @@ struct FakeState
     bool                            mObservedLogicalAtSurfaceDestroy       = false;
     bool                            mObservedConfigurationAtSurfaceDestroy = false;
     bool                            mObservedSwapchainAtSurfaceDestroy     = false;
+    bool                            mObservedSwapchainImagesAtSurfaceDestroy = false;
 
     std::size_t      mPhysicalCountCalls         = 0;
     std::size_t      mPhysicalListCalls          = 0;
@@ -198,6 +207,7 @@ struct FakeState
     bool                            mObservedSurfaceAtDeviceDestroy       = false;
     bool                            mObservedConfigurationAtDeviceDestroy = false;
     bool                            mObservedSwapchainAtDeviceDestroy     = false;
+    bool                            mObservedSwapchainImagesAtDeviceDestroy = false;
     std::size_t                     mSwapchainCapabilitiesCalls           = 0;
     std::size_t                     mSwapchainFormatCountCalls            = 0;
     std::size_t                     mSwapchainFormatListCalls             = 0;
@@ -225,6 +235,30 @@ struct FakeState
     bool                            mObservedConfigurationAtSwapchainDestroy = false;
     bool                            mObservedLogicalAtSwapchainDestroy       = false;
     bool                            mObservedSurfaceAtSwapchainDestroy       = false;
+    bool                            mObservedSwapchainImagesAtSwapchainDestroy = false;
+
+    VkResult                                  mSwapchainImageCountResult = VK_SUCCESS;
+    VkResult                                  mSwapchainImageListResult  = VK_SUCCESS;
+    std::size_t                               mSwapchainImageCountCalls  = 0;
+    std::size_t                               mSwapchainImageListCalls   = 0;
+    VkDevice                                  mSwapchainImagesDevice     = VK_NULL_HANDLE;
+    VkSwapchainKHR                            mEnumeratedSwapchain       = VK_NULL_HANDLE;
+    VkResult                                  mImageViewCreateResult     = VK_SUCCESS;
+    bool                                      mNullImageView             = false;
+    std::size_t                               mCreateImageViewCalls      = 0;
+    VkDevice                                  mCreateImageViewDevice     = VK_NULL_HANDLE;
+    std::vector<VkImageViewCreateInfo>        mImageViewCreateInfos;
+    std::vector<const VkAllocationCallbacks*> mCreateImageViewAllocationCallbacks;
+    std::size_t                               mDestroyImageViewCalls  = 0;
+    VkDevice                                  mDestroyImageViewDevice = VK_NULL_HANDLE;
+    std::vector<VkImageView>                  mDestroyedImageViews;
+    std::vector<const VkAllocationCallbacks*> mDestroyImageViewAllocationCallbacks;
+    const VulkanInstanceGeneration*           mImageViewDestroyOwner                   = nullptr;
+    bool                                      mImageViewDestroyObservationMade         = false;
+    bool                                      mObservedSwapchainAtImageViewDestroy     = false;
+    bool                                      mObservedConfigurationAtImageViewDestroy = false;
+    bool                                      mObservedLogicalAtImageViewDestroy       = false;
+    bool                                      mObservedSurfaceAtImageViewDestroy       = false;
 
     bool        mGenerationCurrent   = true;
     std::size_t mGenerationChecks    = 0;
@@ -449,6 +483,7 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroySurface(VkInstance                   insta
         gFakeState->mObservedLogicalAtSurfaceDestroy       = gFakeState->mSurfaceDestroyOwner->hasLogicalDeviceGeneration();
         gFakeState->mObservedConfigurationAtSurfaceDestroy = gFakeState->mSurfaceDestroyOwner->hasSwapchainConfigurationGeneration();
         gFakeState->mObservedSwapchainAtSurfaceDestroy     = gFakeState->mSurfaceDestroyOwner->hasSwapchainGeneration();
+        gFakeState->mObservedSwapchainImagesAtSurfaceDestroy = gFakeState->mSurfaceDestroyOwner->hasSwapchainImagesGeneration();
     }
     gFakeState->mEvents.push_back(Event::DestroySurface);
 }
@@ -594,6 +629,7 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyDevice(VkDevice device, const VkAllocation
         gFakeState->mObservedSurfaceAtDeviceDestroy       = gFakeState->mDeviceDestroyOwner->hasSurfaceGeneration();
         gFakeState->mObservedConfigurationAtDeviceDestroy = gFakeState->mDeviceDestroyOwner->hasSwapchainConfigurationGeneration();
         gFakeState->mObservedSwapchainAtDeviceDestroy     = gFakeState->mDeviceDestroyOwner->hasSwapchainGeneration();
+        gFakeState->mObservedSwapchainImagesAtDeviceDestroy = gFakeState->mDeviceDestroyOwner->hasSwapchainImagesGeneration();
     }
     gFakeState->mEvents.push_back(Event::DestroyDevice);
 }
@@ -715,8 +751,89 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroySwapchain(VkDevice                     dev
         gFakeState->mObservedConfigurationAtSwapchainDestroy = gFakeState->mSwapchainDestroyOwner->hasSwapchainConfigurationGeneration();
         gFakeState->mObservedLogicalAtSwapchainDestroy       = gFakeState->mSwapchainDestroyOwner->hasLogicalDeviceGeneration();
         gFakeState->mObservedSurfaceAtSwapchainDestroy       = gFakeState->mSwapchainDestroyOwner->hasSurfaceGeneration();
+        gFakeState->mObservedSwapchainImagesAtSwapchainDestroy = gFakeState->mSwapchainDestroyOwner->hasSwapchainImagesGeneration();
     }
     gFakeState->mEvents.push_back(Event::DestroySwapchain);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetSwapchainImages(VkDevice       device,
+                                                      VkSwapchainKHR swapchain,
+                                                      std::uint32_t* count,
+                                                      VkImage*       images) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || swapchain != gFakeState->mSwapchain || !count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    gFakeState->mSwapchainImagesDevice = device;
+    gFakeState->mEnumeratedSwapchain   = swapchain;
+    if (!images)
+    {
+        ++gFakeState->mSwapchainImageCountCalls;
+        *count = static_cast<std::uint32_t>(gFakeState->mSwapchainImages.size());
+        return gFakeState->mSwapchainImageCountResult;
+    }
+
+    ++gFakeState->mSwapchainImageListCalls;
+    const std::size_t written = std::min<std::size_t>(*count, gFakeState->mSwapchainImages.size());
+    std::copy_n(gFakeState->mSwapchainImages.begin(), written, images);
+    *count = static_cast<std::uint32_t>(written);
+    return gFakeState->mSwapchainImageListResult;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateImageView(VkDevice                     device,
+                                                   const VkImageViewCreateInfo* create_info,
+                                                   const VkAllocationCallbacks* allocation_callbacks,
+                                                   VkImageView*                 image_view) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !create_info || !image_view)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    ++gFakeState->mCreateImageViewCalls;
+    gFakeState->mCreateImageViewDevice = device;
+    gFakeState->mImageViewCreateInfos.push_back(*create_info);
+    gFakeState->mCreateImageViewAllocationCallbacks.push_back(allocation_callbacks);
+    gFakeState->mEvents.push_back(Event::CreateImageView);
+    if (gFakeState->mImageViewCreateResult != VK_SUCCESS)
+    {
+        return gFakeState->mImageViewCreateResult;
+    }
+
+    const auto image = std::find(gFakeState->mSwapchainImages.begin(), gFakeState->mSwapchainImages.end(), create_info->image);
+    if (image == gFakeState->mSwapchainImages.end())
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    const std::size_t index = static_cast<std::size_t>(image - gFakeState->mSwapchainImages.begin());
+    *image_view             = gFakeState->mNullImageView ? VK_NULL_HANDLE : gFakeState->mSwapchainImageViews[index];
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyImageView(VkDevice                     device,
+                                                VkImageView                  image_view,
+                                                const VkAllocationCallbacks* allocation_callbacks) noexcept
+{
+    if (!gFakeState)
+    {
+        return;
+    }
+
+    ++gFakeState->mDestroyImageViewCalls;
+    gFakeState->mDestroyImageViewDevice = device;
+    gFakeState->mDestroyedImageViews.push_back(image_view);
+    gFakeState->mDestroyImageViewAllocationCallbacks.push_back(allocation_callbacks);
+    if (gFakeState->mImageViewDestroyOwner)
+    {
+        gFakeState->mImageViewDestroyObservationMade         = true;
+        gFakeState->mObservedSwapchainAtImageViewDestroy     = gFakeState->mImageViewDestroyOwner->hasSwapchainGeneration();
+        gFakeState->mObservedConfigurationAtImageViewDestroy = gFakeState->mImageViewDestroyOwner->hasSwapchainConfigurationGeneration();
+        gFakeState->mObservedLogicalAtImageViewDestroy       = gFakeState->mImageViewDestroyOwner->hasLogicalDeviceGeneration();
+        gFakeState->mObservedSurfaceAtImageViewDestroy       = gFakeState->mImageViewDestroyOwner->hasSurfaceGeneration();
+    }
+    gFakeState->mEvents.push_back(Event::DestroyImageView);
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
@@ -736,6 +853,18 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     if (std::strcmp(name, "vkDestroySwapchainKHR") == 0)
     {
         return gFakeState->mMissing == MissingCommand::DestroySwapchain ? nullptr : eraseFunctionType(fakeDestroySwapchain);
+    }
+    if (std::strcmp(name, "vkGetSwapchainImagesKHR") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::GetSwapchainImages ? nullptr : eraseFunctionType(fakeGetSwapchainImages);
+    }
+    if (std::strcmp(name, "vkCreateImageView") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CreateImageView ? nullptr : eraseFunctionType(fakeCreateImageView);
+    }
+    if (std::strcmp(name, "vkDestroyImageView") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::DestroyImageView ? nullptr : eraseFunctionType(fakeDestroyImageView);
     }
     return nullptr;
 }
@@ -944,6 +1073,14 @@ VulkanSwapchainRequest makeSwapchainRequest(FakeState&                state,
     return { 42, drawable_extent, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
 }
 
+VulkanSwapchainImagesRequest makeSwapchainImagesRequest(FakeState&                state,
+                                                        VulkanInstanceGeneration& owner,
+                                                        VkExtent2D                drawable_extent = { 800, 600 }) noexcept
+{
+    state.mExpectedInstanceOwner = &owner;
+    return { 42, drawable_extent, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
+}
+
 const VulkanInstanceAcquireError& requireError(const VulkanInstanceAcquireResult& result)
 {
     const auto* error = std::get_if<VulkanInstanceAcquireError>(&result);
@@ -1017,6 +1154,17 @@ void ensureSwapchainCode(const VulkanSwapchainAcquireResult& result, VulkanSwapc
     tut::ensure("the exact swapchain error is reported", requireSwapchainError(result).mCode == code);
 }
 
+const VulkanSwapchainImagesAcquireError& requireSwapchainImagesError(const VulkanSwapchainImagesAcquireResult& result)
+{
+    tut::ensure("swapchain-images acquisition returns an error", result.has_value());
+    return *result;
+}
+
+void ensureSwapchainImagesCode(const VulkanSwapchainImagesAcquireResult& result, VulkanSwapchainImagesAcquireCode code)
+{
+    tut::ensure("the exact swapchain-images error is reported", requireSwapchainImagesError(result).mCode == code);
+}
+
 void acquireSelectionChain(FakeState& state, VulkanInstanceGeneration& owner)
 {
     tut::ensure("the surface fixture succeeds", !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
@@ -1035,6 +1183,12 @@ void acquireConfigurationChain(FakeState& state, VulkanInstanceGeneration& owner
     acquireLogicalChain(state, owner);
     tut::ensure("the swapchain-configuration fixture succeeds",
                 !owner.acquireSwapchainConfigurationGeneration(makeSwapchainConfigurationRequest(state, owner, drawable_extent)));
+}
+
+void acquireSwapchainChain(FakeState& state, VulkanInstanceGeneration& owner, VkExtent2D drawable_extent = { 800, 600 })
+{
+    acquireConfigurationChain(state, owner, drawable_extent);
+    tut::ensure("the swapchain fixture succeeds", !owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner, drawable_extent)));
 }
 
 void failAllocation()
@@ -2763,6 +2917,307 @@ void render_vulkan_instance_test_object::test<42>()
                state.mDestroySwapchainCalls == 1 && state.mDestroyDeviceCalls == 1 && state.mDestroySurfaceCalls == 1 &&
                state.mDestroyInstanceCalls == 1 && state.mDestroySwapchainDevice == state.mDevice &&
                state.mDestroyedSwapchain == state.mSwapchain && state.mDestroySwapchainAllocationCallbacks == nullptr);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<43>()
+{
+    static_assert(std::is_same_v<VulkanSwapchainImagesAcquireResult, std::optional<VulkanSwapchainImagesAcquireError>>);
+    static_assert(noexcept(
+        std::declval<VulkanInstanceGeneration&>().acquireSwapchainImagesGeneration(std::declval<const VulkanSwapchainImagesRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().resetSwapchainImagesGeneration()));
+
+    const VulkanSwapchainImagesAcquireError value{ VulkanSwapchainImagesAcquireCode::ResolutionFailure,
+                                                   VulkanSwapchainImagesResolutionError{
+                                                       VulkanSwapchainImagesResolutionCode::MissingRequiredCommand,
+                                                       VulkanSwapchainImagesCommand::DestroyImageView } };
+    ensure("identical swapchain-images errors compare equal", value == value);
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("an owner without swapchain images exposes neutral observations",
+           !owner.hasSwapchainImagesGeneration() && owner.resolvedSwapchainImageCount() == 0 && owner.swapchainImage(0) == VK_NULL_HANDLE &&
+               owner.swapchainImageView(0) == VK_NULL_HANDLE);
+
+    VulkanSwapchainImagesRequest request = makeSwapchainImagesRequest(state, owner);
+    request.mInstanceOwnerCheck          = {};
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(request), VulkanSwapchainImagesAcquireCode::InvalidInstanceOwnerCheck);
+    request                        = makeSwapchainImagesRequest(state, owner);
+    request.mWindowGenerationCheck = {};
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(request),
+                              VulkanSwapchainImagesAcquireCode::InvalidWindowGenerationCheck);
+    request                         = makeSwapchainImagesRequest(state, owner);
+    request.mNativeWindowGeneration = 0;
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(request),
+                              VulkanSwapchainImagesAcquireCode::InvalidNativeWindowGeneration);
+    request                 = makeSwapchainImagesRequest(state, owner);
+    request.mDrawableExtent = { 800, 0 };
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(request), VulkanSwapchainImagesAcquireCode::InvalidDrawableExtent);
+
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner)),
+                              VulkanSwapchainImagesAcquireCode::SurfaceNotLive);
+    ensure("surface acquisition succeeds for swapchain-images preflight",
+           !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner)),
+                              VulkanSwapchainImagesAcquireCode::PresentationDeviceNotLive);
+    ensure("selection succeeds for swapchain-images preflight",
+           !owner.acquirePresentationDeviceGeneration(makePresentationDeviceRequest(state, owner)));
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner)),
+                              VulkanSwapchainImagesAcquireCode::LogicalDeviceNotLive);
+    ensure("logical device succeeds for swapchain-images preflight",
+           !owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner)));
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner)),
+                              VulkanSwapchainImagesAcquireCode::SwapchainConfigurationNotLive);
+    ensure("configuration succeeds for swapchain-images preflight",
+           !owner.acquireSwapchainConfigurationGeneration(makeSwapchainConfigurationRequest(state, owner)));
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner)),
+                              VulkanSwapchainImagesAcquireCode::SwapchainNotLive);
+    ensure("swapchain succeeds for swapchain-images preflight", !owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner)));
+
+    request                         = makeSwapchainImagesRequest(state, owner);
+    request.mNativeWindowGeneration = 41;
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(request),
+                              VulkanSwapchainImagesAcquireCode::NativeWindowGenerationMismatch);
+    request                 = makeSwapchainImagesRequest(state, owner);
+    request.mDrawableExtent = { 801, 600 };
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(request), VulkanSwapchainImagesAcquireCode::DrawableExtentMismatch);
+
+    request                     = makeSwapchainImagesRequest(state, owner);
+    state.mInstanceOwnerCurrent = false;
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(request), VulkanSwapchainImagesAcquireCode::StaleInstanceOwner);
+    state.mInstanceOwnerCurrent = true;
+    state.mSurfaceWindowCurrent = false;
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(request), VulkanSwapchainImagesAcquireCode::StaleWindowGeneration);
+    state.mSurfaceWindowCurrent = true;
+    ensure("every malformed or stale preflight fails before image dispatch",
+           state.mSwapchainImageCountCalls == 0 && state.mSwapchainImageListCalls == 0 && state.mCreateImageViewCalls == 0 &&
+               state.mDestroyImageViewCalls == 0 && !owner.hasSwapchainImagesGeneration());
+
+    owner.reset();
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner)),
+                              VulkanSwapchainImagesAcquireCode::InstanceNotLive);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<44>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSwapchainChain(state, owner, { 1280, 720 });
+    const VulkanSwapchainImagesRequest request = makeSwapchainImagesRequest(state, owner, { 1280, 720 });
+
+    constexpr std::array missing_commands{ std::pair{ MissingCommand::GetDeviceProcAddr, VulkanSwapchainImagesCommand::GetDeviceProcAddr },
+                                           std::pair{ MissingCommand::GetSwapchainImages,
+                                                      VulkanSwapchainImagesCommand::GetSwapchainImages },
+                                           std::pair{ MissingCommand::CreateImageView, VulkanSwapchainImagesCommand::CreateImageView },
+                                           std::pair{ MissingCommand::DestroyImageView, VulkanSwapchainImagesCommand::DestroyImageView } };
+    for (const auto& [missing, command] : missing_commands)
+    {
+        state.mMissing                                  = missing;
+        const VulkanSwapchainImagesAcquireResult result = owner.acquireSwapchainImagesGeneration(request);
+        const VulkanSwapchainImagesAcquireError& error  = requireSwapchainImagesError(result);
+        ensure("the parent preserves exact nested image-view dispatch identity",
+               error.mCode == VulkanSwapchainImagesAcquireCode::ResolutionFailure && error.mResolutionError &&
+                   error.mResolutionError->mCode == VulkanSwapchainImagesResolutionCode::MissingRequiredCommand &&
+                   error.mResolutionError->mCommand == command);
+        ensure("a missing image command publishes and creates nothing",
+               !owner.hasSwapchainImagesGeneration() && state.mSwapchainImageCountCalls == 0 && state.mCreateImageViewCalls == 0 &&
+                   state.mDestroyImageViewCalls == 0);
+    }
+
+    state.mMissing                                              = MissingCommand::None;
+    state.mSwapchainImageCountResult                            = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    const VulkanSwapchainImagesAcquireResult failed_enumeration = owner.acquireSwapchainImagesGeneration(request);
+    const VulkanSwapchainImagesAcquireError& enumeration_error  = requireSwapchainImagesError(failed_enumeration);
+    ensure("the parent preserves an exact image-enumeration failure",
+           enumeration_error.mCode == VulkanSwapchainImagesAcquireCode::ResolutionFailure && enumeration_error.mResolutionError &&
+               enumeration_error.mResolutionError->mCode == VulkanSwapchainImagesResolutionCode::SwapchainImageEnumerationFailure &&
+               enumeration_error.mResolutionError->mCommand == VulkanSwapchainImagesCommand::GetSwapchainImages &&
+               enumeration_error.mResolutionError->mResult == VK_ERROR_OUT_OF_DEVICE_MEMORY && !owner.hasSwapchainImagesGeneration());
+
+    state.mSwapchainImageCountResult        = VK_SUCCESS;
+    state.mSwapchainImageCountCalls         = 0;
+    state.mSwapchainImageListCalls          = 0;
+    state.mCreateImageViewCalls             = 0;
+    state.mGetDeviceProcAddrResolutionCalls = 0;
+    state.mDeviceProcAddrCalls              = 0;
+    state.mDeviceCommandLookups.clear();
+    state.mImageViewCreateInfos.clear();
+    state.mCreateImageViewAllocationCallbacks.clear();
+    ensure("the exact live parent chain publishes one image-view generation", !owner.acquireSwapchainImagesGeneration(request));
+    ensure("the parent exposes every resolved image and image view",
+           owner.hasSwapchainImagesGeneration() && owner.resolvedSwapchainImageCount() == state.mSwapchainImages.size());
+    for (std::uint32_t index = 0; index < owner.resolvedSwapchainImageCount(); ++index)
+    {
+        ensure("the parent preserves image and view index pairing",
+               owner.swapchainImage(index) == state.mSwapchainImages[index] &&
+                   owner.swapchainImageView(index) == state.mSwapchainImageViews[index]);
+        const VkImageViewCreateInfo& create_info = state.mImageViewCreateInfos[index];
+        ensure("each view uses the exact Stage 42 color-view contract",
+               create_info.sType == VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO && create_info.pNext == nullptr && create_info.flags == 0 &&
+                   create_info.image == state.mSwapchainImages[index] && create_info.viewType == VK_IMAGE_VIEW_TYPE_2D &&
+                   create_info.format == owner.swapchainSurfaceFormat().format &&
+                   create_info.components.r == VK_COMPONENT_SWIZZLE_IDENTITY && create_info.components.g == VK_COMPONENT_SWIZZLE_IDENTITY &&
+                   create_info.components.b == VK_COMPONENT_SWIZZLE_IDENTITY && create_info.components.a == VK_COMPONENT_SWIZZLE_IDENTITY &&
+                   create_info.subresourceRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && create_info.subresourceRange.baseMipLevel == 0 &&
+                   create_info.subresourceRange.levelCount == 1 && create_info.subresourceRange.baseArrayLayer == 0 &&
+                   create_info.subresourceRange.layerCount == 1 && state.mCreateImageViewAllocationCallbacks[index] == nullptr);
+    }
+    ensure("out-of-range image observations are neutral",
+           owner.swapchainImage(owner.resolvedSwapchainImageCount()) == VK_NULL_HANDLE &&
+               owner.swapchainImageView(owner.resolvedSwapchainImageCount()) == VK_NULL_HANDLE);
+    ensure("image dispatch uses the exact instance, device, and swapchain",
+           state.mGetDeviceProcAddrResolutionCalls == 1 && state.mGetDeviceProcAddrResolutionInstance == state.mInstance &&
+               state.mDeviceProcAddrCalls == 3 && state.mDeviceProcAddrDevice == state.mDevice &&
+               state.mDeviceCommandLookups ==
+                   std::vector<std::string>{ "vkGetSwapchainImagesKHR", "vkCreateImageView", "vkDestroyImageView" } &&
+               state.mSwapchainImageCountCalls == 1 && state.mSwapchainImageListCalls == 1 &&
+               state.mSwapchainImagesDevice == state.mDevice && state.mEnumeratedSwapchain == state.mSwapchain &&
+               state.mCreateImageViewCalls == state.mSwapchainImages.size() && state.mCreateImageViewDevice == state.mDevice);
+
+    ensureSwapchainImagesCode(owner.acquireSwapchainImagesGeneration(request),
+                              VulkanSwapchainImagesAcquireCode::SwapchainImagesAlreadyOwned);
+    ensure_equals("duplicate acquisition performs no second image query", state.mSwapchainImageCountCalls, std::size_t{ 1 });
+
+    state.mImageViewDestroyOwner = &owner;
+    owner.resetSwapchainImagesGeneration();
+    ensure("explicit image-view reset preserves the swapchain and every older parent",
+           !owner.hasSwapchainImagesGeneration() && owner.resolvedSwapchainImageCount() == 0 && owner.swapchainImage(0) == VK_NULL_HANDLE &&
+               owner.swapchainImageView(0) == VK_NULL_HANDLE && owner.hasSwapchainGeneration() && owner.swapchain() == state.mSwapchain &&
+               owner.hasSwapchainConfigurationGeneration() && owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration() &&
+               state.mDestroyImageViewCalls == state.mSwapchainImageViews.size() && state.mDestroyImageViewDevice == state.mDevice &&
+               state.mImageViewDestroyObservationMade && state.mObservedSwapchainAtImageViewDestroy &&
+               state.mObservedConfigurationAtImageViewDestroy && state.mObservedLogicalAtImageViewDestroy &&
+               state.mObservedSurfaceAtImageViewDestroy &&
+               state.mDestroyedImageViews == std::vector<VkImageView>{ state.mSwapchainImageViews[2], state.mSwapchainImageViews[1],
+                                                                       state.mSwapchainImageViews[0] } &&
+               std::all_of(state.mDestroyImageViewAllocationCallbacks.begin(),
+                           state.mDestroyImageViewAllocationCallbacks.end(),
+                           [](const VkAllocationCallbacks* callbacks) { return callbacks == nullptr; }));
+    owner.resetSwapchainImagesGeneration();
+    ensure_equals("a second explicit image-view reset is idempotent", state.mDestroyImageViewCalls, std::size_t{ 3 });
+    ensure("the same parent chain reacquires after explicit image-view reset", !owner.acquireSwapchainImagesGeneration(request));
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<45>()
+{
+    for (bool fail_instance_owner : { true, false })
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireSwapchainChain(state, owner);
+
+        state.mInstanceOwnerChecks                      = 0;
+        state.mSurfaceWindowChecks                      = 0;
+        state.mFailInstanceOwnerCheck                   = fail_instance_owner ? 2 : 0;
+        state.mFailSurfaceWindowCheck                   = fail_instance_owner ? 0 : 2;
+        const VulkanSwapchainImagesAcquireResult result = owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner));
+        ensureSwapchainImagesCode(result, fail_instance_owner ? VulkanSwapchainImagesAcquireCode::StaleInstanceOwner
+                                                              : VulkanSwapchainImagesAcquireCode::StaleWindowGeneration);
+        ensure("image freshness is reauthenticated after all native views exist",
+               state.mSwapchainImageCountCalls == 1 && state.mSwapchainImageListCalls == 1 &&
+                   state.mCreateImageViewCalls == state.mSwapchainImages.size() &&
+                   state.mDestroyImageViewCalls == state.mSwapchainImageViews.size() && state.mInstanceOwnerChecks == 2 &&
+                   state.mSurfaceWindowChecks == (fail_instance_owner ? 1 : 2));
+        ensure("stale publication rolls back every pending view and preserves every parent",
+               !owner.hasSwapchainImagesGeneration() && owner.hasSwapchainGeneration() && owner.hasSwapchainConfigurationGeneration() &&
+                   owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration() && state.mDestroySwapchainCalls == 0 &&
+                   state.mDestroyDeviceCalls == 0 && state.mDestroySurfaceCalls == 0);
+
+        state.mFailInstanceOwnerCheck = 0;
+        state.mFailSurfaceWindowCheck = 0;
+        ensure("current parents retry after stale image publication",
+               !owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner)) && owner.hasSwapchainImagesGeneration() &&
+                   state.mCreateImageViewCalls == 2 * state.mSwapchainImages.size() &&
+                   state.mDestroyImageViewCalls == state.mSwapchainImageViews.size());
+        owner.resetSwapchainImagesGeneration();
+        ensure_equals("the retried image owner destroys its views exactly once",
+                      state.mDestroyImageViewCalls,
+                      2 * state.mSwapchainImageViews.size());
+    }
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSwapchainChain(state, owner);
+    const VulkanSwapchainImagesRequest request = makeSwapchainImagesRequest(state, owner);
+
+    const VulkanSwapchainImagesAcquireResult result = VulkanInstanceDetail::acquireSwapchainImages(owner, request, failAllocation);
+    ensureSwapchainImagesCode(result, VulkanSwapchainImagesAcquireCode::AllocationFailure);
+    ensure("parent allocation failure rolls back every resolved view and preserves the full parent chain",
+           state.mSwapchainImageCountCalls == 1 && state.mSwapchainImageListCalls == 1 &&
+               state.mCreateImageViewCalls == state.mSwapchainImages.size() &&
+               state.mDestroyImageViewCalls == state.mSwapchainImageViews.size() && !owner.hasSwapchainImagesGeneration() &&
+               owner.hasSwapchainGeneration() && owner.hasSwapchainConfigurationGeneration() && owner.hasLogicalDeviceGeneration() &&
+               owner.logicalDevice() == state.mDevice && state.mDestroySwapchainCalls == 0 && state.mDestroyDeviceCalls == 0);
+    ensure("the live chain retries after image owner allocation failure",
+           !owner.acquireSwapchainImagesGeneration(request) && owner.hasSwapchainImagesGeneration() &&
+               state.mCreateImageViewCalls == 2 * state.mSwapchainImages.size() &&
+               state.mDestroyImageViewCalls == state.mSwapchainImageViews.size());
+    owner.resetSwapchainImagesGeneration();
+    ensure_equals("the allocation retry owns one independent view set",
+                  state.mDestroyImageViewCalls,
+                  2 * state.mSwapchainImageViews.size());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<46>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration first = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSwapchainChain(state, first);
+    ensure("image-view acquisition succeeds before parent move",
+           !first.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, first)));
+
+    VulkanInstanceGeneration moved(std::move(first));
+    ensure("the parent move transfers the complete image-view chain",
+           !first.hasSwapchainImagesGeneration() && first.resolvedSwapchainImageCount() == 0 && first.swapchainImage(0) == VK_NULL_HANDLE &&
+               first.swapchainImageView(0) == VK_NULL_HANDLE && !first.hasSwapchainGeneration() &&
+               !first.hasSwapchainConfigurationGeneration() && !first.hasLogicalDeviceGeneration() &&
+               moved.hasSwapchainImagesGeneration() && moved.resolvedSwapchainImageCount() == state.mSwapchainImages.size() &&
+               moved.swapchainImage(0) == state.mSwapchainImages[0] && moved.swapchainImageView(0) == state.mSwapchainImageViews[0] &&
+               moved.hasSwapchainGeneration() && moved.swapchain() == state.mSwapchain && moved.hasLogicalDeviceGeneration());
+    first.reset();
+    ensure("resetting the moved-from parent destroys no Vulkan object",
+           state.mDestroyImageViewCalls == 0 && state.mDestroySwapchainCalls == 0 && state.mDestroyDeviceCalls == 0 &&
+               state.mDestroySurfaceCalls == 0 && state.mDestroyInstanceCalls == 0);
+
+    state.mImageViewDestroyOwner = &moved;
+    state.mSwapchainDestroyOwner = &moved;
+    state.mDeviceDestroyOwner    = &moved;
+    state.mSurfaceDestroyOwner   = &moved;
+    moved.reset();
+    ensure("image-view destruction observes its swapchain and older parents still live",
+           state.mImageViewDestroyObservationMade && state.mObservedSwapchainAtImageViewDestroy &&
+               state.mObservedConfigurationAtImageViewDestroy && state.mObservedLogicalAtImageViewDestroy &&
+               state.mObservedSurfaceAtImageViewDestroy);
+    ensure("swapchain destruction observes image views already removed while older parents remain live",
+           state.mSwapchainDestroyObservationMade && !state.mObservedSwapchainImagesAtSwapchainDestroy &&
+               state.mObservedConfigurationAtSwapchainDestroy && state.mObservedLogicalAtSwapchainDestroy &&
+               state.mObservedSurfaceAtSwapchainDestroy);
+    ensure("device and surface destruction observe both younger swapchain generations removed",
+           state.mDeviceDestroyObservationMade && !state.mObservedSwapchainImagesAtDeviceDestroy &&
+               !state.mObservedSwapchainAtDeviceDestroy && state.mSurfaceDestroyObservationMade &&
+               !state.mObservedSwapchainImagesAtSurfaceDestroy && !state.mObservedSwapchainAtSurfaceDestroy);
+    ensure("full reset destroys image views before the swapchain and all older parents exactly once",
+           state.mEvents == std::vector<Event>{ Event::CreateInstance, Event::CreateSurface, Event::CreateDevice, Event::GetDeviceQueue,
+                                                Event::CreateSwapchain, Event::CreateImageView, Event::CreateImageView,
+                                                Event::CreateImageView, Event::DestroyImageView, Event::DestroyImageView,
+                                                Event::DestroyImageView, Event::DestroySwapchain, Event::DestroyDevice,
+                                                Event::DestroySurface, Event::DestroyInstance } &&
+               state.mDestroyImageViewCalls == state.mSwapchainImageViews.size() && state.mDestroySwapchainCalls == 1 &&
+               state.mDestroyDeviceCalls == 1 && state.mDestroySurfaceCalls == 1 && state.mDestroyInstanceCalls == 1 &&
+               state.mDestroyedImageViews ==
+                   std::vector<VkImageView>{ state.mSwapchainImageViews[2], state.mSwapchainImageViews[1], state.mSwapchainImageViews[0] });
 }
 
 } // namespace tut
