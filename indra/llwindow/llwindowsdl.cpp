@@ -266,6 +266,14 @@ bool LLWindowSDL::createVulkanWindow(int x, int y, int width, int height, bool f
         return false;
     }
 
+    const auto swapchain_frame_slot_error = vulkan_window->acquireSwapchainFrameSlotGeneration();
+    if (swapchain_frame_slot_error)
+    {
+        LL_WARNS("Window") << "Vulkan swapchain frame-slot acquisition failed with code "
+                           << static_cast<U32>(swapchain_frame_slot_error->mCode) << LL_ENDL;
+        return false;
+    }
+
     mVulkanWindow = std::move(vulkan_window);
     mWindow       = mVulkanWindow->window();
     mFullscreen   = fullscreen;
@@ -308,6 +316,7 @@ bool LLWindowSDL::resetVulkanSurfaceGeneration() noexcept
     {
         return false;
     }
+    mVulkanWindow->resetSwapchainFrameSlotGeneration();
     mVulkanWindow->resetSwapchainImagesGeneration();
     mVulkanWindow->resetSwapchainGeneration();
     return mVulkanWindow->resetSurfaceGeneration();

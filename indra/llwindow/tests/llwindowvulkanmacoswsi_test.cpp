@@ -281,6 +281,40 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("swapchain-image acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("swapchain-image acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    const auto frame_slot_error = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("the exact swapchain-image chain creates one idle frame slot", !frame_slot_error.has_value());
+    ensure("the instance parent owns one frame-slot generation", instance_generation->hasSwapchainFrameSlotGeneration());
+    ensure("the real frame slot owns non-null command-pool, command-buffer, semaphore, and fence handles",
+           instance_generation->swapchainFrameCommandPool() != VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameCommandBuffer() != VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameImageAvailableSemaphore() != VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameSubmissionFence() != VK_NULL_HANDLE);
+    ensure("the frame slot retains the exact live queue-family, device, configuration, swapchain, and image parents",
+           instance_generation->presentationQueueFamilyIndex() != VK_QUEUE_FAMILY_IGNORED &&
+               instance_generation->logicalDevice() != VK_NULL_HANDLE && instance_generation->hasSwapchainConfigurationGeneration() &&
+               instance_generation->hasSwapchainGeneration() && instance_generation->hasSwapchainImagesGeneration());
+    ensure_equals("frame-slot creation emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("frame-slot acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("frame-slot acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    ensure("the native smoke explicitly resets the frame slot before swapchain images", owner->resetSwapchainFrameSlotGeneration());
+    ensure("explicit frame-slot reset removes all four owned handles",
+           !instance_generation->hasSwapchainFrameSlotGeneration() && instance_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameCommandBuffer() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameImageAvailableSemaphore() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameSubmissionFence() == VK_NULL_HANDLE);
+    ensure("frame-slot reset leaves its exact image, swapchain, configuration, device, and surface parents live",
+           instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() != 0 &&
+               instance_generation->hasSwapchainGeneration() && instance_generation->swapchain() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasLogicalDeviceGeneration() &&
+               instance_generation->logicalDevice() != VK_NULL_HANDLE && instance_generation->hasSurfaceGeneration() &&
+               instance_generation->surface() != VK_NULL_HANDLE);
+    ensure_equals("frame-slot creation and destruction emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+    ensure("frame-slot reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("frame-slot reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     ensure("the native smoke explicitly resets the swapchain images before the swapchain", owner->resetSwapchainImagesGeneration());
     ensure("explicit image reset removes every borrowed image and owned image view",
            !instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() == 0 &&
@@ -324,6 +358,11 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("surface reset leaves no swapchain-image generation",
            !instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() == 0 &&
                instance_generation->swapchainImage(0) == VK_NULL_HANDLE && instance_generation->swapchainImageView(0) == VK_NULL_HANDLE);
+    ensure("surface reset leaves no frame-slot generation or owned frame handle",
+           !instance_generation->hasSwapchainFrameSlotGeneration() && instance_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameCommandBuffer() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameImageAvailableSemaphore() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameSubmissionFence() == VK_NULL_HANDLE);
     ensure("the exact instance parent remains live after surface reset",
            owner->instanceGeneration() == instance_generation && instance_generation->instance() != VK_NULL_HANDLE);
     ensure("required validation remains live during explicit surface destruction", instance_generation->validationEnabled());

@@ -567,6 +567,10 @@ void window_macosx_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainImagesGeneration()),
                                  LLRenderVulkan::VulkanSwapchainImagesAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainImagesGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()));
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainFrameSlotGeneration()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainImagesGeneration()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainGeneration()));
     static_assert(std::is_same_v<decltype(std::declval<const LLWindowMacOSXVulkan&>().requirements()), const LLWindowVulkanRequirements*>);
@@ -1331,6 +1335,63 @@ void window_macosx_vulkan_object::test<15>()
     ensure("swapchain-image adapter fixture teardown succeeds", owner->reset());
     ensure_equals("swapchain-image adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("swapchain-image adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_macosx_vulkan_object::test<16>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState   state;
+    ScopedState active(state);
+    const auto  info   = createInfo();
+    auto        result = acquireLLWindowMacOSXVulkan(info, 161, fakeOperations(state));
+    auto*       owner  = acquiredWindow(result);
+    ensure("frame-slot adapter fixture acquired a native owner", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("frame-slot acquisition requires a live instance before refreshing geometry",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotAcquireCode::InstanceNotLive && state.mRefreshCount == 0);
+
+    ensure("frame-slot adapter fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    const std::size_t refreshes_after_instance = state.mRefreshCount;
+
+    state.mRefreshSucceeds    = false;
+    const auto failed_refresh = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("a failed Cocoa geometry refresh maps to a stale frame-slot window",
+           failed_refresh && failed_refresh->mCode == VulkanSwapchainFrameSlotAcquireCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance + 1);
+
+    state.mRefreshSucceeds     = true;
+    state.mRefreshMutation     = RefreshMutation::ZeroWidth;
+    const auto invalid_refresh = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("an invalid refreshed backing width maps to a stale frame-slot window",
+           invalid_refresh && invalid_refresh->mCode == VulkanSwapchainFrameSlotAcquireCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance + 2);
+
+    state.mRefreshMutation     = RefreshMutation::None;
+    state.mRefreshScale        = 2.0;
+    state.mRefreshWidth        = 3840;
+    state.mRefreshHeight       = 2160;
+    const auto missing_surface = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("current Cocoa backing pixels are forwarded to the frame-slot parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainFrameSlotAcquireCode::SurfaceNotLive &&
+               state.mRefreshCount == refreshes_after_instance + 3 && owner->drawableWidth() == 3840 && owner->drawableHeight() == 2160);
+
+    ensure("frame-slot adapter fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const std::size_t refreshes_after_surface = state.mRefreshCount;
+    const auto        missing_selection       = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("the frame-slot adapter refreshes pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainFrameSlotAcquireCode::PresentationDeviceNotLive &&
+               state.mRefreshCount == refreshes_after_surface + 1 && owner->drawableWidth() == 3840 && owner->drawableHeight() == 2160);
+    ensure("an unowned frame-slot generation reports no explicit reset", !owner->resetSwapchainFrameSlotGeneration());
+
+    state.mOwnerDuringDestroy = owner;
+    ensure("frame-slot adapter fixture teardown succeeds", owner->reset());
+    ensure_equals("frame-slot adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("frame-slot adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
 } // namespace tut

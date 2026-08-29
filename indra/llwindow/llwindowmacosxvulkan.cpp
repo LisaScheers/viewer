@@ -546,6 +546,38 @@ LLRenderVulkan::VulkanSwapchainImagesAcquireResult LLWindowMacOSXVulkan::acquire
     return mInstanceGeneration->acquireSwapchainImagesGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult LLWindowMacOSXVulkan::acquireSwapchainFrameSlotGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainFrameSlotAcquireError{ VulkanSwapchainFrameSlotAcquireCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mLoader || !validIdentity(mNativeWindow) || !refreshNativeGeometry())
+    {
+        return VulkanSwapchainFrameSlotAcquireError{ VulkanSwapchainFrameSlotAcquireCode::StaleWindowGeneration, std::nullopt };
+    }
+
+    SurfaceAcquireContext context{ this, mInstanceGeneration.get(), &mOperations, mRequirements->resolver(), mNativeWindow.mMetalLayer };
+    VulkanSwapchainFrameSlotRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = { mNativeWindow.mDrawableWidth, mNativeWindow.mDrawableHeight };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquireSwapchainFrameSlotGeneration(request);
+}
+
+bool LLWindowMacOSXVulkan::resetSwapchainFrameSlotGeneration() noexcept
+{
+    if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainFrameSlotGeneration())
+    {
+        return false;
+    }
+    mInstanceGeneration->resetSwapchainFrameSlotGeneration();
+    return true;
+}
+
 bool LLWindowMacOSXVulkan::resetSwapchainImagesGeneration() noexcept
 {
     if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainImagesGeneration())

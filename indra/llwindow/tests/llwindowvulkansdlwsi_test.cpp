@@ -184,6 +184,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool swapchain_image_views_complete    = false;
     bool swapchain_image_bounds_exact      = false;
     bool swapchain_images_provenance_exact = false;
+    bool frame_slot_acquired               = false;
+    bool frame_slot_handles_nonnull        = false;
+    bool frame_slot_provenance_exact       = false;
+    bool frame_slot_removed                = false;
     bool swapchain_images_removed          = false;
     bool swapchain_removed                = false;
     bool swapchain_configuration_removed  = false;
@@ -309,6 +313,14 @@ void window_vulkan_sdl_wsi_object::test<1>()
                                                instance_generation->swapchainImageView(image_count) == VK_NULL_HANDLE;
                 swapchain_images_provenance_exact = swapchain_images_acquired && swapchain_acquired && logical_device_acquired &&
                                                     swapchain_configuration_acquired && swapchain_format_supported;
+                frame_slot_acquired        = instance_generation->hasSwapchainFrameSlotGeneration();
+                frame_slot_handles_nonnull = instance_generation->swapchainFrameCommandPool() != VK_NULL_HANDLE &&
+                                             instance_generation->swapchainFrameCommandBuffer() != VK_NULL_HANDLE &&
+                                             instance_generation->swapchainFrameImageAvailableSemaphore() != VK_NULL_HANDLE &&
+                                             instance_generation->swapchainFrameSubmissionFence() != VK_NULL_HANDLE;
+                frame_slot_provenance_exact = frame_slot_acquired && frame_slot_handles_nonnull && swapchain_images_provenance_exact &&
+                                              instance_generation->logicalDevice() != VK_NULL_HANDLE &&
+                                              instance_generation->presentationQueueFamilyIndex() != VK_QUEUE_FAMILY_IGNORED;
 
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
                 const auto& enabled_extensions  = instance_generation->enabledExtensions();
@@ -348,6 +360,11 @@ void window_vulkan_sdl_wsi_object::test<1>()
         logical_device_removed = !owned_instance_generation->hasLogicalDeviceGeneration() &&
                                  owned_instance_generation->logicalDevice() == VK_NULL_HANDLE &&
                                  owned_instance_generation->presentationQueue() == VK_NULL_HANDLE;
+        frame_slot_removed = !owned_instance_generation->hasSwapchainFrameSlotGeneration() &&
+                             owned_instance_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE &&
+                             owned_instance_generation->swapchainFrameCommandBuffer() == VK_NULL_HANDLE &&
+                             owned_instance_generation->swapchainFrameImageAvailableSemaphore() == VK_NULL_HANDLE &&
+                             owned_instance_generation->swapchainFrameSubmissionFence() == VK_NULL_HANDLE;
         swapchain_images_removed = !owned_instance_generation->hasSwapchainImagesGeneration() &&
                                    owned_instance_generation->resolvedSwapchainImageCount() == 0 &&
                                    owned_instance_generation->swapchainImage(0) == VK_NULL_HANDLE &&
@@ -412,7 +429,12 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("swapchain image and view lookup reject the first out-of-range index", swapchain_image_bounds_exact);
     ensure("the image collection retains its exact swapchain, device, configuration, and format parents",
            swapchain_images_provenance_exact);
+    ensure("the SDL Vulkan branch automatically owns one frame-slot generation", frame_slot_acquired);
+    ensure("the automatic frame slot owns non-null command-pool, command-buffer, semaphore, and fence handles", frame_slot_handles_nonnull);
+    ensure("the frame slot retains the exact live queue-family, device, configuration, swapchain, and image parents",
+           frame_slot_provenance_exact);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
+    ensure("surface reset first removes the frame-slot generation and all four owned handles", frame_slot_removed);
     ensure("surface reset first removes every swapchain image and view", swapchain_images_removed);
     ensure("surface reset first removes the swapchain generation", swapchain_removed);
     ensure("explicit reset removes only the Vulkan surface child", surface_removed);

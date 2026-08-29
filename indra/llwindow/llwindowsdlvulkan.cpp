@@ -442,6 +442,46 @@ LLRenderVulkan::VulkanSwapchainImagesAcquireResult LLWindowSDLVulkan::acquireSwa
     return mInstanceGeneration->acquireSwapchainImagesGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult LLWindowSDLVulkan::acquireSwapchainFrameSlotGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainFrameSlotAcquireError{ VulkanSwapchainFrameSlotAcquireCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mWindow || !mOperations.mGetWindowSizeInPixels)
+    {
+        return VulkanSwapchainFrameSlotAcquireError{ VulkanSwapchainFrameSlotAcquireCode::StaleWindowGeneration, std::nullopt };
+    }
+
+    int drawable_width  = 0;
+    int drawable_height = 0;
+    if (!mOperations.mGetWindowSizeInPixels(mOperations.mUserdata, mWindow, &drawable_width, &drawable_height) || drawable_width <= 0 ||
+        drawable_height <= 0)
+    {
+        return VulkanSwapchainFrameSlotAcquireError{ VulkanSwapchainFrameSlotAcquireCode::InvalidDrawableExtent, std::nullopt };
+    }
+
+    SurfaceAcquireContext           context{ this, mInstanceGeneration.get(), &mOperations, mWindow };
+    VulkanSwapchainFrameSlotRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = { static_cast<std::uint32_t>(drawable_width), static_cast<std::uint32_t>(drawable_height) };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquireSwapchainFrameSlotGeneration(request);
+}
+
+bool LLWindowSDLVulkan::resetSwapchainFrameSlotGeneration() noexcept
+{
+    if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainFrameSlotGeneration())
+    {
+        return false;
+    }
+    mInstanceGeneration->resetSwapchainFrameSlotGeneration();
+    return true;
+}
+
 bool LLWindowSDLVulkan::resetSwapchainImagesGeneration() noexcept
 {
     if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainImagesGeneration())

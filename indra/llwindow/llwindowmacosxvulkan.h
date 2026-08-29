@@ -152,7 +152,9 @@ public:
     LLRenderVulkan::VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfigurationGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainAcquireResult              acquireSwapchainGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainImagesAcquireResult        acquireSwapchainImagesGeneration() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult     acquireSwapchainFrameSlotGeneration() noexcept;
     const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
+    bool                                                      resetSwapchainFrameSlotGeneration() noexcept;
     bool                                                      resetSwapchainImagesGeneration() noexcept;
     bool                                                      resetSwapchainGeneration() noexcept;
     bool                                                      resetSurfaceGeneration() noexcept;

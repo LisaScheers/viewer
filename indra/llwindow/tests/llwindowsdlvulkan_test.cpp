@@ -463,6 +463,10 @@ void window_sdl_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainImagesGeneration()),
                                  LLRenderVulkan::VulkanSwapchainImagesAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainImagesGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainFrameSlotGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainFrameSlotGeneration()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainFrameSlotGeneration()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainImagesGeneration()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainGeneration()));
     static_assert(noexcept(acquireLLWindowSDLVulkan(std::declval<const LLWindowSDLVulkanCreateInfo&>(), U64{},
@@ -1138,6 +1142,62 @@ void window_sdl_vulkan_object::test<15>()
     owner->reset();
     ensure_equals("swapchain-image adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("swapchain-image adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<16>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 131, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("frame-slot adapter fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("frame-slot acquisition requires a live instance before querying drawable pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotAcquireCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("frame-slot adapter fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mDrawableSizeSucceeds = false;
+    const auto failed_size      = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("an SDL drawable-size failure is mapped before frame-slot acquisition",
+           failed_size && failed_size->mCode == VulkanSwapchainFrameSlotAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 1);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableHeight       = -1;
+    const auto invalid_size     = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("a negative SDL drawable height is rejected before frame-slot acquisition",
+           invalid_size && invalid_size->mCode == VulkanSwapchainFrameSlotAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 2);
+
+    state.mDrawableWidth       = 3840;
+    state.mDrawableHeight      = 2160;
+    const auto missing_surface = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("current SDL backing pixels are forwarded to the frame-slot parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainFrameSlotAcquireCode::SurfaceNotLive &&
+               state.mDrawableSizeCalls == 3);
+
+    ensure("frame-slot adapter fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const auto missing_selection = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("the frame-slot adapter re-queries pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainFrameSlotAcquireCode::PresentationDeviceNotLive &&
+               state.mDrawableSizeCalls == 4);
+    ensure("an unowned frame-slot generation reports no explicit reset", !owner->resetSwapchainFrameSlotGeneration());
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("frame-slot adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("frame-slot adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
 } // namespace tut
