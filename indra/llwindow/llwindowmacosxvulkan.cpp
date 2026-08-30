@@ -568,14 +568,70 @@ LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult LLWindowMacOSXVulkan::acqu
     return mInstanceGeneration->acquireSwapchainFrameSlotGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulkan::roundTripEmptySwapchainFrameSlot() noexcept
+{
+    return operateEmptySwapchainFrameSlot(false);
+}
+
+LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulkan::retryEmptySwapchainFrameSlotCompletion() noexcept
+{
+    return operateEmptySwapchainFrameSlot(true);
+}
+
+LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulkan::operateEmptySwapchainFrameSlot(
+    bool retry_completion) noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mLoader || !validIdentity(mNativeWindow) || !mOperations.mIsMainThread ||
+        !mOperations.mIsMainThread(mOperations.mUserdata) || (!retry_completion && !mOperations.mRefreshNativeWindow))
+    {
+        return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration,
+                                                             std::nullopt };
+    }
+
+    VkExtent2D drawable_extent = mInstanceGeneration->swapchainDrawableExtent();
+    if (!retry_completion)
+    {
+        LLWindowMacOSXVulkanNativeWindow refreshed = mNativeWindow;
+        if (!mOperations.mRefreshNativeWindow(mOperations.mUserdata, refreshed) || !sameIdentity(mNativeWindow, refreshed))
+        {
+            return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration,
+                                                                 std::nullopt };
+        }
+        if (!validGeometry(refreshed))
+        {
+            return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent,
+                                                                 std::nullopt };
+        }
+
+        mNativeWindow.mBackingScale   = refreshed.mBackingScale;
+        mNativeWindow.mDrawableWidth  = refreshed.mDrawableWidth;
+        mNativeWindow.mDrawableHeight = refreshed.mDrawableHeight;
+        drawable_extent               = { refreshed.mDrawableWidth, refreshed.mDrawableHeight };
+    }
+
+    SurfaceAcquireContext context{ this, mInstanceGeneration.get(), &mOperations, mRequirements->resolver(), mNativeWindow.mMetalLayer };
+    VulkanSwapchainFrameSlotOperationRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = drawable_extent;
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return retry_completion ? mInstanceGeneration->retryEmptySwapchainFrameSlotCompletion(request)
+                            : mInstanceGeneration->roundTripEmptySwapchainFrameSlot(request);
+}
+
 bool LLWindowMacOSXVulkan::resetSwapchainFrameSlotGeneration() noexcept
 {
     if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainFrameSlotGeneration())
     {
         return false;
     }
-    mInstanceGeneration->resetSwapchainFrameSlotGeneration();
-    return true;
+    return mInstanceGeneration->resetSwapchainFrameSlotGeneration();
 }
 
 bool LLWindowMacOSXVulkan::resetSwapchainImagesGeneration() noexcept
@@ -584,8 +640,7 @@ bool LLWindowMacOSXVulkan::resetSwapchainImagesGeneration() noexcept
     {
         return false;
     }
-    mInstanceGeneration->resetSwapchainImagesGeneration();
-    return true;
+    return mInstanceGeneration->resetSwapchainImagesGeneration();
 }
 
 bool LLWindowMacOSXVulkan::resetSwapchainGeneration() noexcept
@@ -594,8 +649,7 @@ bool LLWindowMacOSXVulkan::resetSwapchainGeneration() noexcept
     {
         return false;
     }
-    mInstanceGeneration->resetSwapchainGeneration();
-    return true;
+    return mInstanceGeneration->resetSwapchainGeneration();
 }
 
 bool LLWindowMacOSXVulkan::resetSurfaceGeneration() noexcept
@@ -604,8 +658,7 @@ bool LLWindowMacOSXVulkan::resetSurfaceGeneration() noexcept
     {
         return false;
     }
-    mInstanceGeneration->resetSurfaceGeneration();
-    return true;
+    return mInstanceGeneration->resetSurfaceGeneration();
 }
 
 bool LLWindowMacOSXVulkan::reset() noexcept
@@ -620,6 +673,10 @@ bool LLWindowMacOSXVulkan::reset() noexcept
         return false;
     }
 
+    if (mInstanceGeneration && !mInstanceGeneration->reset())
+    {
+        return false;
+    }
     mInstanceGeneration.reset();
     mRequirements.reset();
     if (mNativeWindow.mToken)

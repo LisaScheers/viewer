@@ -15,6 +15,7 @@
 
 #include "llrendervulkanswapchainframeslot.h"
 
+#include <limits>
 #include <utility>
 
 namespace LLRenderVulkan
@@ -34,11 +35,29 @@ namespace
         PFN_vkDestroyFence           mDestroyFence           = nullptr;
     };
 
+    struct EmptySubmissionDispatch
+    {
+        PFN_vkWaitForFences      mWaitForFences      = nullptr;
+        PFN_vkResetCommandBuffer mResetCommandBuffer = nullptr;
+        PFN_vkBeginCommandBuffer mBeginCommandBuffer = nullptr;
+        PFN_vkEndCommandBuffer   mEndCommandBuffer   = nullptr;
+        PFN_vkResetFences        mResetFences        = nullptr;
+        PFN_vkQueueSubmit        mQueueSubmit        = nullptr;
+    };
+
     VulkanSwapchainFrameSlotResolutionError failure(VulkanSwapchainFrameSlotResolutionCode         code,
                                                     std::optional<VulkanSwapchainFrameSlotCommand> command = std::nullopt,
                                                     VkResult                                       result  = VK_SUCCESS) noexcept
     {
         return { code, command, result };
+    }
+
+    VulkanSwapchainFrameSlotOperationError operationFailure(VulkanSwapchainFrameSlotOperationCode          code,
+                                                            VulkanSwapchainFrameSlotDisposition            disposition,
+                                                            std::optional<VulkanSwapchainFrameSlotCommand> command = std::nullopt,
+                                                            VkResult                                       result  = VK_SUCCESS) noexcept
+    {
+        return { code, command, result, disposition };
     }
 
     template<typename Function>
@@ -238,7 +257,15 @@ VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(VulkanSwa
     mSubmissionFence(std::exchange(other.mSubmissionFence, VK_NULL_HANDLE)),
     mDestroyCommandPool(std::exchange(other.mDestroyCommandPool, nullptr)),
     mDestroySemaphore(std::exchange(other.mDestroySemaphore, nullptr)),
-    mDestroyFence(std::exchange(other.mDestroyFence, nullptr))
+    mDestroyFence(std::exchange(other.mDestroyFence, nullptr)),
+    mWaitForFences(std::exchange(other.mWaitForFences, nullptr)),
+    mResetCommandBuffer(std::exchange(other.mResetCommandBuffer, nullptr)),
+    mBeginCommandBuffer(std::exchange(other.mBeginCommandBuffer, nullptr)),
+    mEndCommandBuffer(std::exchange(other.mEndCommandBuffer, nullptr)),
+    mResetFences(std::exchange(other.mResetFences, nullptr)),
+    mQueueSubmit(std::exchange(other.mQueueSubmit, nullptr)),
+    mDisposition(std::exchange(other.mDisposition, VulkanSwapchainFrameSlotDisposition::Reusable)),
+    mPendingSubmissionReportedDeviceLost(std::exchange(other.mPendingSubmissionReportedDeviceLost, false))
 {
 }
 
@@ -260,8 +287,263 @@ bool VulkanSwapchainFrameSlotGeneration::createdFor(const VulkanLogicalDeviceGen
            mImageFormat == images_generation.imageFormat() && mImageCount == images_generation.imageCount();
 }
 
+VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveEmptySubmissionDispatch(
+    const VulkanLogicalDeviceGeneration&          logical_device_generation,
+    const VulkanSwapchainConfigurationGeneration& configuration_generation,
+    const VulkanSwapchainGeneration&              swapchain_generation,
+    const VulkanSwapchainImagesGeneration&        images_generation) noexcept
+{
+    if (!valid(logical_device_generation) || mGetInstanceProcAddr != logical_device_generation.getInstanceProcAddr() ||
+        mInstance != logical_device_generation.instance() || mSurface != logical_device_generation.surface() ||
+        mPhysicalDevice != logical_device_generation.physicalDevice() ||
+        mPhysicalDeviceIndex != logical_device_generation.physicalDeviceIndex() || mDevice != logical_device_generation.device() ||
+        mQueue != logical_device_generation.queue() || mQueueFamilyIndex != logical_device_generation.queueFamilyIndex() ||
+        mQueueIndex != logical_device_generation.queueIndex())
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidLogicalDeviceGeneration, mDisposition);
+    }
+
+    const VkExtent2D drawable_extent = configuration_generation.drawableExtent();
+    if (!belongsTo(configuration_generation, logical_device_generation) || mDrawableExtent.width != drawable_extent.width ||
+        mDrawableExtent.height != drawable_extent.height)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainConfigurationGeneration, mDisposition);
+    }
+    if (!swapchain_generation.createdFor(logical_device_generation, configuration_generation) ||
+        mSwapchain != swapchain_generation.swapchain())
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainGeneration, mDisposition);
+    }
+    if (mImagesGeneration != &images_generation ||
+        !images_generation.createdFor(logical_device_generation, configuration_generation, swapchain_generation) ||
+        mImageFormat != images_generation.imageFormat() || mImageCount != images_generation.imageCount())
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainImagesGeneration, mDisposition);
+    }
+
+    const bool dispatch_resolved =
+        mWaitForFences && mResetCommandBuffer && mBeginCommandBuffer && mEndCommandBuffer && mResetFences && mQueueSubmit;
+    if (dispatch_resolved)
+    {
+        return mDisposition;
+    }
+    if (mDisposition != VulkanSwapchainFrameSlotDisposition::Reusable)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidDisposition, mDisposition);
+    }
+
+    const auto get_device_proc_addr = resolveInstance<PFN_vkGetDeviceProcAddr>(mGetInstanceProcAddr, mInstance, "vkGetDeviceProcAddr");
+    if (!get_device_proc_addr)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::GetDeviceProcAddr);
+    }
+
+    EmptySubmissionDispatch dispatch;
+    dispatch.mWaitForFences = resolveDevice<PFN_vkWaitForFences>(get_device_proc_addr, mDevice, "vkWaitForFences");
+    if (!dispatch.mWaitForFences)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::WaitForFences);
+    }
+    dispatch.mResetCommandBuffer = resolveDevice<PFN_vkResetCommandBuffer>(get_device_proc_addr, mDevice, "vkResetCommandBuffer");
+    if (!dispatch.mResetCommandBuffer)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::ResetCommandBuffer);
+    }
+    dispatch.mBeginCommandBuffer = resolveDevice<PFN_vkBeginCommandBuffer>(get_device_proc_addr, mDevice, "vkBeginCommandBuffer");
+    if (!dispatch.mBeginCommandBuffer)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::BeginCommandBuffer);
+    }
+    dispatch.mEndCommandBuffer = resolveDevice<PFN_vkEndCommandBuffer>(get_device_proc_addr, mDevice, "vkEndCommandBuffer");
+    if (!dispatch.mEndCommandBuffer)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::EndCommandBuffer);
+    }
+    dispatch.mResetFences = resolveDevice<PFN_vkResetFences>(get_device_proc_addr, mDevice, "vkResetFences");
+    if (!dispatch.mResetFences)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::ResetFences);
+    }
+    dispatch.mQueueSubmit = resolveDevice<PFN_vkQueueSubmit>(get_device_proc_addr, mDevice, "vkQueueSubmit");
+    if (!dispatch.mQueueSubmit)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::QueueSubmit);
+    }
+
+    mWaitForFences      = dispatch.mWaitForFences;
+    mResetCommandBuffer = dispatch.mResetCommandBuffer;
+    mBeginCommandBuffer = dispatch.mBeginCommandBuffer;
+    mEndCommandBuffer   = dispatch.mEndCommandBuffer;
+    mResetFences        = dispatch.mResetFences;
+    mQueueSubmit        = dispatch.mQueueSubmit;
+    return mDisposition;
+}
+
+VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::executeEmptySubmission() noexcept
+{
+    if (mDisposition != VulkanSwapchainFrameSlotDisposition::Reusable)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidDisposition, mDisposition);
+    }
+
+    if (!mWaitForFences)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::WaitForFences);
+    }
+    if (!mResetCommandBuffer)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::ResetCommandBuffer);
+    }
+    if (!mBeginCommandBuffer)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::BeginCommandBuffer);
+    }
+    if (!mEndCommandBuffer)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::EndCommandBuffer);
+    }
+    if (!mResetFences)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::ResetFences);
+    }
+    if (!mQueueSubmit)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::QueueSubmit);
+    }
+
+    VkResult result = mWaitForFences(mDevice, 1, &mSubmissionFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max());
+    if (result != VK_SUCCESS)
+    {
+        mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
+                                                      : VulkanSwapchainFrameSlotDisposition::Reusable;
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::WaitForFences, result);
+    }
+
+    result = mResetCommandBuffer(mCommandBuffer, 0);
+    if (result != VK_SUCCESS)
+    {
+        mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
+                                                      : VulkanSwapchainFrameSlotDisposition::ResetRequired;
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::ResetCommandBuffer, result);
+    }
+
+    VkCommandBufferBeginInfo begin_info{};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    result           = mBeginCommandBuffer(mCommandBuffer, &begin_info);
+    if (result != VK_SUCCESS)
+    {
+        mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
+                                                      : VulkanSwapchainFrameSlotDisposition::ResetRequired;
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::BeginCommandBuffer, result);
+    }
+
+    result = mEndCommandBuffer(mCommandBuffer);
+    if (result != VK_SUCCESS)
+    {
+        mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
+                                                      : VulkanSwapchainFrameSlotDisposition::ResetRequired;
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::EndCommandBuffer, result);
+    }
+
+    result = mResetFences(mDevice, 1, &mSubmissionFence);
+    if (result != VK_SUCCESS)
+    {
+        mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
+                                                      : VulkanSwapchainFrameSlotDisposition::ResetRequired;
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::ResetFences, result);
+    }
+
+    VkSubmitInfo submit_info{};
+    submit_info.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers    = &mCommandBuffer;
+
+    result = mQueueSubmit(mQueue, 1, &submit_info, mSubmissionFence);
+    if (result != VK_SUCCESS)
+    {
+        // Device loss is equivalent to submit success for pending and in-use
+        // accounting. A completion wait must retire that possible use before
+        // teardown can destroy the fence or command pool.
+        mPendingSubmissionReportedDeviceLost = result == VK_ERROR_DEVICE_LOST;
+        mDisposition                         = mPendingSubmissionReportedDeviceLost ? VulkanSwapchainFrameSlotDisposition::Pending
+                                                                                    : VulkanSwapchainFrameSlotDisposition::ResetRequired;
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::QueueSubmit, result);
+    }
+
+    mPendingSubmissionReportedDeviceLost = false;
+    mDisposition                         = VulkanSwapchainFrameSlotDisposition::Pending;
+    result = mWaitForFences(mDevice, 1, &mSubmissionFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max());
+    if (result == VK_SUCCESS)
+    {
+        mDisposition                         = mPendingSubmissionReportedDeviceLost ? VulkanSwapchainFrameSlotDisposition::DeviceLost
+                                                                                    : VulkanSwapchainFrameSlotDisposition::Reusable;
+        mPendingSubmissionReportedDeviceLost = false;
+        return mDisposition;
+    }
+    if (result == VK_ERROR_DEVICE_LOST)
+    {
+        mPendingSubmissionReportedDeviceLost = false;
+        mDisposition                         = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+    }
+    return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
+                            VulkanSwapchainFrameSlotCommand::WaitForFences, result);
+}
+
+VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retryEmptySubmissionCompletion() noexcept
+{
+    if (mDisposition != VulkanSwapchainFrameSlotDisposition::Pending)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidDisposition, mDisposition);
+    }
+    if (!mWaitForFences)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                VulkanSwapchainFrameSlotCommand::WaitForFences);
+    }
+
+    const VkResult result = mWaitForFences(mDevice, 1, &mSubmissionFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max());
+    if (result == VK_SUCCESS)
+    {
+        mDisposition                         = mPendingSubmissionReportedDeviceLost ? VulkanSwapchainFrameSlotDisposition::DeviceLost
+                                                                                    : VulkanSwapchainFrameSlotDisposition::Reusable;
+        mPendingSubmissionReportedDeviceLost = false;
+        return mDisposition;
+    }
+    if (result == VK_ERROR_DEVICE_LOST)
+    {
+        mPendingSubmissionReportedDeviceLost = false;
+        mDisposition                         = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+    }
+    return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
+                            VulkanSwapchainFrameSlotCommand::WaitForFences, result);
+}
+
 void VulkanSwapchainFrameSlotGeneration::reset() noexcept
 {
+    if (mDisposition == VulkanSwapchainFrameSlotDisposition::Pending)
+    {
+        return;
+    }
+
     if (mSubmissionFence != VK_NULL_HANDLE && mDestroyFence)
     {
         mDestroyFence(mDevice, mSubmissionFence, nullptr);
@@ -279,23 +561,31 @@ void VulkanSwapchainFrameSlotGeneration::reset() noexcept
     mCommandPool   = VK_NULL_HANDLE;
     mCommandBuffer = VK_NULL_HANDLE;
 
-    mGetInstanceProcAddr = nullptr;
-    mInstance            = VK_NULL_HANDLE;
-    mSurface             = VK_NULL_HANDLE;
-    mPhysicalDevice      = VK_NULL_HANDLE;
-    mPhysicalDeviceIndex = 0;
-    mDevice              = VK_NULL_HANDLE;
-    mQueue               = VK_NULL_HANDLE;
-    mQueueFamilyIndex    = VK_QUEUE_FAMILY_IGNORED;
-    mQueueIndex          = 0;
-    mDrawableExtent      = {};
-    mSwapchain           = VK_NULL_HANDLE;
-    mImageFormat         = VK_FORMAT_UNDEFINED;
-    mImageCount          = 0;
-    mImagesGeneration    = nullptr;
-    mDestroyCommandPool  = nullptr;
-    mDestroySemaphore    = nullptr;
-    mDestroyFence        = nullptr;
+    mGetInstanceProcAddr                 = nullptr;
+    mInstance                            = VK_NULL_HANDLE;
+    mSurface                             = VK_NULL_HANDLE;
+    mPhysicalDevice                      = VK_NULL_HANDLE;
+    mPhysicalDeviceIndex                 = 0;
+    mDevice                              = VK_NULL_HANDLE;
+    mQueue                               = VK_NULL_HANDLE;
+    mQueueFamilyIndex                    = VK_QUEUE_FAMILY_IGNORED;
+    mQueueIndex                          = 0;
+    mDrawableExtent                      = {};
+    mSwapchain                           = VK_NULL_HANDLE;
+    mImageFormat                         = VK_FORMAT_UNDEFINED;
+    mImageCount                          = 0;
+    mImagesGeneration                    = nullptr;
+    mDestroyCommandPool                  = nullptr;
+    mDestroySemaphore                    = nullptr;
+    mDestroyFence                        = nullptr;
+    mWaitForFences                       = nullptr;
+    mResetCommandBuffer                  = nullptr;
+    mBeginCommandBuffer                  = nullptr;
+    mEndCommandBuffer                    = nullptr;
+    mResetFences                         = nullptr;
+    mQueueSubmit                         = nullptr;
+    mDisposition                         = VulkanSwapchainFrameSlotDisposition::Reusable;
+    mPendingSubmissionReportedDeviceLost = false;
 }
 
 VulkanSwapchainFrameSlotResolutionResult resolveVulkanSwapchainFrameSlotGeneration(

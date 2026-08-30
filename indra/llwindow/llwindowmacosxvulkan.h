@@ -153,15 +153,17 @@ public:
     LLRenderVulkan::VulkanSwapchainAcquireResult              acquireSwapchainGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainImagesAcquireResult        acquireSwapchainImagesGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult     acquireSwapchainFrameSlotGeneration() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult retryEmptySwapchainFrameSlotCompletion() noexcept;
     const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
     bool                                                      resetSwapchainFrameSlotGeneration() noexcept;
     bool                                                      resetSwapchainImagesGeneration() noexcept;
     bool                                                      resetSwapchainGeneration() noexcept;
     bool                                                      resetSurfaceGeneration() noexcept;
 
-    // AppKit ownership is main-thread-affine. An explicit off-main reset
-    // returns false without releasing any resource. Destruction of a still
-    // owning object off the main thread is a contract violation.
+    // AppKit ownership is main-thread-affine. An explicit off-main or Pending
+    // frame-slot reset returns false without releasing any resource.
+    // Destruction in either state violates the caller contract.
     bool reset() noexcept;
 
 private:
@@ -176,6 +178,7 @@ private:
                          LLWindowVulkanRequirements&&           requirements) noexcept;
     LLRenderVulkan::VulkanSurfaceAcquireResult acquireSurfaceGeneration(
         LLRenderVulkan::VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult operateEmptySwapchainFrameSlot(bool retry_completion) noexcept;
 
     LLWindowMacOSXVulkanOperations                            mOperations;
     void*                                                     mLoader = nullptr;

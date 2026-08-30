@@ -117,13 +117,18 @@ public:
     LLRenderVulkan::VulkanSwapchainAcquireResult              acquireSwapchainGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainImagesAcquireResult        acquireSwapchainImagesGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult     acquireSwapchainFrameSlotGeneration() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult retryEmptySwapchainFrameSlotCompletion() noexcept;
     const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
     bool                                                      resetSwapchainFrameSlotGeneration() noexcept;
     bool                                                      resetSwapchainImagesGeneration() noexcept;
     bool                                                      resetSwapchainGeneration() noexcept;
     bool                                                      resetSurfaceGeneration() noexcept;
 
-    void reset() noexcept;
+    // Full reset returns false without releasing ownership while an explicit
+    // frame-slot operation remains Pending. Destroying or move-assigning over
+    // such an owner violates the caller contract.
+    bool reset() noexcept;
 
 private:
     friend class LLWindowSDL;
@@ -142,6 +147,7 @@ private:
                       LLWindowVulkanRequirements&&       requirements) noexcept;
     LLRenderVulkan::VulkanSurfaceAcquireResult acquireSurfaceGeneration(
         LLRenderVulkan::VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult operateEmptySwapchainFrameSlot(bool retry_completion) noexcept;
 
     LLWindowSDLVulkanOperations                               mOperations;
     SDL_Window*                                               mWindow = nullptr;

@@ -100,6 +100,30 @@ VkCompositeAlphaFlagBitsKHR expectedCompositeAlpha(VkCompositeAlphaFlagsKHR supp
     return static_cast<VkCompositeAlphaFlagBitsKHR>(0);
 }
 
+struct FrameSlotOperationContext
+{
+    const LLWindowSDL*                              mWindow     = nullptr;
+    const LLRenderVulkan::VulkanInstanceGeneration* mGeneration = nullptr;
+};
+
+bool frameSlotInstanceOwnerIsCurrent(void* userdata, const LLRenderVulkan::VulkanInstanceGeneration& generation) noexcept
+{
+    const auto& context = *static_cast<const FrameSlotOperationContext*>(userdata);
+    return context.mWindow && context.mGeneration == &generation && context.mWindow->getVulkanInstanceGeneration() == context.mGeneration;
+}
+
+bool frameSlotWindowGenerationIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto& context = *static_cast<const FrameSlotOperationContext*>(userdata);
+    return context.mWindow && context.mWindow->isVulkanWindowGenerationCurrent(native_window_generation);
+}
+
+bool operationIsReusable(const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult& result) noexcept
+{
+    const auto* disposition = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(&result);
+    return disposition && *disposition == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable;
+}
+
 } // namespace
 
 namespace tut
@@ -187,6 +211,11 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool frame_slot_acquired               = false;
     bool frame_slot_handles_nonnull        = false;
     bool frame_slot_provenance_exact       = false;
+    bool frame_slot_first_round_trip       = false;
+    bool frame_slot_second_round_trip      = false;
+    bool frame_slot_semaphore_untouched    = false;
+    bool frame_slot_round_trip_clean       = false;
+    bool frame_slot_explicitly_reset       = false;
     bool frame_slot_removed                = false;
     bool swapchain_images_removed          = false;
     bool swapchain_removed                = false;
@@ -322,6 +351,30 @@ void window_vulkan_sdl_wsi_object::test<1>()
                                               instance_generation->logicalDevice() != VK_NULL_HANDLE &&
                                               instance_generation->presentationQueueFamilyIndex() != VK_QUEUE_FAMILY_IGNORED;
 
+                if (frame_slot_provenance_exact && drawable_queried)
+                {
+                    auto*             mutable_generation = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
+                    const VkSemaphore image_available    = instance_generation->swapchainFrameImageAvailableSemaphore();
+                    FrameSlotOperationContext operation_context{ static_cast<const LLWindowSDL*>(window), instance_generation };
+                    LLRenderVulkan::VulkanSwapchainFrameSlotOperationRequest operation_request;
+                    operation_request.mNativeWindowGeneration = requirements->nativeWindowGeneration();
+                    operation_request.mDrawableExtent         = { static_cast<std::uint32_t>(current_drawable.mX),
+                                                                  static_cast<std::uint32_t>(current_drawable.mY) };
+                    operation_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+                    operation_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+
+                    const auto first_result     = mutable_generation->roundTripEmptySwapchainFrameSlot(operation_request);
+                    frame_slot_first_round_trip = operationIsReusable(first_result);
+                    const bool semaphore_untouched_after_first =
+                        image_available != VK_NULL_HANDLE &&
+                        instance_generation->swapchainFrameImageAvailableSemaphore() == image_available;
+                    const auto second_result     = mutable_generation->roundTripEmptySwapchainFrameSlot(operation_request);
+                    frame_slot_second_round_trip = operationIsReusable(second_result);
+                    frame_slot_semaphore_untouched =
+                        semaphore_untouched_after_first && instance_generation->swapchainFrameImageAvailableSemaphore() == image_available;
+                    frame_slot_round_trip_clean = instance_generation->validationSnapshot().mMessageCount == 0;
+                }
+
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
                 const auto& enabled_extensions  = instance_generation->enabledExtensions();
                 instance_extensions_ordered     = enabled_extensions.size() >= required_extensions.size();
@@ -352,6 +405,8 @@ void window_vulkan_sdl_wsi_object::test<1>()
         instance_window_owned = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == owned_instance_generation &&
                                 owned_instance_generation->instance() != VK_NULL_HANDLE;
         surface_window_owned = owned_instance_generation->hasSurfaceGeneration() && owned_instance_generation->surface() != VK_NULL_HANDLE;
+        frame_slot_explicitly_reset =
+            const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(owned_instance_generation)->resetSwapchainFrameSlotGeneration();
         surface_explicitly_reset = static_cast<LLWindowSDL*>(window)->resetVulkanSurfaceGeneration();
         surface_removed = !owned_instance_generation->hasSurfaceGeneration() && owned_instance_generation->surface() == VK_NULL_HANDLE;
         presentation_device_removed = !owned_instance_generation->hasPresentationDeviceGeneration() &&
@@ -433,8 +488,13 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the automatic frame slot owns non-null command-pool, command-buffer, semaphore, and fence handles", frame_slot_handles_nonnull);
     ensure("the frame slot retains the exact live queue-family, device, configuration, swapchain, and image parents",
            frame_slot_provenance_exact);
+    ensure("the native SDL owner completes the first explicit empty frame-slot round trip", frame_slot_first_round_trip);
+    ensure("the native SDL owner completes the second explicit empty frame-slot round trip", frame_slot_second_round_trip);
+    ensure("both empty round trips leave the exact non-null image-available semaphore untouched", frame_slot_semaphore_untouched);
+    ensure("both empty round trips emit no validation messages", frame_slot_round_trip_clean);
+    ensure("the native smoke explicitly resets the frame-slot child before its parents", frame_slot_explicitly_reset);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
-    ensure("surface reset first removes the frame-slot generation and all four owned handles", frame_slot_removed);
+    ensure("explicit frame-slot reset removes the generation and all four owned handles", frame_slot_removed);
     ensure("surface reset first removes every swapchain image and view", swapchain_images_removed);
     ensure("surface reset first removes the swapchain generation", swapchain_removed);
     ensure("explicit reset removes only the Vulkan surface child", surface_removed);

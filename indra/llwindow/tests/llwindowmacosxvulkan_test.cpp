@@ -534,6 +534,12 @@ void ensureSurfaceError(const char*                                       messag
     tut::ensure(message, result && result->mCode == code);
 }
 
+const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError* operationError(
+    const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult& result) noexcept
+{
+    return std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result);
+}
+
 void failAllocation()
 {
     throw std::bad_alloc();
@@ -570,9 +576,17 @@ void window_macosx_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().roundTripEmptySwapchainFrameSlot()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().roundTripEmptySwapchainFrameSlot()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().retryEmptySwapchainFrameSlotCompletion()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retryEmptySwapchainFrameSlotCompletion()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainFrameSlotGeneration()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainImagesGeneration()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().reset()), bool>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().reset()));
     static_assert(std::is_same_v<decltype(std::declval<const LLWindowMacOSXVulkan&>().requirements()), const LLWindowVulkanRequirements*>);
     static_assert(noexcept(acquireLLWindowMacOSXVulkan(std::declval<const LLWindowMacOSXVulkanCreateInfo&>(),
                                                        U64{},
@@ -1353,6 +1367,11 @@ void window_macosx_vulkan_object::test<16>()
     const auto missing_instance = owner->acquireSwapchainFrameSlotGeneration();
     ensure("frame-slot acquisition requires a live instance before refreshing geometry",
            missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotAcquireCode::InstanceNotLive && state.mRefreshCount == 0);
+    const auto  missing_operation_result = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* missing_operation        = operationError(missing_operation_result);
+    ensure("an empty round trip requires a live instance before refreshing geometry",
+           missing_operation && missing_operation->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               state.mRefreshCount == 0);
 
     ensure("frame-slot adapter fixture acquired an instance",
            !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
@@ -1363,13 +1382,23 @@ void window_macosx_vulkan_object::test<16>()
     ensure("a failed Cocoa geometry refresh maps to a stale frame-slot window",
            failed_refresh && failed_refresh->mCode == VulkanSwapchainFrameSlotAcquireCode::StaleWindowGeneration &&
                state.mRefreshCount == refreshes_after_instance + 1);
+    const auto  failed_operation_result = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* failed_operation        = operationError(failed_operation_result);
+    ensure("a failed Cocoa geometry refresh maps an empty round trip to a stale window",
+           failed_operation && failed_operation->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance + 2);
 
     state.mRefreshSucceeds     = true;
     state.mRefreshMutation     = RefreshMutation::ZeroWidth;
     const auto invalid_refresh = owner->acquireSwapchainFrameSlotGeneration();
     ensure("an invalid refreshed backing width maps to a stale frame-slot window",
            invalid_refresh && invalid_refresh->mCode == VulkanSwapchainFrameSlotAcquireCode::StaleWindowGeneration &&
-               state.mRefreshCount == refreshes_after_instance + 2);
+               state.mRefreshCount == refreshes_after_instance + 3);
+    const auto  invalid_operation_result = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* invalid_operation        = operationError(invalid_operation_result);
+    ensure("an invalid refreshed backing width is a typed empty-round-trip extent failure",
+           invalid_operation && invalid_operation->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mRefreshCount == refreshes_after_instance + 4);
 
     state.mRefreshMutation     = RefreshMutation::None;
     state.mRefreshScale        = 2.0;
@@ -1378,7 +1407,12 @@ void window_macosx_vulkan_object::test<16>()
     const auto missing_surface = owner->acquireSwapchainFrameSlotGeneration();
     ensure("current Cocoa backing pixels are forwarded to the frame-slot parent",
            missing_surface && missing_surface->mCode == VulkanSwapchainFrameSlotAcquireCode::SurfaceNotLive &&
-               state.mRefreshCount == refreshes_after_instance + 3 && owner->drawableWidth() == 3840 && owner->drawableHeight() == 2160);
+               state.mRefreshCount == refreshes_after_instance + 5 && owner->drawableWidth() == 3840 && owner->drawableHeight() == 2160);
+    const auto  missing_surface_operation_result = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* missing_surface_operation        = operationError(missing_surface_operation_result);
+    ensure("current Cocoa backing pixels are forwarded by the empty-round-trip adapter",
+           missing_surface_operation && missing_surface_operation->mCode == VulkanSwapchainFrameSlotParentOperationCode::SurfaceNotLive &&
+               state.mRefreshCount == refreshes_after_instance + 6 && owner->drawableWidth() == 3840 && owner->drawableHeight() == 2160);
 
     ensure("frame-slot adapter fixture acquired a surface", !owner->acquireSurfaceGeneration());
     const std::size_t refreshes_after_surface = state.mRefreshCount;
@@ -1386,6 +1420,18 @@ void window_macosx_vulkan_object::test<16>()
     ensure("the frame-slot adapter refreshes pixels through the exact surface parent",
            missing_selection && missing_selection->mCode == VulkanSwapchainFrameSlotAcquireCode::PresentationDeviceNotLive &&
                state.mRefreshCount == refreshes_after_surface + 1 && owner->drawableWidth() == 3840 && owner->drawableHeight() == 2160);
+    const auto  missing_selection_operation_result = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* missing_selection_operation        = operationError(missing_selection_operation_result);
+    ensure("the empty-round-trip adapter forwards the exact live surface parent",
+           missing_selection_operation &&
+               missing_selection_operation->mCode == VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive &&
+               state.mRefreshCount == refreshes_after_surface + 2);
+    const auto  missing_selection_retry_result = owner->retryEmptySwapchainFrameSlotCompletion();
+    const auto* missing_selection_retry        = operationError(missing_selection_retry_result);
+    ensure("completion retry does not refresh geometry when no configuration has retained an extent",
+           missing_selection_retry &&
+               missing_selection_retry->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mRefreshCount == refreshes_after_surface + 2);
     ensure("an unowned frame-slot generation reports no explicit reset", !owner->resetSwapchainFrameSlotGeneration());
 
     state.mOwnerDuringDestroy = owner;

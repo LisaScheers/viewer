@@ -93,6 +93,13 @@ namespace
         return { code, resolution_error };
     }
 
+    VulkanSwapchainFrameSlotParentOperationError swapchainFrameSlotOperationFailure(
+        VulkanSwapchainFrameSlotParentOperationCode           code,
+        std::optional<VulkanSwapchainFrameSlotOperationError> operation_error = std::nullopt) noexcept
+    {
+        return { code, operation_error };
+    }
+
     bool current(const VulkanWindowGenerationCheck& check, std::uint64_t generation) noexcept
     {
         return generation != 0 && check.mIsCurrent && check.mIsCurrent(check.mUserdata, generation);
@@ -191,6 +198,21 @@ namespace
         if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
         {
             return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::StaleWindowGeneration);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<VulkanSwapchainFrameSlotParentOperationError> swapchainFrameSlotOperationFreshness(
+        const VulkanSwapchainFrameSlotOperationRequest& request,
+        const VulkanInstanceGeneration&                 generation) noexcept
+    {
+        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::StaleInstanceOwner);
+        }
+        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration);
         }
         return std::nullopt;
     }
@@ -471,6 +493,19 @@ struct VulkanInstanceGenerationFactory
         VulkanInstanceGeneration&                  instance_generation,
         const VulkanSwapchainFrameSlotRequest&     request,
         VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    static VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot(
+        VulkanInstanceGeneration&                       instance_generation,
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+
+    static VulkanSwapchainFrameSlotParentOperationResult retryEmptySwapchainFrameSlotCompletion(
+        VulkanInstanceGeneration&                       instance_generation,
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+
+    static VulkanSwapchainFrameSlotParentOperationResult operateEmptySwapchainFrameSlot(
+        VulkanInstanceGeneration&                       instance_generation,
+        const VulkanSwapchainFrameSlotOperationRequest& request,
+        bool                                            retry_completion) noexcept;
 };
 
 VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
@@ -785,6 +820,11 @@ VkFence VulkanInstanceGeneration::swapchainFrameSubmissionFence() const noexcept
     return mSwapchainFrameSlotGeneration ? mSwapchainFrameSlotGeneration->submissionFence() : VK_NULL_HANDLE;
 }
 
+std::optional<VulkanSwapchainFrameSlotDisposition> VulkanInstanceGeneration::swapchainFrameSlotDisposition() const noexcept
+{
+    return mSwapchainFrameSlotGeneration ? std::optional{ mSwapchainFrameSlotGeneration->disposition() } : std::nullopt;
+}
+
 VulkanSurfaceAcquireResult VulkanInstanceGeneration::acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept
 {
     return VulkanInstanceDetail::acquireSurface(*this, request, nullptr);
@@ -825,50 +865,94 @@ VulkanSwapchainFrameSlotAcquireResult VulkanInstanceGeneration::acquireSwapchain
     return VulkanInstanceDetail::acquireSwapchainFrameSlot(*this, request, nullptr);
 }
 
-void VulkanInstanceGeneration::resetSwapchainFrameSlotGeneration() noexcept
+VulkanSwapchainFrameSlotParentOperationResult VulkanInstanceGeneration::roundTripEmptySwapchainFrameSlot(
+    const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
 {
+    return VulkanInstanceGenerationFactory::roundTripEmptySwapchainFrameSlot(*this, request);
+}
+
+VulkanSwapchainFrameSlotParentOperationResult VulkanInstanceGeneration::retryEmptySwapchainFrameSlotCompletion(
+    const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
+{
+    return VulkanInstanceGenerationFactory::retryEmptySwapchainFrameSlotCompletion(*this, request);
+}
+
+bool VulkanInstanceGeneration::resetSwapchainFrameSlotGeneration() noexcept
+{
+    if (mSwapchainFrameSlotGeneration && mSwapchainFrameSlotGeneration->disposition() == VulkanSwapchainFrameSlotDisposition::Pending)
+    {
+        return false;
+    }
     mSwapchainFrameSlotGeneration.reset();
+    return true;
 }
 
-void VulkanInstanceGeneration::resetSwapchainImagesGeneration() noexcept
+bool VulkanInstanceGeneration::resetSwapchainImagesGeneration() noexcept
 {
-    resetSwapchainFrameSlotGeneration();
+    if (!resetSwapchainFrameSlotGeneration())
+    {
+        return false;
+    }
     mSwapchainImagesGeneration.reset();
+    return true;
 }
 
-void VulkanInstanceGeneration::resetSwapchainGeneration() noexcept
+bool VulkanInstanceGeneration::resetSwapchainGeneration() noexcept
 {
-    resetSwapchainImagesGeneration();
+    if (!resetSwapchainImagesGeneration())
+    {
+        return false;
+    }
     mSwapchainGeneration.reset();
+    return true;
 }
 
-void VulkanInstanceGeneration::resetSwapchainConfigurationGeneration() noexcept
+bool VulkanInstanceGeneration::resetSwapchainConfigurationGeneration() noexcept
 {
-    resetSwapchainGeneration();
+    if (!resetSwapchainGeneration())
+    {
+        return false;
+    }
     mSwapchainConfigurationGeneration.reset();
+    return true;
 }
 
-void VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
+bool VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
 {
-    resetSwapchainConfigurationGeneration();
+    if (!resetSwapchainConfigurationGeneration())
+    {
+        return false;
+    }
     mLogicalDeviceGeneration.reset();
+    return true;
 }
 
-void VulkanInstanceGeneration::resetPresentationDeviceGeneration() noexcept
+bool VulkanInstanceGeneration::resetPresentationDeviceGeneration() noexcept
 {
-    resetLogicalDeviceGeneration();
+    if (!resetLogicalDeviceGeneration())
+    {
+        return false;
+    }
     mPresentationDeviceGeneration.reset();
+    return true;
 }
 
-void VulkanInstanceGeneration::resetSurfaceGeneration() noexcept
+bool VulkanInstanceGeneration::resetSurfaceGeneration() noexcept
 {
-    resetPresentationDeviceGeneration();
+    if (!resetPresentationDeviceGeneration())
+    {
+        return false;
+    }
     mSurfaceGeneration.reset();
+    return true;
 }
 
-void VulkanInstanceGeneration::reset() noexcept
+bool VulkanInstanceGeneration::reset() noexcept
 {
-    resetSurfaceGeneration();
+    if (!resetSurfaceGeneration())
+    {
+        return false;
+    }
 
     if (mDebugMessenger != VK_NULL_HANDLE && mDestroyDebugMessenger)
     {
@@ -890,6 +974,7 @@ void VulkanInstanceGeneration::reset() noexcept
     mNativeWindowGeneration = 0;
     mPortabilityEnumeration = false;
     mValidationState.reset();
+    return true;
 }
 
 VulkanSurfaceAcquireResult VulkanInstanceGenerationFactory::acquireSurface(
@@ -1721,6 +1806,275 @@ VulkanSwapchainFrameSlotAcquireResult VulkanInstanceGenerationFactory::acquireSw
     {
         return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::AllocationFailure);
     }
+}
+
+VulkanSwapchainFrameSlotParentOperationResult VulkanInstanceGenerationFactory::operateEmptySwapchainFrameSlot(
+    VulkanInstanceGeneration&                       instance_generation,
+    const VulkanSwapchainFrameSlotOperationRequest& request,
+    bool                                            retry_completion) noexcept
+{
+    const auto validate_live_chain = [&]() -> std::optional<VulkanSwapchainFrameSlotParentOperationError>
+    {
+        if (!request.mInstanceOwnerCheck.mIsCurrent)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::InvalidInstanceOwnerCheck);
+        }
+        if (!request.mWindowGenerationCheck.mIsCurrent)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::InvalidWindowGenerationCheck);
+        }
+        if (request.mNativeWindowGeneration == 0)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::InvalidNativeWindowGeneration);
+        }
+        if (request.mDrawableExtent.width == 0 || request.mDrawableExtent.height == 0)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent);
+        }
+        if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance ||
+            !instance_generation.mGlobalDispatch || !instance_generation.mGlobalDispatch->getInstanceProcAddr() ||
+            instance_generation.mNativeWindowGeneration == 0)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive);
+        }
+        if (!instance_generation.mSurfaceGeneration || instance_generation.surface() == VK_NULL_HANDLE ||
+            instance_generation.surfaceNativeWindowGeneration() == 0)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SurfaceNotLive);
+        }
+        if (!instance_generation.mPresentationDeviceGeneration || instance_generation.physicalDevice() == VK_NULL_HANDLE)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive);
+        }
+        if (!instance_generation.mLogicalDeviceGeneration || instance_generation.logicalDevice() == VK_NULL_HANDLE ||
+            instance_generation.presentationQueue() == VK_NULL_HANDLE)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::LogicalDeviceNotLive);
+        }
+        if (!instance_generation.mSwapchainConfigurationGeneration)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainConfigurationNotLive);
+        }
+        if (!instance_generation.mSwapchainGeneration || instance_generation.swapchain() == VK_NULL_HANDLE)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainNotLive);
+        }
+        if (!instance_generation.mSwapchainImagesGeneration || instance_generation.resolvedSwapchainImageCount() == 0 ||
+            instance_generation.mSwapchainImagesGeneration->imageFormat() == VK_FORMAT_UNDEFINED)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainImagesNotLive);
+        }
+        if (!instance_generation.mSwapchainFrameSlotGeneration ||
+            instance_generation.mSwapchainFrameSlotGeneration->commandPool() == VK_NULL_HANDLE ||
+            instance_generation.mSwapchainFrameSlotGeneration->commandBuffer() == VK_NULL_HANDLE ||
+            instance_generation.mSwapchainFrameSlotGeneration->imageAvailableSemaphore() == VK_NULL_HANDLE ||
+            instance_generation.mSwapchainFrameSlotGeneration->submissionFence() == VK_NULL_HANDLE)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainFrameSlotNotLive);
+        }
+        if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+            request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::NativeWindowGenerationMismatch);
+        }
+        const VkExtent2D configured_extent = instance_generation.swapchainDrawableExtent();
+        if (request.mDrawableExtent.width != configured_extent.width || request.mDrawableExtent.height != configured_extent.height)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch);
+        }
+        return std::nullopt;
+    };
+
+    if (auto error = validate_live_chain())
+    {
+        return *error;
+    }
+    if (auto error = swapchainFrameSlotOperationFreshness(request, instance_generation))
+    {
+        return *error;
+    }
+    if (auto error = validate_live_chain())
+    {
+        return *error;
+    }
+
+    const auto* global_dispatch      = &*instance_generation.mGlobalDispatch;
+    const auto* surface_generation   = instance_generation.mSurfaceGeneration.get();
+    const auto* selection            = instance_generation.mPresentationDeviceGeneration.get();
+    const auto* logical_device       = instance_generation.mLogicalDeviceGeneration.get();
+    const auto* configuration        = instance_generation.mSwapchainConfigurationGeneration.get();
+    const auto* swapchain_generation = instance_generation.mSwapchainGeneration.get();
+    const auto* images_generation    = instance_generation.mSwapchainImagesGeneration.get();
+    auto*       frame_slot           = instance_generation.mSwapchainFrameSlotGeneration.get();
+
+    const PFN_vkGetInstanceProcAddr get_instance_proc_addr           = global_dispatch->getInstanceProcAddr();
+    const VkInstance                instance                         = instance_generation.mInstance;
+    const std::uint64_t             native_window_generation         = instance_generation.mNativeWindowGeneration;
+    const std::uint64_t             surface_native_window_generation = surface_generation->nativeWindowGeneration();
+    const VkSurfaceKHR              surface                          = surface_generation->surface();
+    const VkPhysicalDevice          physical_device                  = selection->physicalDevice();
+    const std::uint32_t             physical_device_index            = selection->physicalDeviceIndex();
+    const VkDevice                  device                           = logical_device->device();
+    const VkQueue                   queue                            = logical_device->queue();
+    const std::uint32_t             queue_family                     = logical_device->queueFamilyIndex();
+    const std::uint32_t             queue_index                      = logical_device->queueIndex();
+    const VkExtent2D                drawable_extent                  = configuration->drawableExtent();
+    const VkSwapchainKHR            swapchain                        = swapchain_generation->swapchain();
+    const std::uint32_t             image_count                      = images_generation->imageCount();
+    const VkFormat                  image_format                     = images_generation->imageFormat();
+    const VkCommandPool             command_pool                     = frame_slot->commandPool();
+    const VkCommandBuffer           command_buffer                   = frame_slot->commandBuffer();
+    const VkSemaphore               image_available_semaphore        = frame_slot->imageAvailableSemaphore();
+    const VkFence                   submission_fence                 = frame_slot->submissionFence();
+
+    if (selection->getInstanceProcAddr() != get_instance_proc_addr || selection->instance() != instance ||
+        selection->surface() != surface || selection->physicalDevice() != physical_device ||
+        selection->physicalDeviceIndex() != physical_device_index || !selection->selectedFor(instance, surface))
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive);
+    }
+    if (logical_device->getInstanceProcAddr() != get_instance_proc_addr || logical_device->instance() != instance ||
+        logical_device->surface() != surface || logical_device->physicalDevice() != physical_device ||
+        logical_device->physicalDeviceIndex() != physical_device_index || logical_device->device() != device ||
+        logical_device->queue() != queue || logical_device->queueFamilyIndex() != queue_family ||
+        logical_device->queueIndex() != queue_index || !logical_device->createdFor(*selection))
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::LogicalDeviceNotLive);
+    }
+    if (configuration->getInstanceProcAddr() != get_instance_proc_addr || configuration->instance() != instance ||
+        configuration->surface() != surface || configuration->physicalDevice() != physical_device ||
+        configuration->physicalDeviceIndex() != physical_device_index || configuration->device() != device ||
+        configuration->queueFamilyIndex() != queue_family || configuration->drawableExtent().width != drawable_extent.width ||
+        configuration->drawableExtent().height != drawable_extent.height ||
+        !configuration->createdFor(*selection, *logical_device, drawable_extent))
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainConfigurationNotLive);
+    }
+    if (swapchain_generation->getInstanceProcAddr() != get_instance_proc_addr || swapchain_generation->instance() != instance ||
+        swapchain_generation->surface() != surface || swapchain_generation->physicalDevice() != physical_device ||
+        swapchain_generation->physicalDeviceIndex() != physical_device_index || swapchain_generation->device() != device ||
+        swapchain_generation->queueFamilyIndex() != queue_family || swapchain_generation->drawableExtent().width != drawable_extent.width ||
+        swapchain_generation->drawableExtent().height != drawable_extent.height || swapchain_generation->swapchain() != swapchain ||
+        !swapchain_generation->createdFor(*logical_device, *configuration))
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainNotLive);
+    }
+    if (images_generation->imageCount() != image_count || images_generation->imageFormat() != image_format ||
+        !images_generation->createdFor(*logical_device, *configuration, *swapchain_generation))
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainImagesNotLive);
+    }
+    if (frame_slot->commandPool() != command_pool || frame_slot->commandBuffer() != command_buffer ||
+        frame_slot->imageAvailableSemaphore() != image_available_semaphore || frame_slot->submissionFence() != submission_fence ||
+        !frame_slot->createdFor(*logical_device, *configuration, *swapchain_generation, *images_generation))
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainFrameSlotNotLive);
+    }
+
+    if (!retry_completion)
+    {
+        const VulkanSwapchainFrameSlotOperationResult resolution =
+            frame_slot->resolveEmptySubmissionDispatch(*logical_device, *configuration, *swapchain_generation, *images_generation);
+        if (const auto* error = std::get_if<VulkanSwapchainFrameSlotOperationError>(&resolution))
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::OperationFailure, *error);
+        }
+
+        if (auto error = swapchainFrameSlotOperationFreshness(request, instance_generation))
+        {
+            return *error;
+        }
+        if (auto error = validate_live_chain())
+        {
+            return *error;
+        }
+
+        if (&*instance_generation.mGlobalDispatch != global_dispatch ||
+            instance_generation.mGlobalDispatch->getInstanceProcAddr() != get_instance_proc_addr ||
+            instance_generation.mInstance != instance || !instance_generation.mDestroyInstance ||
+            instance_generation.mNativeWindowGeneration != native_window_generation)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive);
+        }
+        if (instance_generation.mSurfaceGeneration.get() != surface_generation ||
+            instance_generation.surfaceNativeWindowGeneration() != surface_native_window_generation ||
+            instance_generation.surface() != surface)
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SurfaceNotLive);
+        }
+        if (instance_generation.mPresentationDeviceGeneration.get() != selection ||
+            selection->getInstanceProcAddr() != get_instance_proc_addr || selection->instance() != instance ||
+            selection->surface() != surface || selection->physicalDevice() != physical_device ||
+            selection->physicalDeviceIndex() != physical_device_index || !selection->selectedFor(instance, surface))
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive);
+        }
+        if (instance_generation.mLogicalDeviceGeneration.get() != logical_device ||
+            logical_device->getInstanceProcAddr() != get_instance_proc_addr || logical_device->instance() != instance ||
+            logical_device->surface() != surface || logical_device->physicalDevice() != physical_device ||
+            logical_device->physicalDeviceIndex() != physical_device_index || logical_device->device() != device ||
+            logical_device->queue() != queue || logical_device->queueFamilyIndex() != queue_family ||
+            logical_device->queueIndex() != queue_index || !logical_device->createdFor(*selection))
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::LogicalDeviceNotLive);
+        }
+        if (instance_generation.mSwapchainConfigurationGeneration.get() != configuration ||
+            configuration->getInstanceProcAddr() != get_instance_proc_addr || configuration->instance() != instance ||
+            configuration->surface() != surface || configuration->physicalDevice() != physical_device ||
+            configuration->physicalDeviceIndex() != physical_device_index || configuration->device() != device ||
+            configuration->queueFamilyIndex() != queue_family || configuration->drawableExtent().width != drawable_extent.width ||
+            configuration->drawableExtent().height != drawable_extent.height ||
+            !configuration->createdFor(*selection, *logical_device, drawable_extent))
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainConfigurationNotLive);
+        }
+        if (instance_generation.mSwapchainGeneration.get() != swapchain_generation ||
+            swapchain_generation->getInstanceProcAddr() != get_instance_proc_addr || swapchain_generation->instance() != instance ||
+            swapchain_generation->surface() != surface || swapchain_generation->physicalDevice() != physical_device ||
+            swapchain_generation->physicalDeviceIndex() != physical_device_index || swapchain_generation->device() != device ||
+            swapchain_generation->queueFamilyIndex() != queue_family ||
+            swapchain_generation->drawableExtent().width != drawable_extent.width ||
+            swapchain_generation->drawableExtent().height != drawable_extent.height || swapchain_generation->swapchain() != swapchain ||
+            !swapchain_generation->createdFor(*logical_device, *configuration))
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainNotLive);
+        }
+        if (instance_generation.mSwapchainImagesGeneration.get() != images_generation || images_generation->imageCount() != image_count ||
+            images_generation->imageFormat() != image_format ||
+            !images_generation->createdFor(*logical_device, *configuration, *swapchain_generation))
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainImagesNotLive);
+        }
+        if (instance_generation.mSwapchainFrameSlotGeneration.get() != frame_slot || frame_slot->commandPool() != command_pool ||
+            frame_slot->commandBuffer() != command_buffer || frame_slot->imageAvailableSemaphore() != image_available_semaphore ||
+            frame_slot->submissionFence() != submission_fence ||
+            !frame_slot->createdFor(*logical_device, *configuration, *swapchain_generation, *images_generation))
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainFrameSlotNotLive);
+        }
+    }
+
+    const VulkanSwapchainFrameSlotOperationResult operation =
+        retry_completion ? frame_slot->retryEmptySubmissionCompletion() : frame_slot->executeEmptySubmission();
+    if (const auto* error = std::get_if<VulkanSwapchainFrameSlotOperationError>(&operation))
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::OperationFailure, *error);
+    }
+    return std::get<VulkanSwapchainFrameSlotDisposition>(operation);
+}
+
+VulkanSwapchainFrameSlotParentOperationResult VulkanInstanceGenerationFactory::roundTripEmptySwapchainFrameSlot(
+    VulkanInstanceGeneration&                       instance_generation,
+    const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
+{
+    return operateEmptySwapchainFrameSlot(instance_generation, request, false);
+}
+
+VulkanSwapchainFrameSlotParentOperationResult VulkanInstanceGenerationFactory::retryEmptySwapchainFrameSlotCompletion(
+    VulkanInstanceGeneration&                       instance_generation,
+    const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
+{
+    return operateEmptySwapchainFrameSlot(instance_generation, request, true);
 }
 
 namespace VulkanInstanceDetail

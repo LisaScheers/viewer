@@ -19,6 +19,7 @@
 
 #include "SDL3/SDL_vulkan.h"
 
+#include <exception>
 #include <new>
 #include <utility>
 
@@ -204,7 +205,10 @@ LLWindowSDLVulkan::LLWindowSDLVulkan(const LLWindowSDLVulkanOperations& operatio
 
 LLWindowSDLVulkan::~LLWindowSDLVulkan() noexcept
 {
-    reset();
+    if (!reset())
+    {
+        std::terminate();
+    }
 }
 
 LLWindowSDLVulkan::LLWindowSDLVulkan(LLWindowSDLVulkan&& other) noexcept :
@@ -221,7 +225,10 @@ LLWindowSDLVulkan& LLWindowSDLVulkan::operator=(LLWindowSDLVulkan&& other) noexc
 {
     if (this != &other)
     {
-        reset();
+        if (!reset())
+        {
+            std::terminate();
+        }
         mOperations              = other.mOperations;
         mWindow                  = std::exchange(other.mWindow, nullptr);
         mRequirements            = std::move(other.mRequirements);
@@ -472,14 +479,62 @@ LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult LLWindowSDLVulkan::acquire
     return mInstanceGeneration->acquireSwapchainFrameSlotGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowSDLVulkan::roundTripEmptySwapchainFrameSlot() noexcept
+{
+    return operateEmptySwapchainFrameSlot(false);
+}
+
+LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowSDLVulkan::retryEmptySwapchainFrameSlotCompletion() noexcept
+{
+    return operateEmptySwapchainFrameSlot(true);
+}
+
+LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowSDLVulkan::operateEmptySwapchainFrameSlot(
+    bool retry_completion) noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mWindow || (!retry_completion && !mOperations.mGetWindowSizeInPixels))
+    {
+        return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration,
+                                                             std::nullopt };
+    }
+
+    VkExtent2D drawable_extent = mInstanceGeneration->swapchainDrawableExtent();
+    if (!retry_completion)
+    {
+        int drawable_width  = 0;
+        int drawable_height = 0;
+        if (!mOperations.mGetWindowSizeInPixels(mOperations.mUserdata, mWindow, &drawable_width, &drawable_height) || drawable_width <= 0 ||
+            drawable_height <= 0)
+        {
+            return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent,
+                                                                 std::nullopt };
+        }
+        drawable_extent = { static_cast<std::uint32_t>(drawable_width), static_cast<std::uint32_t>(drawable_height) };
+    }
+
+    SurfaceAcquireContext                    context{ this, mInstanceGeneration.get(), &mOperations, mWindow };
+    VulkanSwapchainFrameSlotOperationRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = drawable_extent;
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return retry_completion ? mInstanceGeneration->retryEmptySwapchainFrameSlotCompletion(request)
+                            : mInstanceGeneration->roundTripEmptySwapchainFrameSlot(request);
+}
+
 bool LLWindowSDLVulkan::resetSwapchainFrameSlotGeneration() noexcept
 {
     if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainFrameSlotGeneration())
     {
         return false;
     }
-    mInstanceGeneration->resetSwapchainFrameSlotGeneration();
-    return true;
+    return mInstanceGeneration->resetSwapchainFrameSlotGeneration();
 }
 
 bool LLWindowSDLVulkan::resetSwapchainImagesGeneration() noexcept
@@ -488,8 +543,7 @@ bool LLWindowSDLVulkan::resetSwapchainImagesGeneration() noexcept
     {
         return false;
     }
-    mInstanceGeneration->resetSwapchainImagesGeneration();
-    return true;
+    return mInstanceGeneration->resetSwapchainImagesGeneration();
 }
 
 bool LLWindowSDLVulkan::resetSwapchainGeneration() noexcept
@@ -498,8 +552,7 @@ bool LLWindowSDLVulkan::resetSwapchainGeneration() noexcept
     {
         return false;
     }
-    mInstanceGeneration->resetSwapchainGeneration();
-    return true;
+    return mInstanceGeneration->resetSwapchainGeneration();
 }
 
 bool LLWindowSDLVulkan::resetSurfaceGeneration() noexcept
@@ -508,8 +561,7 @@ bool LLWindowSDLVulkan::resetSurfaceGeneration() noexcept
     {
         return false;
     }
-    mInstanceGeneration->resetSurfaceGeneration();
-    return true;
+    return mInstanceGeneration->resetSurfaceGeneration();
 }
 
 namespace LLWindowSDLVulkanDetail
@@ -524,8 +576,12 @@ LLRenderVulkan::VulkanSurfaceAcquireResult acquireSurfaceGeneration(
 
 } // namespace LLWindowSDLVulkanDetail
 
-void LLWindowSDLVulkan::reset() noexcept
+bool LLWindowSDLVulkan::reset() noexcept
 {
+    if (mInstanceGeneration && !mInstanceGeneration->reset())
+    {
+        return false;
+    }
     mInstanceGeneration.reset();
     mRequirements.reset();
     if (mWindow)
@@ -538,6 +594,7 @@ void LLWindowSDLVulkan::reset() noexcept
         mOperations.mUnloadLibrary(mOperations.mUserdata);
         mExplicitLoaderReference = false;
     }
+    return true;
 }
 
 const LLWindowSDLVulkanOperations& defaultLLWindowSDLVulkanOperations() noexcept

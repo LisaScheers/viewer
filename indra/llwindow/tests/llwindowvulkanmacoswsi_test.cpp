@@ -84,6 +84,12 @@ VkCompositeAlphaFlagBitsKHR expectedCompositeAlpha(VkCompositeAlphaFlagsKHR supp
     return static_cast<VkCompositeAlphaFlagBitsKHR>(0);
 }
 
+bool operationIsReusable(const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult& result) noexcept
+{
+    const auto* disposition = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(&result);
+    return disposition && *disposition == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable;
+}
+
 } // namespace
 
 namespace tut
@@ -297,6 +303,23 @@ void window_vulkan_macos_wsi_object::test<1>()
                   std::uint32_t{ 0 });
     ensure("frame-slot acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("frame-slot acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const VkSemaphore image_available  = instance_generation->swapchainFrameImageAvailableSemaphore();
+    const auto        first_round_trip = owner->roundTripEmptySwapchainFrameSlot();
+    ensure("the native Metal owner completes the first explicit empty frame-slot round trip", operationIsReusable(first_round_trip));
+    ensure("the first empty round trip leaves the exact non-null image-available semaphore untouched",
+           image_available != VK_NULL_HANDLE && instance_generation->swapchainFrameImageAvailableSemaphore() == image_available);
+    ensure("the first empty round trip creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the first empty round trip leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const auto second_round_trip = owner->roundTripEmptySwapchainFrameSlot();
+    ensure("the native Metal owner completes the second explicit empty frame-slot round trip", operationIsReusable(second_round_trip));
+    ensure("the second empty round trip leaves the exact image-available semaphore untouched",
+           instance_generation->swapchainFrameImageAvailableSemaphore() == image_available);
+    ensure_equals("two empty round trips emit no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("the second empty round trip creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the second empty round trip leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     ensure("the native smoke explicitly resets the frame slot before swapchain images", owner->resetSwapchainFrameSlotGeneration());
     ensure("explicit frame-slot reset removes all four owned handles",
