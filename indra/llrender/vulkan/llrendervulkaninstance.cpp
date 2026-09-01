@@ -16,6 +16,7 @@
 #include "llrendervulkaninstance.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -43,7 +44,8 @@ namespace
         RetryPresentation,
         RetryPresentationCompletion,
         CancelAcquireToPresent,
-        RetryCancellationCompletion
+        RetryCancellationCompletion,
+        ExecuteAcquireClearToPresent
     };
 
     using SwapchainFrameSlotParentResult = std::variant<VulkanSwapchainFrameSlotParentOperationError, VulkanSwapchainFrameSlotDisposition,
@@ -52,7 +54,14 @@ namespace
     bool startsNewSwapchainFrameSlotWork(SwapchainFrameSlotParentOperation operation) noexcept
     {
         return operation == SwapchainFrameSlotParentOperation::ExecuteEmptySubmission ||
-               operation == SwapchainFrameSlotParentOperation::ExecuteAcquireToPresent;
+               operation == SwapchainFrameSlotParentOperation::ExecuteAcquireToPresent ||
+               operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent;
+    }
+
+    bool validClearColor(const VulkanSwapchainFrameClearColor& clear_color) noexcept
+    {
+        return std::all_of(clear_color.mRgba.begin(), clear_color.mRgba.end(),
+                           [](float component) { return std::isfinite(component) && component >= 0.0f && component <= 1.0f; });
     }
 
     bool frameSlotDispositionAllowsReset(VulkanSwapchainFrameSlotDisposition disposition) noexcept
@@ -691,6 +700,11 @@ struct VulkanInstanceGenerationFactory
         VulkanInstanceGeneration&                       instance_generation,
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
 
+    static VulkanSwapchainFrameSlotParentPresentationResult acquireClearToPresentSwapchainFrameSlot(
+        VulkanInstanceGeneration&                       instance_generation,
+        const VulkanSwapchainFrameSlotOperationRequest& request,
+        const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
+
     static VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation(
         VulkanInstanceGeneration&                       instance_generation,
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
@@ -709,7 +723,8 @@ struct VulkanInstanceGenerationFactory
 
     static SwapchainFrameSlotParentResult operateSwapchainFrameSlot(VulkanInstanceGeneration&                       instance_generation,
                                                                     const VulkanSwapchainFrameSlotOperationRequest& request,
-                                                                    SwapchainFrameSlotParentOperation               operation) noexcept;
+                                                                    SwapchainFrameSlotParentOperation               operation,
+                                                                    std::optional<VulkanSwapchainFrameClearColor>   clear_color = std::nullopt) noexcept;
 };
 
 class VulkanInstanceGeneration::NativeAcquisitionGuard
@@ -1152,6 +1167,13 @@ VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGeneration::acqui
     const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
 {
     return VulkanInstanceGenerationFactory::acquireToPresentSwapchainFrameSlot(*this, request);
+}
+
+VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGeneration::acquireClearToPresentSwapchainFrameSlot(
+    const VulkanSwapchainFrameSlotOperationRequest& request,
+    const VulkanSwapchainFrameClearColor&           clear_color) noexcept
+{
+    return VulkanInstanceGenerationFactory::acquireClearToPresentSwapchainFrameSlot(*this, request, clear_color);
 }
 
 VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGeneration::retrySwapchainFrameSlotPresentation(
@@ -2728,8 +2750,15 @@ VulkanSwapchainChainRebuildResult VulkanInstanceGenerationFactory::rebuildSwapch
 SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchainFrameSlot(
     VulkanInstanceGeneration&                       instance_generation,
     const VulkanSwapchainFrameSlotOperationRequest& request,
-    SwapchainFrameSlotParentOperation               operation) noexcept
+    SwapchainFrameSlotParentOperation               operation,
+    std::optional<VulkanSwapchainFrameClearColor>   clear_color) noexcept
 {
+    if (operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent &&
+        (!clear_color || !validClearColor(*clear_color)))
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor);
+    }
+
     const auto validate_live_chain = [&]() -> std::optional<VulkanSwapchainFrameSlotParentOperationError>
     {
         if (!request.mInstanceOwnerCheck.mIsCurrent)
@@ -2897,10 +2926,21 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
 
     if (startsNewSwapchainFrameSlotWork(operation))
     {
-        const VulkanSwapchainFrameSlotOperationResult resolution =
-            operation == SwapchainFrameSlotParentOperation::ExecuteAcquireToPresent
-                ? frame_slot->resolvePresentationDispatch(*logical_device, *configuration, *swapchain_generation, *images_generation)
-                : frame_slot->resolveEmptySubmissionDispatch(*logical_device, *configuration, *swapchain_generation, *images_generation);
+        VulkanSwapchainFrameSlotOperationResult resolution;
+        if (operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent)
+        {
+            resolution =
+                frame_slot->resolveClearPresentationDispatch(*logical_device, *configuration, *swapchain_generation, *images_generation);
+        }
+        else if (operation == SwapchainFrameSlotParentOperation::ExecuteAcquireToPresent)
+        {
+            resolution = frame_slot->resolvePresentationDispatch(*logical_device, *configuration, *swapchain_generation, *images_generation);
+        }
+        else
+        {
+            resolution =
+                frame_slot->resolveEmptySubmissionDispatch(*logical_device, *configuration, *swapchain_generation, *images_generation);
+        }
         if (const auto* error = std::get_if<VulkanSwapchainFrameSlotOperationError>(&resolution))
         {
             return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::OperationFailure, *error);
@@ -2982,6 +3022,7 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     }
 
     if (operation == SwapchainFrameSlotParentOperation::ExecuteAcquireToPresent ||
+        operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent ||
         operation == SwapchainFrameSlotParentOperation::RetryPresentation ||
         operation == SwapchainFrameSlotParentOperation::RetryPresentationCompletion)
     {
@@ -2990,6 +3031,9 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
         {
             case SwapchainFrameSlotParentOperation::ExecuteAcquireToPresent:
                 result = frame_slot->executeAcquireToPresent();
+                break;
+            case SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent:
+                result = frame_slot->executeAcquireClearToPresent(*clear_color);
                 break;
             case SwapchainFrameSlotParentOperation::RetryPresentation:
                 result = frame_slot->retryPresentation();
@@ -3064,6 +3108,20 @@ VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGenerationFactory
 {
     const SwapchainFrameSlotParentResult result =
         operateSwapchainFrameSlot(instance_generation, request, SwapchainFrameSlotParentOperation::ExecuteAcquireToPresent);
+    if (const auto* error = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<VulkanSwapchainFrameSlotPresentationSuccess>(result);
+}
+
+VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGenerationFactory::acquireClearToPresentSwapchainFrameSlot(
+    VulkanInstanceGeneration&                       instance_generation,
+    const VulkanSwapchainFrameSlotOperationRequest& request,
+    const VulkanSwapchainFrameClearColor&           clear_color) noexcept
+{
+    const SwapchainFrameSlotParentResult result = operateSwapchainFrameSlot(
+        instance_generation, request, SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent, clear_color);
     if (const auto* error = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&result))
     {
         return *error;

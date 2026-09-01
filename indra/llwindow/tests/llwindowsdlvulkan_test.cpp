@@ -85,7 +85,9 @@ struct FakeState
         mSurfaceCapabilities.supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         mSurfaceCapabilities.currentTransform    = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         mSurfaceCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        mSurfaceCapabilities.supportedUsageFlags     = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        mSurfaceCapabilities.supportedUsageFlags =
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        mFormatProperties.optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     }
 
     std::array<Event, 32>              mEvents{};
@@ -129,6 +131,7 @@ struct FakeState
 
     VkPhysicalDevice           mPhysicalDevice = reinterpret_cast<VkPhysicalDevice>(static_cast<std::uintptr_t>(0x11110));
     VkPhysicalDeviceProperties mPhysicalProperties{};
+    VkFormatProperties         mFormatProperties{};
     VkDevice                   mDevice    = reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(0x22220));
     VkQueue                    mQueue     = reinterpret_cast<VkQueue>(static_cast<std::uintptr_t>(0x33330));
     VkSwapchainKHR             mSwapchain = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(0x44440));
@@ -158,6 +161,12 @@ struct FakeState
     std::size_t                mCreateFenceCalls             = 0;
     std::size_t                mAcquireNextImageCalls        = 0;
     std::size_t                mPipelineBarrierCalls         = 0;
+    std::size_t                mClearColorImageCalls          = 0;
+    VkCommandBuffer            mClearCommandBuffer            = VK_NULL_HANDLE;
+    VkImage                    mClearedImage                  = VK_NULL_HANDLE;
+    VkImageLayout              mClearImageLayout             = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkClearColorValue          mClearColor{};
+    VkImageSubresourceRange    mClearRange{};
     std::size_t                mQueuePresentCalls            = 0;
     std::size_t                mReleaseSwapchainImagesCalls  = 0;
     VkResult                   mEndCommandBufferResult       = VK_SUCCESS;
@@ -340,6 +349,17 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice devi
     if (gVulkanState && device == gVulkanState->mPhysicalDevice && properties)
     {
         *properties = gVulkanState->mPhysicalProperties;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFormatProperties(VkPhysicalDevice device,
+                                                                  VkFormat         format,
+                                                                  VkFormatProperties* properties) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mPhysicalDevice &&
+        (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_R8G8B8A8_UNORM) && properties)
+    {
+        *properties = gVulkanState->mFormatProperties;
     }
 }
 
@@ -743,6 +763,24 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_b
     }
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer               command_buffer,
+                                                   VkImage                       image,
+                                                   VkImageLayout                 image_layout,
+                                                   const VkClearColorValue*      color,
+                                                   std::uint32_t                 range_count,
+                                                   const VkImageSubresourceRange* ranges) noexcept
+{
+    if (gVulkanState && color && range_count == 1 && ranges)
+    {
+        ++gVulkanState->mClearColorImageCalls;
+        gVulkanState->mClearCommandBuffer = command_buffer;
+        gVulkanState->mClearedImage       = image;
+        gVulkanState->mClearImageLayout   = image_layout;
+        gVulkanState->mClearColor         = *color;
+        gVulkanState->mClearRange         = ranges[0];
+    }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
 {
     const auto* fence_info = present_info ? static_cast<const VkSwapchainPresentFenceInfoKHR*>(present_info->pNext) : nullptr;
@@ -805,6 +843,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     if (std::strcmp(name, "vkAcquireNextImageKHR") == 0)
         return eraseFunctionType(fakeAcquireNextImage);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdPipelineBarrier);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdClearColorImage);
     if (std::strcmp(name, "vkQueuePresentKHR") == 0)
         return eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
@@ -847,6 +886,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeEnumeratePhysicalDevices);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFormatProperties);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceQueueFamilyProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceQueueFamilyProperties);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0)
@@ -1128,6 +1169,11 @@ void window_sdl_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireToPresentSwapchainFrameSlot()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireToPresentSwapchainFrameSlot()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireClearToPresentSwapchainFrameSlot(
+                                     std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireClearToPresentSwapchainFrameSlot(
+        std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentation()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentationCompletion()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().cancelSwapchainFrameSlotPresentation()));
@@ -2133,6 +2179,81 @@ void window_sdl_vulkan_object::test<19>()
     state.mOwnerDuringDestroy         = owner;
     ensure("the rebuilt SDL owner tears down child-first", owner->reset());
     ensure_equals("both earned swapchains are destroyed once", state.mDestroySwapchainCalls, std::size_t{ 2 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<20>()
+{
+    using namespace LLRenderVulkan;
+
+    VulkanSwapchainFrameClearColor clear_color;
+    clear_color.mRgba = { 0.125f, 0.375f, 0.625f, 1.0f };
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 171, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("clear-present adapter fixture acquires a Vulkan window", owner != nullptr);
+
+    const auto  missing_instance_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* missing_instance        = presentationError(missing_instance_result);
+    ensure("clear-present requires a live instance before sampling SDL pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("clear-present adapter fixture acquires the complete frame-slot chain", acquireCompleteFrameSlot(*owner));
+    const auto* instance = owner->instanceGeneration();
+    ensure("clear-present fixture retains the exact SDL owner and native generation",
+           instance && owner->isGenerationCurrent(171) && instance->nativeWindowGeneration() == 171);
+
+    const std::size_t drawable_queries_before_failures = state.mDrawableSizeCalls;
+    state.mDrawableSizeSucceeds                        = false;
+    const auto  failed_query_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* failed_query        = presentationError(failed_query_result);
+    ensure("clear-present reports one failed SDL backing-pixel sample as invalid extent",
+           failed_query && failed_query->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 1 && state.mAcquireNextImageCalls == 0 &&
+               state.mClearColorImageCalls == 0);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = -1;
+    state.mDrawableHeight       = 720;
+    const auto  negative_extent_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* negative_extent        = presentationError(negative_extent_result);
+    ensure("clear-present rejects a negative SDL backing-pixel dimension before native work",
+           negative_extent && negative_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 2 && state.mAcquireNextImageCalls == 0 &&
+               state.mClearColorImageCalls == 0);
+
+    state.mDrawableWidth  = 1280;
+    state.mDrawableHeight = 720;
+    VulkanSwapchainFrameClearColor invalid_color = clear_color;
+    invalid_color.mRgba[0] = -0.01f;
+    const auto  invalid_color_result = owner->acquireClearToPresentSwapchainFrameSlot(invalid_color);
+    const auto* invalid_color_error  = presentationError(invalid_color_result);
+    ensure("clear-present forwards invalid normalized color to the typed core preflight",
+           invalid_color_error && invalid_color_error->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor &&
+               !invalid_color_error->mOperationError &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 3 && state.mAcquireNextImageCalls == 0 &&
+               state.mClearColorImageCalls == 0);
+
+    state.mAcquiredImageIndex = 2;
+    const auto success_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    ensure("clear-present forwards the exact current SDL owner, generation, extent, and color",
+           presentationSucceeded(success_result, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2) &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 4 && state.mAcquireNextImageCalls == 1 &&
+               state.mClearColorImageCalls == 1 && state.mClearCommandBuffer == state.mCommandBuffer &&
+               state.mClearedImage == state.mImages[2] && state.mClearImageLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+               state.mClearColor.float32[0] == clear_color.mRgba[0] && state.mClearColor.float32[1] == clear_color.mRgba[1] &&
+               state.mClearColor.float32[2] == clear_color.mRgba[2] && state.mClearColor.float32[3] == clear_color.mRgba[3] &&
+               state.mClearRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && state.mClearRange.baseMipLevel == 0 &&
+               state.mClearRange.levelCount == 1 && state.mClearRange.baseArrayLayer == 0 && state.mClearRange.layerCount == 1 &&
+               state.mQueueSubmitCalls == 1 && state.mQueuePresentCalls == 1 &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+
+    ensure("the clear-present SDL owner tears down child-first", owner->reset());
 }
 
 } // namespace tut

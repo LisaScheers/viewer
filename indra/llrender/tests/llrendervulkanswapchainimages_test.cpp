@@ -84,7 +84,7 @@ struct FakeState
                                             VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
                                             VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
                                             VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT };
+                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
     std::array<VkSurfaceFormatKHR, 1> mFormats{ VkSurfaceFormatKHR{ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR } };
     std::array<VkPresentModeKHR, 1>   mPresentModes{ VK_PRESENT_MODE_FIFO_KHR };
 
@@ -359,6 +359,18 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfacePresentModes(VkPhysicalDevice  phys
     return enumerate(gFakeState->mPresentModes, count, modes);
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFormatProperties(VkPhysicalDevice    physical_device,
+                                                                 VkFormat            format,
+                                                                 VkFormatProperties* properties) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || format != gFakeState->mFormats[0].format || !properties)
+    {
+        return;
+    }
+    *properties                       = {};
+    properties->optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSwapchain(VkDevice device,
                                                    const VkSwapchainCreateInfoKHR*,
                                                    const VkAllocationCallbacks*,
@@ -520,6 +532,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeGetSurfaceFormats);
     if (std::strcmp(name, "vkGetPhysicalDeviceSurfacePresentModesKHR") == 0)
         return eraseFunctionType(fakeGetSurfacePresentModes);
+    if (std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFormatProperties);
 
     gFakeState->mInstanceLookups.emplace_back(name);
     if (std::strcmp(name, "vkGetDeviceProcAddr") == 0)

@@ -34,6 +34,7 @@ namespace
         PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR mGetSurfaceCapabilities = nullptr;
         PFN_vkGetPhysicalDeviceSurfaceFormatsKHR      mGetSurfaceFormats      = nullptr;
         PFN_vkGetPhysicalDeviceSurfacePresentModesKHR mGetSurfacePresentModes = nullptr;
+        PFN_vkGetPhysicalDeviceFormatProperties       mGetFormatProperties    = nullptr;
     };
 
     VulkanSwapchainConfigurationResolutionError failure(VulkanSwapchainConfigurationResolutionCode         code,
@@ -87,6 +88,14 @@ namespace
         {
             return failure(VulkanSwapchainConfigurationResolutionCode::MissingRequiredCommand,
                            VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfacePresentModes);
+        }
+
+        dispatch.mGetFormatProperties =
+            resolve<PFN_vkGetPhysicalDeviceFormatProperties>(resolver, instance, "vkGetPhysicalDeviceFormatProperties");
+        if (!dispatch.mGetFormatProperties)
+        {
+            return failure(VulkanSwapchainConfigurationResolutionCode::MissingRequiredCommand,
+                           VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties);
         }
         return std::nullopt;
     }
@@ -147,6 +156,11 @@ namespace
         if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0)
         {
             return failure(VulkanSwapchainConfigurationResolutionCode::ColorAttachmentUsageUnsupported,
+                           VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfaceCapabilities);
+        }
+        if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0)
+        {
+            return failure(VulkanSwapchainConfigurationResolutionCode::SurfaceTransferDestinationUsageUnsupported,
                            VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfaceCapabilities);
         }
         return std::nullopt;
@@ -527,6 +541,15 @@ VulkanSwapchainConfigurationResolutionResult resolveSwapchainConfiguration(
         return *error;
     }
 
+    const VkSurfaceFormatKHR selected_format = std::get<VkSurfaceFormatKHR>(format_result);
+    VkFormatProperties       format_properties{};
+    dispatch.mGetFormatProperties(physical_device_generation.physicalDevice(), selected_format.format, &format_properties);
+    if ((format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) == 0)
+    {
+        return failure(VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferDestinationUnsupported,
+                       VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties);
+    }
+
     auto present_mode_result = selectPresentMode(dispatch, physical_device_generation.physicalDevice(),
                                                  physical_device_generation.surface(), allocation_checkpoint);
     if (const auto* error = std::get_if<VulkanSwapchainConfigurationResolutionError>(&present_mode_result))
@@ -535,7 +558,7 @@ VulkanSwapchainConfigurationResolutionResult resolveSwapchainConfiguration(
     }
 
     return VulkanSwapchainConfigurationGenerationFactory::create(
-        physical_device_generation, logical_device_generation, drawable_extent, capabilities, std::get<VkSurfaceFormatKHR>(format_result),
+        physical_device_generation, logical_device_generation, drawable_extent, capabilities, selected_format,
         std::get<VkPresentModeKHR>(present_mode_result), selectImageCount(capabilities), selectExtent(capabilities, drawable_extent),
         capabilities.currentTransform, selectCompositeAlpha(capabilities.supportedCompositeAlpha));
 }

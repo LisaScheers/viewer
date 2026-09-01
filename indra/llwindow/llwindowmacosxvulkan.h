@@ -162,6 +162,8 @@ public:
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult retryEmptySwapchainFrameSlotCompletion() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult acquireToPresentSwapchainFrameSlot() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult acquireClearToPresentSwapchainFrameSlot(
+        const LLRenderVulkan::VulkanSwapchainFrameClearColor& clear_color) noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentationCompletion() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult    cancelSwapchainFrameSlotPresentation() noexcept;

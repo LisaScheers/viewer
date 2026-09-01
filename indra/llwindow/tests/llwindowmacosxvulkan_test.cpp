@@ -95,7 +95,9 @@ struct FakeState
         mSurfaceCapabilities.supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         mSurfaceCapabilities.currentTransform    = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         mSurfaceCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        mSurfaceCapabilities.supportedUsageFlags     = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        mSurfaceCapabilities.supportedUsageFlags =
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        mFormatProperties.optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     }
 
     std::array<Event, 96> mEvents{};
@@ -173,6 +175,7 @@ struct FakeState
 
     VkPhysicalDevice           mPhysicalDevice = reinterpret_cast<VkPhysicalDevice>(static_cast<std::uintptr_t>(0x11110));
     VkPhysicalDeviceProperties mPhysicalProperties{};
+    VkFormatProperties         mFormatProperties{};
     VkDevice                   mDevice    = reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(0x22220));
     VkQueue                    mQueue     = reinterpret_cast<VkQueue>(static_cast<std::uintptr_t>(0x33330));
     VkSwapchainKHR             mSwapchain = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(0x44440));
@@ -194,6 +197,7 @@ struct FakeState
     std::size_t                mDestroySwapchainCount      = 0;
     VkSwapchainKHR             mLastOldSwapchain           = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(1));
     VkExtent2D                 mLastSwapchainExtent{};
+    VkImageUsageFlags          mLastSwapchainUsage         = 0;
     std::size_t                mCreateImageViewCount       = 0;
     std::size_t                mDestroyImageViewCount      = 0;
     std::size_t                mCreateCommandPoolCount     = 0;
@@ -202,6 +206,20 @@ struct FakeState
     std::size_t                mDestroySemaphoreCount      = 0;
     std::size_t                mCreateFenceCount           = 0;
     std::size_t                mDestroyFenceCount          = 0;
+    std::size_t                mWaitForFencesCount         = 0;
+    std::size_t                mQueueSubmitCount           = 0;
+    VkPipelineStageFlags       mSubmitWaitStage            = 0;
+    std::size_t                mAcquireNextImageCount      = 0;
+    std::uint32_t              mAcquiredImageIndex         = 0;
+    std::size_t                mPipelineBarrierCount       = 0;
+    std::size_t                mClearColorImageCount       = 0;
+    VkCommandBuffer            mClearCommandBuffer         = VK_NULL_HANDLE;
+    VkImage                    mClearedImage               = VK_NULL_HANDLE;
+    VkImageLayout              mClearImageLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkClearColorValue          mClearColor{};
+    VkImageSubresourceRange    mClearRange{};
+    std::size_t                mQueuePresentCount           = 0;
+    std::size_t                mReleaseSwapchainImagesCount = 0;
 
     void record(Event event) noexcept
     {
@@ -412,6 +430,17 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice devi
     }
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFormatProperties(VkPhysicalDevice    device,
+                                                                  VkFormat            format,
+                                                                  VkFormatProperties* properties) noexcept
+{
+    if (gState && device == gState->mPhysicalDevice &&
+        (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_R8G8B8A8_UNORM) && properties)
+    {
+        *properties = gState->mFormatProperties;
+    }
+}
+
 VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice         device,
                                                                       std::uint32_t*           count,
                                                                       VkQueueFamilyProperties* properties) noexcept
@@ -597,6 +626,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSwapchain(VkDevice device,
     ++gState->mCreateSwapchainCount;
     gState->mLastOldSwapchain    = create_info->oldSwapchain;
     gState->mLastSwapchainExtent = create_info->imageExtent;
+    gState->mLastSwapchainUsage  = create_info->imageUsage;
     *swapchain                   = gState->mSwapchain;
     return VK_SUCCESS;
 }
@@ -736,6 +766,161 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyFence(VkDevice device, VkFence fence, cons
     }
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL fakeWaitForFences(VkDevice       device,
+                                                 std::uint32_t  fence_count,
+                                                 const VkFence* fences,
+                                                 VkBool32,
+                                                 std::uint64_t) noexcept
+{
+    if (!gState || device != gState->mDevice || fence_count == 0 || fence_count > 2 || !fences)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (std::uint32_t index = 0; index < fence_count; ++index)
+    {
+        if (fences[index] != gState->mSubmissionFence && fences[index] != gState->mPresentCompletionFence)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    ++gState->mWaitForFencesCount;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeResetCommandBuffer(VkCommandBuffer command_buffer, VkCommandBufferResetFlags flags) noexcept
+{
+    return gState && command_buffer == gState->mCommandBuffer && flags == 0 ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeBeginCommandBuffer(VkCommandBuffer command_buffer,
+                                                       const VkCommandBufferBeginInfo* begin_info) noexcept
+{
+    return gState && command_buffer == gState->mCommandBuffer && begin_info ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEndCommandBuffer(VkCommandBuffer command_buffer) noexcept
+{
+    return gState && command_buffer == gState->mCommandBuffer ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeResetFences(VkDevice device, std::uint32_t fence_count, const VkFence* fences) noexcept
+{
+    if (!gState || device != gState->mDevice || fence_count == 0 || fence_count > 2 || !fences)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (std::uint32_t index = 0; index < fence_count; ++index)
+    {
+        if (fences[index] != gState->mSubmissionFence && fences[index] != gState->mPresentCompletionFence)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeQueueSubmit(VkQueue             queue,
+                                               std::uint32_t       submit_count,
+                                               const VkSubmitInfo* submits,
+                                               VkFence             fence) noexcept
+{
+    if (!gState || queue != gState->mQueue || submit_count != 1 || !submits ||
+        fence != gState->mSubmissionFence || submits[0].sType != VK_STRUCTURE_TYPE_SUBMIT_INFO ||
+        submits[0].waitSemaphoreCount != 1 || !submits[0].pWaitSemaphores ||
+        submits[0].pWaitSemaphores[0] != gState->mImageAvailableSemaphore || !submits[0].pWaitDstStageMask ||
+        submits[0].commandBufferCount != 1 || !submits[0].pCommandBuffers ||
+        submits[0].pCommandBuffers[0] != gState->mCommandBuffer || submits[0].signalSemaphoreCount != 1 ||
+        !submits[0].pSignalSemaphores || submits[0].pSignalSemaphores[0] != gState->mPresentationReadySemaphore)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mQueueSubmitCount;
+    gState->mSubmitWaitStage = submits[0].pWaitDstStageMask[0];
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice       device,
+                                                    VkSwapchainKHR swapchain,
+                                                    std::uint64_t  timeout,
+                                                    VkSemaphore    semaphore,
+                                                    VkFence        fence,
+                                                    std::uint32_t* image_index) noexcept
+{
+    if (!gState || device != gState->mDevice || swapchain != gState->mSwapchain ||
+        timeout != LLRenderVulkan::VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS || semaphore != gState->mImageAvailableSemaphore ||
+        fence != VK_NULL_HANDLE || !image_index)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mAcquireNextImageCount;
+    *image_index = gState->mAcquiredImageIndex;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_buffer,
+                                                  VkPipelineStageFlags,
+                                                  VkPipelineStageFlags,
+                                                  VkDependencyFlags,
+                                                  std::uint32_t,
+                                                  const VkMemoryBarrier*,
+                                                  std::uint32_t,
+                                                  const VkBufferMemoryBarrier*,
+                                                  std::uint32_t               image_barrier_count,
+                                                  const VkImageMemoryBarrier* image_barriers) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer && image_barrier_count == 1 && image_barriers)
+    {
+        ++gState->mPipelineBarrierCount;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer               command_buffer,
+                                                   VkImage                       image,
+                                                   VkImageLayout                 image_layout,
+                                                   const VkClearColorValue*      color,
+                                                   std::uint32_t                 range_count,
+                                                   const VkImageSubresourceRange* ranges) noexcept
+{
+    if (gState && color && range_count == 1 && ranges)
+    {
+        ++gState->mClearColorImageCount;
+        gState->mClearCommandBuffer = command_buffer;
+        gState->mClearedImage       = image;
+        gState->mClearImageLayout   = image_layout;
+        gState->mClearColor         = *color;
+        gState->mClearRange         = ranges[0];
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
+{
+    const auto* fence_info = present_info ? static_cast<const VkSwapchainPresentFenceInfoKHR*>(present_info->pNext) : nullptr;
+    if (!gState || queue != gState->mQueue || !present_info || present_info->waitSemaphoreCount != 1 ||
+        !present_info->pWaitSemaphores || present_info->pWaitSemaphores[0] != gState->mPresentationReadySemaphore ||
+        present_info->swapchainCount != 1 || !present_info->pSwapchains || present_info->pSwapchains[0] != gState->mSwapchain ||
+        !present_info->pImageIndices || present_info->pImageIndices[0] != gState->mAcquiredImageIndex || !fence_info ||
+        fence_info->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR || fence_info->swapchainCount != 1 ||
+        !fence_info->pFences || fence_info->pFences[0] != gState->mPresentCompletionFence)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mQueuePresentCount;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device,
+                                                          const VkReleaseSwapchainImagesInfoKHR* release_info) noexcept
+{
+    if (!gState || device != gState->mDevice || !release_info || release_info->swapchain != gState->mSwapchain ||
+        release_info->imageIndexCount != 1 || !release_info->pImageIndices ||
+        release_info->pImageIndices[0] != gState->mAcquiredImageIndex)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mReleaseSwapchainImagesCount;
+    return VK_SUCCESS;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
 {
     if (!gState || device != gState->mDevice || !name)
@@ -760,6 +945,20 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     LL_MACOS_VULKAN_DEVICE_COMMAND(DestroySemaphore);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CreateFence);
     LL_MACOS_VULKAN_DEVICE_COMMAND(DestroyFence);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(WaitForFences);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(ResetCommandBuffer);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(BeginCommandBuffer);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(EndCommandBuffer);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(ResetFences);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(QueueSubmit);
+    if (std::strcmp(name, "vkAcquireNextImageKHR") == 0)
+        return eraseFunctionType(fakeAcquireNextImage);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdPipelineBarrier);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdClearColorImage);
+    if (std::strcmp(name, "vkQueuePresentKHR") == 0)
+        return eraseFunctionType(fakeQueuePresent);
+    if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
+        return eraseFunctionType(fakeReleaseSwapchainImages);
 #undef LL_MACOS_VULKAN_DEVICE_COMMAND
     return nullptr;
 }
@@ -810,6 +1009,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeEnumeratePhysicalDevices);
     if (std::strcmp(name, "vkGetPhysicalDeviceProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceProperties);
+    if (std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFormatProperties);
     if (std::strcmp(name, "vkGetPhysicalDeviceQueueFamilyProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceQueueFamilyProperties);
     if (std::strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0)
@@ -1096,6 +1297,12 @@ const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError* operationErr
     return std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result);
 }
 
+const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError* presentationError(
+    const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result) noexcept
+{
+    return std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result);
+}
+
 const LLRenderVulkan::VulkanSwapchainChainRebuildError* rebuildError(
     const LLRenderVulkan::VulkanSwapchainChainRebuildResult& result) noexcept
 {
@@ -1172,6 +1379,11 @@ void window_macosx_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireToPresentSwapchainFrameSlot()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireToPresentSwapchainFrameSlot()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireClearToPresentSwapchainFrameSlot(
+                                     std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireClearToPresentSwapchainFrameSlot(
+        std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotPresentation()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotPresentationCompletion()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().cancelSwapchainFrameSlotPresentation()));
@@ -2251,6 +2463,102 @@ void window_macosx_vulkan_object::test<17>()
            full_state.mDestroySwapchainCount == 2 && full_state.mDestroyImageViewCount == full_state.mImages.size() * 2 &&
                full_state.mDestroyCommandPoolCount == 2 && full_state.mDestroySemaphoreCount == 4 &&
                full_state.mDestroyFenceCount == 4);
+}
+
+template<>
+template<>
+void window_macosx_vulkan_object::test<18>()
+{
+    using namespace LLRenderVulkan;
+
+    constexpr VulkanSwapchainFrameClearColor clear_color{ { 0.125f, 0.25f, 0.5f, 1.0f } };
+
+    FakeState   state;
+    ScopedState active(state);
+    auto        result = acquireLLWindowMacOSXVulkan(createInfo(), 181, fakeOperations(state));
+    auto*       owner  = acquiredWindow(result);
+    ensure("clear-present adapter fixture acquired a native owner", owner != nullptr);
+
+    const auto  missing_instance_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* missing_instance        = presentationError(missing_instance_result);
+    ensure("clear-present requires a live instance before observing Cocoa geometry",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               state.mRefreshCount == 0 && state.mClearColorImageCount == 0);
+
+    ensure("clear-present adapter fixture acquired a complete authenticated swapchain chain", acquireCompleteSwapchainChain(*owner));
+    ensure("the clear-present fixture creates a transfer-destination-capable swapchain",
+           state.mLastSwapchainUsage == (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+    const std::size_t refreshes_after_chain = state.mRefreshCount;
+
+    state.mMainThread = false;
+    const auto  off_main_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* off_main        = presentationError(off_main_result);
+    ensure("off-main clear-present is rejected without observing or dispatching native work",
+           off_main && off_main->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_chain && state.mClearColorImageCount == 0);
+
+    state.mMainThread      = true;
+    state.mRefreshSucceeds = false;
+    const auto  failed_refresh_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* failed_refresh        = presentationError(failed_refresh_result);
+    ensure("a failed Cocoa refresh is a stale clear-present request",
+           failed_refresh && failed_refresh->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_chain + 1 && state.mClearColorImageCount == 0);
+
+    state.mRefreshSucceeds = true;
+    state.mRefreshMutation = RefreshMutation::Layer;
+    const auto  stale_identity_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* stale_identity        = presentationError(stale_identity_result);
+    ensure("changed Metal-layer identity is rejected before clear-present reaches the parent",
+           stale_identity && stale_identity->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_chain + 2 && state.mClearColorImageCount == 0);
+
+    state.mRefreshMutation = RefreshMutation::None;
+    state.mRefreshWidth    = 0;
+    const auto  zero_extent_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* zero_extent        = presentationError(zero_extent_result);
+    ensure("zero Cocoa backing pixels are a typed clear-present extent failure",
+           zero_extent && zero_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mRefreshCount == refreshes_after_chain + 3 && owner->drawableWidth() == 1280 &&
+               owner->drawableHeight() == 720 && state.mClearColorImageCount == 0);
+
+    state.mRefreshWidth  = 1600;
+    state.mRefreshHeight = 900;
+    const auto  mismatched_extent_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* mismatched_extent        = presentationError(mismatched_extent_result);
+    ensure("clear-present forwards changed positive pixels for exact parent-level extent authentication",
+           mismatched_extent && mismatched_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch &&
+               state.mRefreshCount == refreshes_after_chain + 4 && owner->drawableWidth() == 1600 &&
+               owner->drawableHeight() == 900 && state.mClearColorImageCount == 0);
+
+    state.mRefreshWidth  = 1280;
+    state.mRefreshHeight = 720;
+    const auto successful_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* success          = std::get_if<VulkanSwapchainFrameSlotPresentationSuccess>(&successful_result);
+    ensure("current Cocoa identity and exact backing pixels complete one clear-present cycle",
+           success && success->mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented && success->mImageIndex &&
+               *success->mImageIndex == state.mAcquiredImageIndex &&
+               owner->instanceGeneration()->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !owner->instanceGeneration()->swapchainFrameAcquiredImageIndex());
+    ensure("clear-present records the two transfer transitions and submits and presents once",
+           state.mAcquireNextImageCount == 1 && state.mPipelineBarrierCount == 2 && state.mClearColorImageCount == 1 &&
+               state.mQueueSubmitCount == 1 && state.mQueuePresentCount == 1 && state.mWaitForFencesCount == 2 &&
+               state.mSubmitWaitStage == VK_PIPELINE_STAGE_TRANSFER_BIT && state.mReleaseSwapchainImagesCount == 0);
+    ensure("clear-present targets the acquired image in transfer-destination layout with the exact color",
+           state.mClearCommandBuffer == state.mCommandBuffer && state.mClearedImage == state.mImages[state.mAcquiredImageIndex] &&
+               state.mClearImageLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && state.mClearColor.float32[0] == clear_color.mRgba[0] &&
+               state.mClearColor.float32[1] == clear_color.mRgba[1] && state.mClearColor.float32[2] == clear_color.mRgba[2] &&
+               state.mClearColor.float32[3] == clear_color.mRgba[3]);
+    ensure("clear-present uses one complete color subresource range",
+           state.mClearRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && state.mClearRange.baseMipLevel == 0 &&
+               state.mClearRange.levelCount == 1 && state.mClearRange.baseArrayLayer == 0 && state.mClearRange.layerCount == 1);
+    ensure("successful clear-present refreshes and retains the exact configured backing extent",
+           state.mRefreshCount == refreshes_after_chain + 5 && owner->drawableWidth() == 1280 && owner->drawableHeight() == 720);
+
+    state.mOwnerDuringDestroy = owner;
+    ensure("clear-present adapter fixture teardown succeeds", owner->reset());
+    ensure_equals("clear-present teardown preserves one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("clear-present teardown preserves one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
 } // namespace tut

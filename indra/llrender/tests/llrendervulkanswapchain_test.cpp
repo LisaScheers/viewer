@@ -80,7 +80,8 @@ struct FakeState
                                             VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR,
                                             VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR,
                                             VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
-                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT };
+                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT };
     std::array<VkSurfaceFormatKHR, 2> mFormats{ VkSurfaceFormatKHR{ VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
                                                 VkSurfaceFormatKHR{ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR } };
     std::array<VkPresentModeKHR, 2>   mPresentModes{ VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_KHR };
@@ -339,6 +340,17 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfacePresentModes(VkPhysicalDevice  phys
     return enumerate(gFakeState->mPresentModes, count, modes);
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetFormatProperties(VkPhysicalDevice physical_device,
+                                                   VkFormat,
+                                                   VkFormatProperties* properties) noexcept
+{
+    if (gFakeState && physical_device == gFakeState->mPhysicalDevice && properties)
+    {
+        *properties                        = {};
+        properties->optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSwapchain(VkDevice                        device,
                                                    const VkSwapchainCreateInfoKHR* create_info,
                                                    const VkAllocationCallbacks*    allocator,
@@ -424,6 +436,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeGetSurfaceFormats);
     if (std::strcmp(name, "vkGetPhysicalDeviceSurfacePresentModesKHR") == 0)
         return eraseFunctionType(fakeGetSurfacePresentModes);
+    if (std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
+        return eraseFunctionType(fakeGetFormatProperties);
 
     gFakeState->mInstanceLookups.emplace_back(name);
     if (std::strcmp(name, "vkGetDeviceProcAddr") == 0)
@@ -491,7 +505,8 @@ void ensureExactCreateInfo(const VkSwapchainCreateInfoKHR& info, const Parents& 
                 info.surface == configuration.surface() && info.minImageCount == configuration.imageCount() &&
                     info.imageFormat == format.format && info.imageColorSpace == format.colorSpace &&
                     info.imageExtent.width == extent.width && info.imageExtent.height == extent.height &&
-                    info.imageArrayLayers == configuration.imageArrayLayers() && info.imageUsage == configuration.imageUsage());
+                    info.imageArrayLayers == configuration.imageArrayLayers() && info.imageUsage == configuration.imageUsage() &&
+                    info.imageUsage == (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT));
     tut::ensure("exclusive sharing supplies no queue-family array",
                 info.imageSharingMode == VK_SHARING_MODE_EXCLUSIVE && info.queueFamilyIndexCount == 0 &&
                     info.pQueueFamilyIndices == nullptr);

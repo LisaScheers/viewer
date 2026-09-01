@@ -34,7 +34,8 @@ enum class VulkanSwapchainConfigurationCommand : std::uint8_t
 {
     GetPhysicalDeviceSurfaceCapabilities,
     GetPhysicalDeviceSurfaceFormats,
-    GetPhysicalDeviceSurfacePresentModes
+    GetPhysicalDeviceSurfacePresentModes,
+    GetPhysicalDeviceFormatProperties
 };
 
 enum class VulkanSwapchainConfigurationResolutionCode : std::uint8_t
@@ -61,7 +62,9 @@ enum class VulkanSwapchainConfigurationResolutionCode : std::uint8_t
     PresentModeEnumerationRetryLimitExceeded,
     InvalidPresentModeEnumerationOutput,
     FifoPresentModeUnsupported,
-    ScratchAllocationFailure
+    ScratchAllocationFailure,
+    SurfaceTransferDestinationUsageUnsupported,
+    SelectedFormatTransferDestinationUnsupported
 };
 
 struct VulkanSwapchainConfigurationResolutionError
@@ -101,7 +104,10 @@ public:
     std::uint32_t                   imageCount() const noexcept { return mImageCount; }
     VkExtent2D                      imageExtent() const noexcept { return mImageExtent; }
     std::uint32_t                   imageArrayLayers() const noexcept { return 1; }
-    VkImageUsageFlags               imageUsage() const noexcept { return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; }
+    VkImageUsageFlags imageUsage() const noexcept
+    {
+        return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    }
     VkSharingMode                   imageSharingMode() const noexcept { return VK_SHARING_MODE_EXCLUSIVE; }
     VkSurfaceTransformFlagBitsKHR   preTransform() const noexcept { return mPreTransform; }
     VkCompositeAlphaFlagBitsKHR     compositeAlpha() const noexcept { return mCompositeAlpha; }

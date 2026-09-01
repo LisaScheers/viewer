@@ -53,7 +53,8 @@ enum class MissingCommand : std::uint8_t
     None,
     GetSurfaceCapabilities,
     GetSurfaceFormats,
-    GetSurfacePresentModes
+    GetSurfacePresentModes,
+    GetFormatProperties
 };
 
 struct EnumerationBehavior
@@ -87,12 +88,14 @@ struct FakeState
                                             VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
                                             VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR | VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR |
                                                 VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR | VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
-                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT };
+                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT };
     std::vector<VkSurfaceFormatKHR> mFormats{ { VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
                                               { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR } };
     std::vector<VkPresentModeKHR>   mPresentModes{ VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_KHR };
     EnumerationBehavior             mFormatBehavior;
     EnumerationBehavior             mPresentBehavior;
+    VkFormatProperties              mFormatProperties{ 0, VK_FORMAT_FEATURE_TRANSFER_DST_BIT, 0 };
 
     std::vector<std::string> mConfigurationLookups;
     std::size_t              mCapabilitiesCalls      = 0;
@@ -100,9 +103,11 @@ struct FakeState
     std::size_t              mFormatListCalls        = 0;
     std::size_t              mPresentCountCalls      = 0;
     std::size_t              mPresentListCalls       = 0;
+    std::size_t              mFormatPropertiesCalls  = 0;
     bool                     mAllResolvedBeforeQuery = false;
     VkPhysicalDevice         mQueriedPhysicalDevice  = VK_NULL_HANDLE;
     VkSurfaceKHR             mQueriedSurface         = VK_NULL_HANDLE;
+    VkFormat                 mQueriedFormat          = VK_FORMAT_UNDEFINED;
     std::size_t              mDestroyCalls           = 0;
 };
 
@@ -305,7 +310,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfaceCapabilities(VkPhysicalDevice      
     ++gFakeState->mCapabilitiesCalls;
     gFakeState->mQueriedPhysicalDevice  = physical_device;
     gFakeState->mQueriedSurface         = surface;
-    gFakeState->mAllResolvedBeforeQuery = gFakeState->mConfigurationLookups.size() == 3;
+    gFakeState->mAllResolvedBeforeQuery = gFakeState->mConfigurationLookups.size() == 4;
     if (gFakeState->mCapabilitiesResult == VK_SUCCESS)
     {
         *capabilities = gFakeState->mCapabilities;
@@ -381,6 +386,19 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfacePresentModes(VkPhysicalDevice  phys
                            gFakeState->mPresentListCalls, count, modes);
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetFormatProperties(VkPhysicalDevice physical_device,
+                                                   VkFormat         format,
+                                                   VkFormatProperties* properties) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !properties)
+    {
+        return;
+    }
+    ++gFakeState->mFormatPropertiesCalls;
+    gFakeState->mQueriedFormat = format;
+    *properties                = gFakeState->mFormatProperties;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance instance, const char* name) noexcept
 {
     if (!gFakeState || instance != gFakeState->mInstance || !name)
@@ -422,6 +440,11 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
     {
         return gFakeState->mMissingCommand == MissingCommand::GetSurfacePresentModes ? nullptr
                                                                                      : eraseFunctionType(fakeGetSurfacePresentModes);
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
+    {
+        return gFakeState->mMissingCommand == MissingCommand::GetFormatProperties ? nullptr
+                                                                                  : eraseFunctionType(fakeGetFormatProperties);
     }
     return nullptr;
 }
@@ -499,6 +522,13 @@ void render_vulkan_swapchain_configuration_object::test<1>()
     static_assert(std::variant_size_v<VulkanSwapchainConfigurationResolutionResult> == 2);
     static_assert(noexcept(resolveVulkanSwapchainConfigurationGeneration(std::declval<const VulkanPhysicalDeviceGeneration&>(),
                                                                          std::declval<const VulkanLogicalDeviceGeneration&>(), {})));
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfacePresentModes) == 2);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties) == 3);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::ScratchAllocationFailure) == 22);
+    static_assert(static_cast<std::uint8_t>(
+                      VulkanSwapchainConfigurationResolutionCode::SurfaceTransferDestinationUsageUnsupported) == 23);
+    static_assert(static_cast<std::uint8_t>(
+                      VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferDestinationUnsupported) == 24);
 
     FakeState       state;
     ScopedFakeState scope(state);
@@ -523,7 +553,8 @@ void render_vulkan_swapchain_configuration_object::test<2>()
     constexpr std::array missing{
         std::pair{ MissingCommand::GetSurfaceCapabilities, VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfaceCapabilities },
         std::pair{ MissingCommand::GetSurfaceFormats, VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfaceFormats },
-        std::pair{ MissingCommand::GetSurfacePresentModes, VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfacePresentModes }
+        std::pair{ MissingCommand::GetSurfacePresentModes, VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfacePresentModes },
+        std::pair{ MissingCommand::GetFormatProperties, VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties }
     };
 
     for (std::size_t index = 0; index < missing.size(); ++index)
@@ -569,7 +600,8 @@ void render_vulkan_swapchain_configuration_object::test<3>()
                                         VulkanSwapchainConfigurationResolutionCode::InvalidArrayLayerCount,
                                         VulkanSwapchainConfigurationResolutionCode::InvalidCurrentTransform,
                                         VulkanSwapchainConfigurationResolutionCode::MissingCompositeAlpha,
-                                        VulkanSwapchainConfigurationResolutionCode::ColorAttachmentUsageUnsupported };
+                                        VulkanSwapchainConfigurationResolutionCode::ColorAttachmentUsageUnsupported,
+                                        VulkanSwapchainConfigurationResolutionCode::SurfaceTransferDestinationUsageUnsupported };
     for (std::size_t index = 0; index < invalid_codes.size(); ++index)
     {
         FakeState       state;
@@ -587,7 +619,9 @@ void render_vulkan_swapchain_configuration_object::test<3>()
         if (index == 5)
             state.mCapabilities.supportedCompositeAlpha = 0;
         if (index == 6)
-            state.mCapabilities.supportedUsageFlags = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            state.mCapabilities.supportedUsageFlags = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (index == 7)
+            state.mCapabilities.supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         auto parents = makeParents(state);
         ensureCode(resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 800, 600 }), invalid_codes[index]);
         ensure("invalid capabilities stop before enumeration", state.mFormatCountCalls == 0 && state.mPresentCountCalls == 0);
@@ -657,6 +691,21 @@ void render_vulkan_swapchain_configuration_object::test<4>()
         ensureCode(resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 800, 600 }),
                    VulkanSwapchainConfigurationResolutionCode::NoCompatibleSurfaceFormat);
     }
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        state.mFormatProperties.optimalTilingFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        auto        parents = makeParents(state);
+        const auto  result = resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 800, 600 });
+        const auto& error  = requireError(result);
+        ensure("selected-format transfer-destination rejection is exact",
+               error.mCode == VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferDestinationUnsupported &&
+                   error.mCommand == VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties &&
+                   error.mResult == VK_SUCCESS);
+        ensure("selected-format rejection queries the chosen BGRA format before present modes",
+               state.mFormatPropertiesCalls == 1 && state.mQueriedFormat == VK_FORMAT_B8G8R8A8_UNORM &&
+                   state.mPresentCountCalls == 0 && state.mPresentListCalls == 0);
+    }
 }
 
 template<>
@@ -718,10 +767,11 @@ void render_vulkan_swapchain_configuration_object::test<6>()
     auto parents                       = makeParents(state);
     auto generation = takeGeneration(resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 2560, 200 }));
 
-    ensure("all three configuration commands resolve in exact order",
+    ensure("all four configuration commands resolve in exact order",
            state.mConfigurationLookups == std::vector<std::string>{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
                                                                     "vkGetPhysicalDeviceSurfaceFormatsKHR",
-                                                                    "vkGetPhysicalDeviceSurfacePresentModesKHR" });
+                                                                    "vkGetPhysicalDeviceSurfacePresentModesKHR",
+                                                                    "vkGetPhysicalDeviceFormatProperties" });
     ensure("format priority selects BGRA8 UNORM nonlinear sRGB independent of driver order",
            generation.surfaceFormat().format == VK_FORMAT_B8G8R8A8_UNORM &&
                generation.surfaceFormat().colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
@@ -730,7 +780,7 @@ void render_vulkan_swapchain_configuration_object::test<6>()
                generation.imageExtent().width == 1920 && generation.imageExtent().height == 240);
     ensure("the conservative create policy is exact",
            generation.presentMode() == VK_PRESENT_MODE_FIFO_KHR && generation.imageCount() == 3 && generation.imageArrayLayers() == 1 &&
-               generation.imageUsage() == VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &&
+               generation.imageUsage() == (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
                generation.imageSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
                generation.preTransform() == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR &&
                generation.compositeAlpha() == VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR && generation.clipped() == VK_TRUE);
@@ -738,6 +788,8 @@ void render_vulkan_swapchain_configuration_object::test<6>()
            generation.createdFor(parents.mPhysical, parents.mLogical, { 2560, 200 }) &&
                !generation.createdFor(parents.mPhysical, parents.mLogical, { 1920, 240 }) && generation.device() == state.mDevice &&
                generation.queueFamilyIndex() == state.mQueueFamily);
+    ensure("the selected BGRA format is authenticated for optimal transfer destination",
+           state.mFormatPropertiesCalls == 1 && state.mQueriedFormat == VK_FORMAT_B8G8R8A8_UNORM);
 
     auto moved = std::move(generation);
     ensure("move transfers exact configuration provenance",

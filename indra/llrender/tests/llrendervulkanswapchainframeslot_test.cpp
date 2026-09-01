@@ -65,6 +65,7 @@ enum class MissingCommand : std::uint8_t
     QueueSubmit,
     AcquireNextImage,
     CmdPipelineBarrier,
+    CmdClearColorImage,
     QueuePresent,
     ReleaseSwapchainImages
 };
@@ -133,6 +134,16 @@ struct BarrierRecord
     VkImageMemoryBarrier  mImageBarrier{};
 };
 
+struct ClearColorRecord
+{
+    VkCommandBuffer        mCommandBuffer = VK_NULL_HANDLE;
+    VkImage                mImage = VK_NULL_HANDLE;
+    VkImageLayout          mImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkClearColorValue      mColor{};
+    std::uint32_t          mRangeCount = 0;
+    VkImageSubresourceRange mRange{};
+};
+
 struct PresentRecord
 {
     VkQueue             mQueue = VK_NULL_HANDLE;
@@ -164,7 +175,7 @@ struct FakeState
         mCapabilities.supportedTransforms     = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         mCapabilities.currentTransform        = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         mCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        mCapabilities.supportedUsageFlags     = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        mCapabilities.supportedUsageFlags     = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     }
 
     VkInstance       mInstance       = fakeHandle<VkInstance>(0x1000);
@@ -232,6 +243,7 @@ struct FakeState
     std::vector<QueueSubmitRecord>           mQueueSubmits;
     std::vector<AcquireRecord>               mAcquires;
     std::vector<BarrierRecord>               mBarriers;
+    std::vector<ClearColorRecord>             mClears;
     std::vector<PresentRecord>               mPresents;
     std::vector<ReleaseRecord>               mReleases;
 
@@ -266,6 +278,7 @@ struct FakeState
         mQueueSubmits.clear();
         mAcquires.clear();
         mBarriers.clear();
+        mClears.clear();
         mPresents.clear();
         mReleases.clear();
         mNextWaitResult = 0;
@@ -325,6 +338,17 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice     
         *properties            = {};
         properties->apiVersion = VK_API_VERSION_1_1;
         std::strncpy(properties->deviceName, "frame-slot-fake", VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1);
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFormatProperties(VkPhysicalDevice         physical_device,
+                                                                  VkFormat                 format,
+                                                                  VkFormatProperties*      properties) noexcept
+{
+    if (gFakeState && physical_device == gFakeState->mPhysicalDevice && format == gFakeState->mFormats[0].format && properties)
+    {
+        *properties                        = {};
+        properties->optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     }
 }
 
@@ -577,6 +601,15 @@ const std::vector<std::string>& expectedPresentationLookups()
     return names;
 }
 
+const std::vector<std::string>& expectedClearPresentationLookups()
+{
+    static const std::vector<std::string> names{ "vkWaitForFences",      "vkResetCommandBuffer", "vkBeginCommandBuffer",
+                                                 "vkEndCommandBuffer",   "vkResetFences",        "vkQueueSubmit",
+                                                 "vkAcquireNextImageKHR", "vkCmdPipelineBarrier", "vkCmdClearColorImage",
+                                                 "vkQueuePresentKHR",     "vkReleaseSwapchainImagesKHR" };
+    return names;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateCommandPool(VkDevice                       device,
                                                      const VkCommandPoolCreateInfo* create_info,
                                                      const VkAllocationCallbacks*   allocator,
@@ -812,6 +845,26 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer command_buffer
     gFakeState->mBarriers.push_back(record);
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer             command_buffer,
+                                                   VkImage                     image,
+                                                   VkImageLayout               image_layout,
+                                                   const VkClearColorValue*     color,
+                                                   std::uint32_t                range_count,
+                                                   const VkImageSubresourceRange* ranges) noexcept
+{
+    if (!gFakeState || !color)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("clear color");
+    ClearColorRecord record{ command_buffer, image, image_layout, *color, range_count, {} };
+    if (range_count && ranges)
+    {
+        record.mRange = ranges[0];
+    }
+    gFakeState->mClears.push_back(record);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
 {
     if (!gFakeState || !present_info)
@@ -906,6 +959,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return gFakeState->mMissingCommand == MissingCommand::AcquireNextImage ? nullptr : eraseFunctionType(fakeAcquireNextImage);
     if (std::strcmp(name, "vkCmdPipelineBarrier") == 0)
         return gFakeState->mMissingCommand == MissingCommand::CmdPipelineBarrier ? nullptr : eraseFunctionType(fakeCmdPipelineBarrier);
+    if (std::strcmp(name, "vkCmdClearColorImage") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::CmdClearColorImage ? nullptr : eraseFunctionType(fakeCmdClearColorImage);
     if (std::strcmp(name, "vkQueuePresentKHR") == 0)
         return gFakeState->mMissingCommand == MissingCommand::QueuePresent ? nullptr : eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
@@ -924,6 +979,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeEnumeratePhysicalDevices);
     if (std::strcmp(name, "vkGetPhysicalDeviceProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceProperties);
+    if (std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFormatProperties);
     if (std::strcmp(name, "vkGetPhysicalDeviceQueueFamilyProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceQueueFamilyProperties);
     if (std::strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0)
@@ -1056,6 +1113,11 @@ VulkanSwapchainFrameSlotOperationResult resolvePresentation(VulkanSwapchainFrame
     return generation.resolvePresentationDispatch(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages);
 }
 
+VulkanSwapchainFrameSlotOperationResult resolveClearPresentation(VulkanSwapchainFrameSlotGeneration& generation, Parents& parents)
+{
+    return generation.resolveClearPresentationDispatch(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages);
+}
+
 const VulkanSwapchainFrameSlotPresentationSuccess& requirePresentationSuccess(
     const VulkanSwapchainFrameSlotPresentationResult& result)
 {
@@ -1104,6 +1166,10 @@ void render_vulkan_swapchain_frame_slot_object::test<1>()
         std::declval<const VulkanSwapchainGeneration&>(), std::declval<const VulkanSwapchainImagesGeneration&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeEmptySubmission()));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().retryEmptySubmissionCompletion()));
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::ReleaseSwapchainImages) == 17);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdClearColorImage) == 18);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::CommandFailure) == 8);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor) == 9);
 
     const VulkanSwapchainFrameSlotResolutionError value{ VulkanSwapchainFrameSlotResolutionCode::SubmissionFenceCreationFailure,
                                                          VulkanSwapchainFrameSlotCommand::CreateFence, VK_ERROR_OUT_OF_DEVICE_MEMORY };
@@ -1981,7 +2047,8 @@ void render_vulkan_swapchain_frame_slot_object::test<16>()
                                       record.mFenceInfo.pNext == nullptr && record.mFenceInfo.swapchainCount == 1 &&
                                       record.mFence == generation.presentCompletionFence();
                            }) &&
-               state.mPresents[0].mImageIndex == 1 && state.mPresents[1].mImageIndex == 2 && state.mReleases.empty());
+               state.mPresents[0].mImageIndex == 1 && state.mPresents[1].mImageIndex == 2 && state.mClears.empty() &&
+               state.mReleases.empty());
 }
 
 template<>
@@ -2466,6 +2533,148 @@ void render_vulkan_swapchain_frame_slot_object::test<25>()
                state.mFenceWaits[1].mTimeout == std::numeric_limits<std::uint64_t>::max() && state.mReleases.size() == 1 &&
                state.mReleases[0].mDevice == state.mDevice && state.mReleases[0].mImageIndex == 1 &&
                generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<26>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents    = makeParents(state);
+    auto            generation = takeGeneration(resolveSlot(parents));
+    state.clearFrameRecords();
+    state.mMissingCommand = MissingCommand::CmdClearColorImage;
+
+    ensureOperationError(resolveClearPresentation(generation, parents),
+                         VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand,
+                         VulkanSwapchainFrameSlotDisposition::Reusable,
+                         VulkanSwapchainFrameSlotCommand::CmdClearColorImage);
+    const std::vector<std::string> expected_cutoff{ "vkWaitForFences",      "vkResetCommandBuffer", "vkBeginCommandBuffer",
+                                                    "vkEndCommandBuffer",   "vkResetFences",        "vkQueueSubmit",
+                                                    "vkAcquireNextImageKHR", "vkCmdPipelineBarrier", "vkCmdClearColorImage" };
+    ensure("missing clear dispatch is exact and stops before any frame work",
+           state.mInstanceLookups == std::vector<std::string>{ "vkGetDeviceProcAddr" } &&
+               state.mDeviceLookups == expected_cutoff && state.mEvents.empty() && state.mAcquires.empty() &&
+               state.mBarriers.empty() && state.mClears.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<27>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents    = makeParents(state);
+    auto            generation = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveClearPresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+
+    const float nan      = std::numeric_limits<float>::quiet_NaN();
+    const float infinity = std::numeric_limits<float>::infinity();
+    const std::array invalid_colors{ VulkanSwapchainFrameClearColor{ { nan, 0.0f, 0.0f, 1.0f } },
+                                     VulkanSwapchainFrameClearColor{ { infinity, 0.0f, 0.0f, 1.0f } },
+                                     VulkanSwapchainFrameClearColor{ { -infinity, 0.0f, 0.0f, 1.0f } },
+                                     VulkanSwapchainFrameClearColor{ { -0.01f, 0.0f, 0.0f, 1.0f } },
+                                     VulkanSwapchainFrameClearColor{ { 0.0f, 0.0f, 0.0f, 1.01f } } };
+    for (const auto& color : invalid_colors)
+    {
+        const auto operation = generation.executeAcquireClearToPresent(color);
+        const auto& error    = requirePresentationError(operation);
+        ensure("non-finite and out-of-range clear colors fail with exact typed provenance",
+               error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidClearColor && !error.mCommand &&
+                   error.mResult == VK_SUCCESS && error.mDisposition == VulkanSwapchainFrameSlotDisposition::Reusable &&
+                   !error.mImageIndex);
+    }
+    ensure("invalid clear colors are rejected before every Vulkan frame command",
+           state.mEvents.empty() && state.mFenceWaits.empty() && state.mAcquires.empty() && state.mCommandBufferResets.empty() &&
+               state.mBarriers.empty() && state.mClears.empty() && state.mQueueSubmits.empty() && state.mPresents.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<28>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents    = makeParents(state);
+    auto            generation = takeGeneration(resolveSlot(parents));
+    state.clearFrameRecords();
+
+    ensureOperationSuccess(resolveClearPresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("clear presentation dispatch resolves atomically in exact order",
+           state.mInstanceLookups == std::vector<std::string>{ "vkGetDeviceProcAddr" } &&
+               state.mDeviceLookups == expectedClearPresentationLookups() && state.mEvents.empty());
+
+    state.clearFrameRecords();
+    state.mAcquireResults = { VK_SUCCESS, VK_SUBOPTIMAL_KHR };
+    state.mAcquireIndices = { 1, 2 };
+    const VulkanSwapchainFrameClearColor color{ { 0.125f, 0.25f, 0.5f, 1.0f } };
+    const auto first  = requirePresentationSuccess(generation.executeAcquireClearToPresent(color));
+    const auto second = requirePresentationSuccess(generation.executeAcquireClearToPresent(color));
+    ensure("clear presentation repeats after complete retirement",
+           first == VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1 } &&
+               second == VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Suboptimal, 2 } &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
+
+    const std::vector<std::string> one_cycle{ "wait fence",       "acquire image", "reset buffer", "begin buffer",
+                                              "pipeline barrier", "clear color",   "pipeline barrier", "end buffer",
+                                              "reset fence",      "queue submit",  "queue present", "wait fence" };
+    auto expected_events = one_cycle;
+    expected_events.insert(expected_events.end(), one_cycle.begin(), one_cycle.end());
+    ensure("each clear frame records two barriers and one clear before submit/present/retirement", state.mEvents == expected_events);
+
+    ensure_equals("two clear frames record exactly four barriers", state.mBarriers.size(), std::size_t{ 4 });
+    for (std::size_t frame = 0; frame < 2; ++frame)
+    {
+        const auto& before = state.mBarriers[frame * 2];
+        const auto& after  = state.mBarriers[frame * 2 + 1];
+        const VkImage image = parents.mImages.image(static_cast<std::uint32_t>(frame + 1));
+        ensure("the first barrier transfers the exact acquired image from undefined to transfer destination",
+               before.mCommandBuffer == generation.commandBuffer() && before.mSourceStage == VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT &&
+                   before.mDestinationStage == VK_PIPELINE_STAGE_TRANSFER_BIT && before.mDependencyFlags == 0 &&
+                   before.mMemoryBarrierCount == 0 && before.mBufferBarrierCount == 0 && before.mImageBarrierCount == 1 &&
+                   before.mImageBarrier.sType == VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER && before.mImageBarrier.pNext == nullptr &&
+                   before.mImageBarrier.srcAccessMask == 0 && before.mImageBarrier.dstAccessMask == VK_ACCESS_TRANSFER_WRITE_BIT &&
+                   before.mImageBarrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+                   before.mImageBarrier.newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && before.mImageBarrier.image == image);
+        ensure("the second barrier transfers the exact cleared image to presentation",
+               after.mCommandBuffer == generation.commandBuffer() && after.mSourceStage == VK_PIPELINE_STAGE_TRANSFER_BIT &&
+                   after.mDestinationStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT && after.mDependencyFlags == 0 &&
+                   after.mMemoryBarrierCount == 0 && after.mBufferBarrierCount == 0 && after.mImageBarrierCount == 1 &&
+                   after.mImageBarrier.sType == VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER && after.mImageBarrier.pNext == nullptr &&
+                   after.mImageBarrier.srcAccessMask == VK_ACCESS_TRANSFER_WRITE_BIT && after.mImageBarrier.dstAccessMask == 0 &&
+                   after.mImageBarrier.oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+                   after.mImageBarrier.newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR && after.mImageBarrier.image == image);
+        for (const auto* barrier : { &before.mImageBarrier, &after.mImageBarrier })
+        {
+            ensure("both barriers use the complete color subresource and ignored queue-family ownership",
+                   barrier->srcQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED &&
+                       barrier->dstQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED &&
+                       barrier->subresourceRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+                       barrier->subresourceRange.baseMipLevel == 0 && barrier->subresourceRange.levelCount == 1 &&
+                       barrier->subresourceRange.baseArrayLayer == 0 && barrier->subresourceRange.layerCount == 1);
+        }
+    }
+
+    ensure_equals("two clear frames issue exactly two clears", state.mClears.size(), std::size_t{ 2 });
+    for (std::size_t frame = 0; frame < state.mClears.size(); ++frame)
+    {
+        const auto& clear = state.mClears[frame];
+        ensure("clear records the exact buffer, acquired image, transfer layout, value, and full color range",
+               clear.mCommandBuffer == generation.commandBuffer() &&
+                   clear.mImage == parents.mImages.image(static_cast<std::uint32_t>(frame + 1)) &&
+                   clear.mImageLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && clear.mRangeCount == 1 &&
+                   clear.mColor.float32[0] == color.mRgba[0] && clear.mColor.float32[1] == color.mRgba[1] &&
+                   clear.mColor.float32[2] == color.mRgba[2] && clear.mColor.float32[3] == color.mRgba[3] &&
+                   clear.mRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && clear.mRange.baseMipLevel == 0 &&
+                   clear.mRange.levelCount == 1 && clear.mRange.baseArrayLayer == 0 && clear.mRange.layerCount == 1);
+    }
+    ensure("clear submissions wait for acquisition at the transfer stage",
+           state.mQueueSubmits.size() == 2 &&
+               std::all_of(state.mQueueSubmits.begin(), state.mQueueSubmits.end(), [](const QueueSubmitRecord& record)
+                           { return record.mWaitStage == VK_PIPELINE_STAGE_TRANSFER_BIT; }) &&
+               state.mPresents.size() == 2 && state.mReleases.empty());
 }
 
 } // namespace tut

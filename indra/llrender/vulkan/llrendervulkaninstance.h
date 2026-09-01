@@ -455,7 +455,8 @@ enum class VulkanSwapchainFrameSlotParentOperationCode : std::uint8_t
     DrawableExtentMismatch,
     StaleInstanceOwner,
     StaleWindowGeneration,
-    OperationFailure
+    OperationFailure,
+    InvalidClearColor
 };
 
 struct VulkanSwapchainFrameSlotParentOperationError
@@ -642,6 +643,9 @@ public:
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult acquireToPresentSwapchainFrameSlot(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+    VulkanSwapchainFrameSlotParentPresentationResult acquireClearToPresentSwapchainFrameSlot(
+        const VulkanSwapchainFrameSlotOperationRequest& request,
+        const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentationCompletion(

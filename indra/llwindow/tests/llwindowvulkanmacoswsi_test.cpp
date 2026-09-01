@@ -42,6 +42,14 @@ constexpr U32  BACKING_WIDTH              = 1280;
 constexpr U32  BACKING_HEIGHT             = 720;
 constexpr U32  REBUILT_BACKING_WIDTH      = 1440;
 constexpr U32  REBUILT_BACKING_HEIGHT     = 810;
+constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_CLEAR_ONE{ { 0.125f, 0.25f, 0.5f, 1.0f } };
+constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_CLEAR_TWO{ { 0.75f, 0.125f, 0.375f, 1.0f } };
+constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_CLEAR_ONE{ { 0.0625f, 0.625f, 0.25f, 1.0f } };
+constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_CLEAR_TWO{ { 0.875f, 0.375f, 0.0625f, 1.0f } };
+
+static_assert(INITIAL_CLEAR_ONE != INITIAL_CLEAR_TWO && INITIAL_CLEAR_ONE != REBUILT_CLEAR_ONE &&
+              INITIAL_CLEAR_ONE != REBUILT_CLEAR_TWO && INITIAL_CLEAR_TWO != REBUILT_CLEAR_ONE &&
+              INITIAL_CLEAR_TWO != REBUILT_CLEAR_TWO && REBUILT_CLEAR_ONE != REBUILT_CLEAR_TWO);
 
 bool nativeSmokeRequested()
 {
@@ -252,12 +260,16 @@ void window_vulkan_macos_wsi_object::test<1>()
     const VkSurfaceCapabilitiesKHR capabilities    = instance_generation->swapchainSurfaceCapabilities();
     const VkExtent2D               image_extent    = instance_generation->swapchainImageExtent();
     const VkExtent2D               expected_extent = expectedImageExtent(capabilities, drawable_extent);
-    ensure("the MoltenVK create-ready configuration follows exact conservative policy",
+    constexpr VkImageUsageFlags expected_image_usage =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ensure("the MoltenVK surface admits the exact color-attachment and transfer-destination usage",
+           (capabilities.supportedUsageFlags & expected_image_usage) == expected_image_usage);
+    ensure("the MoltenVK create-ready configuration follows exact clear-capable policy",
            instance_generation->swapchainPresentMode() == VK_PRESENT_MODE_FIFO_KHR &&
                instance_generation->swapchainImageCount() == expectedImageCount(capabilities) &&
                image_extent.width == expected_extent.width && image_extent.height == expected_extent.height &&
                instance_generation->swapchainImageArrayLayers() == 1 &&
-               instance_generation->swapchainImageUsage() == VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &&
+               instance_generation->swapchainImageUsage() == expected_image_usage &&
                instance_generation->swapchainImageSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
                instance_generation->swapchainPreTransform() == capabilities.currentTransform &&
                instance_generation->swapchainCompositeAlpha() == expectedCompositeAlpha(capabilities.supportedCompositeAlpha) &&
@@ -318,6 +330,40 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("frame-slot acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("frame-slot acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    const VkSemaphore initial_image_available          = instance_generation->swapchainFrameImageAvailableSemaphore();
+    const VkSemaphore initial_presentation_ready       = instance_generation->swapchainFramePresentationReadySemaphore();
+    const VkFence     initial_submission_fence         = instance_generation->swapchainFrameSubmissionFence();
+    const VkFence     initial_present_completion_fence = instance_generation->swapchainFramePresentCompletionFence();
+    const auto initial_first_presentation = owner->acquireClearToPresentSwapchainFrameSlot(INITIAL_CLEAR_ONE);
+    ensure("the initial Metal swapchain submits and presents the first explicit clear cycle",
+           presentationCompleted(initial_first_presentation, resolved_image_count) &&
+               instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance_generation->swapchainFrameAcquiredImageIndex());
+    ensure("the first initial clear cycle retains all four synchronization handles",
+           initial_image_available != VK_NULL_HANDLE && initial_presentation_ready != VK_NULL_HANDLE &&
+               initial_submission_fence != VK_NULL_HANDLE && initial_present_completion_fence != VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameImageAvailableSemaphore() == initial_image_available &&
+               instance_generation->swapchainFramePresentationReadySemaphore() == initial_presentation_ready &&
+               instance_generation->swapchainFrameSubmissionFence() == initial_submission_fence &&
+               instance_generation->swapchainFramePresentCompletionFence() == initial_present_completion_fence);
+    ensure("the first initial clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the first initial clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const auto initial_second_presentation = owner->acquireClearToPresentSwapchainFrameSlot(INITIAL_CLEAR_TWO);
+    ensure("the initial Metal swapchain submits and presents the second distinctive clear cycle",
+           presentationCompleted(initial_second_presentation, resolved_image_count) &&
+               instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance_generation->swapchainFrameAcquiredImageIndex());
+    ensure("the second initial clear cycle retains all four synchronization handles",
+           instance_generation->swapchainFrameImageAvailableSemaphore() == initial_image_available &&
+               instance_generation->swapchainFramePresentationReadySemaphore() == initial_presentation_ready &&
+               instance_generation->swapchainFrameSubmissionFence() == initial_submission_fence &&
+               instance_generation->swapchainFramePresentCompletionFence() == initial_present_completion_fence);
+    ensure_equals("two initial clear-present cycles emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+    ensure("the second initial clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the second initial clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     const VkSurfaceKHR    retained_surface         = instance_generation->surface();
     const VkPhysicalDevice retained_physical_device = instance_generation->physicalDevice();
     const VkDevice         retained_logical_device  = instance_generation->logicalDevice();
@@ -337,7 +383,8 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("the rebuilt configuration authenticates the changed Cocoa backing extent",
            rebuilt_drawable_extent.width == REBUILT_BACKING_WIDTH &&
                rebuilt_drawable_extent.height == REBUILT_BACKING_HEIGHT &&
-               owner->drawableWidth() == rebuilt_drawable_extent.width && owner->drawableHeight() == rebuilt_drawable_extent.height);
+               owner->drawableWidth() == rebuilt_drawable_extent.width && owner->drawableHeight() == rebuilt_drawable_extent.height &&
+               instance_generation->swapchainImageUsage() == expected_image_usage);
     ensure("same-surface rebuild retains every older Vulkan parent and borrowed queue",
            instance_generation->surface() == retained_surface && instance_generation->physicalDevice() == retained_physical_device &&
                instance_generation->logicalDevice() == retained_logical_device &&
@@ -361,35 +408,35 @@ void window_vulkan_macos_wsi_object::test<1>()
     const VkSemaphore presentation_ready       = instance_generation->swapchainFramePresentationReadySemaphore();
     const VkFence     submission_fence         = instance_generation->swapchainFrameSubmissionFence();
     const VkFence     present_completion_fence = instance_generation->swapchainFramePresentCompletionFence();
-    const auto        first_presentation       = owner->acquireToPresentSwapchainFrameSlot();
-    ensure("the native Metal owner completes the first acquire-to-present cycle",
+    const auto        first_presentation       = owner->acquireClearToPresentSwapchainFrameSlot(REBUILT_CLEAR_ONE);
+    ensure("the rebuilt Metal swapchain submits and presents the first explicit clear cycle",
            presentationCompleted(first_presentation, resolved_image_count) &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                !instance_generation->swapchainFrameAcquiredImageIndex());
-    ensure("the first presentation cycle retains all four synchronization handles",
+    ensure("the first rebuilt clear cycle retains all four synchronization handles",
            image_available != VK_NULL_HANDLE && presentation_ready != VK_NULL_HANDLE && submission_fence != VK_NULL_HANDLE &&
                present_completion_fence != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
                instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
-    ensure("the first presentation cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the first presentation cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure("the first rebuilt clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the first rebuilt clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
-    const auto second_presentation = owner->acquireToPresentSwapchainFrameSlot();
-    ensure("the native Metal owner completes the second acquire-to-present cycle",
+    const auto second_presentation = owner->acquireClearToPresentSwapchainFrameSlot(REBUILT_CLEAR_TWO);
+    ensure("the rebuilt Metal swapchain submits and presents the second distinctive clear cycle",
            presentationCompleted(second_presentation, resolved_image_count) &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                !instance_generation->swapchainFrameAcquiredImageIndex());
-    ensure("the second presentation cycle retains all four synchronization handles",
+    ensure("the second rebuilt clear cycle retains all four synchronization handles",
            instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
                instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
-    ensure_equals("two presentation cycles emit no validation messages", instance_generation->validationSnapshot().mMessageCount,
-                  std::uint32_t{ 0 });
-    ensure("the second presentation cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the second presentation cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure_equals("two rebuilt clear-present cycles emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+    ensure("the second rebuilt clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the second rebuilt clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     ensure("the native smoke explicitly resets the frame slot before swapchain images", owner->resetSwapchainFrameSlotGeneration());
     ensure("explicit frame-slot reset removes all six owned handles",

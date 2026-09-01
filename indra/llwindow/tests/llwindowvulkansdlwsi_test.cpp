@@ -251,8 +251,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool swapchain_rebuild_parent_exact    = false;
     bool swapchain_rebuild_chain_complete  = false;
     bool swapchain_rebuild_extent_exact    = false;
-    bool frame_slot_first_presentation     = false;
-    bool frame_slot_second_presentation    = false;
+    bool frame_slot_first_clear_before_rebuild  = false;
+    bool frame_slot_second_clear_before_rebuild = false;
+    bool frame_slot_first_clear_after_rebuild   = false;
+    bool frame_slot_second_clear_after_rebuild  = false;
     bool frame_slot_handles_untouched      = false;
     bool frame_slot_presentation_clean     = false;
     bool frame_slot_explicitly_reset       = false;
@@ -361,7 +363,8 @@ void window_vulkan_sdl_wsi_object::test<1>()
                     instance_generation->swapchainImageCount() == expectedImageCount(capabilities) &&
                     image_extent.width == expected_extent.width && image_extent.height == expected_extent.height &&
                     instance_generation->swapchainImageArrayLayers() == 1 &&
-                    instance_generation->swapchainImageUsage() == VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &&
+                    instance_generation->swapchainImageUsage() ==
+                        (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
                     instance_generation->swapchainImageSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
                     instance_generation->swapchainPreTransform() == capabilities.currentTransform &&
                     instance_generation->swapchainCompositeAlpha() == expectedCompositeAlpha(capabilities.supportedCompositeAlpha) &&
@@ -405,6 +408,27 @@ void window_vulkan_sdl_wsi_object::test<1>()
                     const VkPhysicalDevice retained_physical_device = instance_generation->physicalDevice();
                     const VkDevice         retained_logical_device  = instance_generation->logicalDevice();
                     const VkQueue          retained_queue           = instance_generation->presentationQueue();
+
+                    LLRenderVulkan::VulkanSwapchainFrameClearColor clear_color;
+                    clear_color.mRgba = { 0.125f, 0.375f, 0.625f, 1.0f };
+                    LLRenderVulkan::VulkanSwapchainFrameSlotOperationRequest operation_request;
+                    operation_request.mNativeWindowGeneration = requirements->nativeWindowGeneration();
+                    operation_request.mDrawableExtent         = retained_drawable;
+                    operation_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+                    operation_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+
+                    const auto first_clear_before_rebuild =
+                        mutable_generation->acquireClearToPresentSwapchainFrameSlot(operation_request, clear_color);
+                    frame_slot_first_clear_before_rebuild = presentationCompleted(first_clear_before_rebuild, image_count) &&
+                                                           instance_generation->swapchainFrameSlotDisposition() ==
+                                                               LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                           !instance_generation->swapchainFrameAcquiredImageIndex();
+                    const auto second_clear_before_rebuild =
+                        mutable_generation->acquireClearToPresentSwapchainFrameSlot(operation_request, clear_color);
+                    frame_slot_second_clear_before_rebuild = presentationCompleted(second_clear_before_rebuild, image_count) &&
+                                                            instance_generation->swapchainFrameSlotDisposition() ==
+                                                                LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                            !instance_generation->swapchainFrameAcquiredImageIndex();
 
                     const LLCoordScreen requested_size(current_drawable.mX + 32, current_drawable.mY + 24);
                     swapchain_resize_requested = window->setSize(requested_size);
@@ -461,24 +485,22 @@ void window_vulkan_sdl_wsi_object::test<1>()
                     const VkSemaphore presentation_ready       = instance_generation->swapchainFramePresentationReadySemaphore();
                     const VkFence     submission_fence         = instance_generation->swapchainFrameSubmissionFence();
                     const VkFence     present_completion_fence = instance_generation->swapchainFramePresentCompletionFence();
-                    LLRenderVulkan::VulkanSwapchainFrameSlotOperationRequest operation_request;
-                    operation_request.mNativeWindowGeneration = requirements->nativeWindowGeneration();
-                    operation_request.mDrawableExtent         = rebuilt_drawable;
-                    operation_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
-                    operation_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+                    operation_request.mDrawableExtent = rebuilt_drawable;
 
                     if (swapchain_rebuild_ready && swapchain_rebuild_chain_complete && swapchain_rebuild_extent_exact)
                     {
-                        const auto first_result       = mutable_generation->acquireToPresentSwapchainFrameSlot(operation_request);
-                        frame_slot_first_presentation = presentationCompleted(first_result, image_count) &&
-                                                        instance_generation->swapchainFrameSlotDisposition() ==
-                                                            LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
-                                                        !instance_generation->swapchainFrameAcquiredImageIndex();
-                        const auto second_result       = mutable_generation->acquireToPresentSwapchainFrameSlot(operation_request);
-                        frame_slot_second_presentation = presentationCompleted(second_result, image_count) &&
-                                                         instance_generation->swapchainFrameSlotDisposition() ==
-                                                             LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
-                                                         !instance_generation->swapchainFrameAcquiredImageIndex();
+                        const auto first_clear_after_rebuild =
+                            mutable_generation->acquireClearToPresentSwapchainFrameSlot(operation_request, clear_color);
+                        frame_slot_first_clear_after_rebuild = presentationCompleted(first_clear_after_rebuild, image_count) &&
+                                                              instance_generation->swapchainFrameSlotDisposition() ==
+                                                                  LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                              !instance_generation->swapchainFrameAcquiredImageIndex();
+                        const auto second_clear_after_rebuild =
+                            mutable_generation->acquireClearToPresentSwapchainFrameSlot(operation_request, clear_color);
+                        frame_slot_second_clear_after_rebuild = presentationCompleted(second_clear_after_rebuild, image_count) &&
+                                                               instance_generation->swapchainFrameSlotDisposition() ==
+                                                                   LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                               !instance_generation->swapchainFrameAcquiredImageIndex();
                     }
                     frame_slot_handles_untouched = image_available != VK_NULL_HANDLE && presentation_ready != VK_NULL_HANDLE &&
                                                    submission_fence != VK_NULL_HANDLE && present_completion_fence != VK_NULL_HANDLE &&
@@ -622,10 +644,14 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("swapchain rebuild publishes a fresh complete configuration, swapchain, image, view, and frame-slot chain",
            swapchain_rebuild_chain_complete);
     ensure("the rebuilt configuration retains the resized X11 backing-pixel extent", swapchain_rebuild_extent_exact);
-    ensure("the rebuilt native SDL owner completes the first acquire-to-present cycle", frame_slot_first_presentation);
-    ensure("the rebuilt native SDL owner completes the second acquire-to-present cycle", frame_slot_second_presentation);
-    ensure("both post-rebuild presentation cycles retain all four synchronization handles", frame_slot_handles_untouched);
-    ensure("rebuild and both post-rebuild presentation cycles emit no validation messages", frame_slot_presentation_clean);
+    ensure("the native SDL owner clears and presents the first acquired image before rebuild",
+           frame_slot_first_clear_before_rebuild);
+    ensure("the native SDL owner clears and presents the second acquired image before rebuild",
+           frame_slot_second_clear_before_rebuild);
+    ensure("the rebuilt native SDL owner clears and presents the first acquired image", frame_slot_first_clear_after_rebuild);
+    ensure("the rebuilt native SDL owner clears and presents the second acquired image", frame_slot_second_clear_after_rebuild);
+    ensure("both post-rebuild clear-present cycles retain all four synchronization handles", frame_slot_handles_untouched);
+    ensure("four clear-present cycles and rebuild emit no validation messages", frame_slot_presentation_clean);
     ensure("the native smoke explicitly resets the frame-slot child before its parents", frame_slot_explicitly_reset);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
     ensure("explicit frame-slot reset removes the generation and all six owned handles", frame_slot_removed);

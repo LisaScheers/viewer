@@ -20,6 +20,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <variant>
@@ -48,7 +49,8 @@ enum class VulkanSwapchainFrameSlotCommand : std::uint8_t
     AcquireNextImage,
     CmdPipelineBarrier,
     QueuePresent,
-    ReleaseSwapchainImages
+    ReleaseSwapchainImages,
+    CmdClearColorImage
 };
 
 enum class VulkanSwapchainFrameSlotResolutionCode : std::uint8_t
@@ -110,7 +112,16 @@ enum class VulkanSwapchainFrameSlotOperationCode : std::uint8_t
     MissingRequiredCommand,
     InvalidDisposition,
     AcquiredImageIndexOutOfRange,
-    CommandFailure
+    CommandFailure,
+    InvalidClearColor
+};
+
+struct VulkanSwapchainFrameClearColor
+{
+    std::array<float, 4> mRgba{ 0.0f, 0.0f, 0.0f, 1.0f };
+
+    friend constexpr bool operator==(const VulkanSwapchainFrameClearColor&,
+                                     const VulkanSwapchainFrameClearColor&) = default;
 };
 
 struct VulkanSwapchainFrameSlotOperationError
@@ -197,11 +208,19 @@ public:
         const VulkanSwapchainGeneration&              swapchain_generation,
         const VulkanSwapchainImagesGeneration&        images_generation) noexcept;
 
+    VulkanSwapchainFrameSlotOperationResult resolveClearPresentationDispatch(
+        const VulkanLogicalDeviceGeneration&          logical_device_generation,
+        const VulkanSwapchainConfigurationGeneration& configuration_generation,
+        const VulkanSwapchainGeneration&              swapchain_generation,
+        const VulkanSwapchainImagesGeneration&        images_generation) noexcept;
+
     // Acquires one image with VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS,
     // transitions it from undefined to present source, submits, presents, and
     // retires both fences. A post-acquire error retains the exact image and
     // semaphore payload in disposition() until retry or cancellation.
     VulkanSwapchainFrameSlotPresentationResult executeAcquireToPresent() noexcept;
+    VulkanSwapchainFrameSlotPresentationResult executeAcquireClearToPresent(
+        const VulkanSwapchainFrameClearColor& clear_color) noexcept;
     VulkanSwapchainFrameSlotPresentationResult retryPresentation() noexcept;
     VulkanSwapchainFrameSlotPresentationResult retryPresentationCompletion() noexcept;
 
@@ -234,6 +253,15 @@ private:
                                        PFN_vkDestroySemaphore                        destroy_semaphore,
                                        PFN_vkDestroyFence                            destroy_fence) noexcept;
 
+    VulkanSwapchainFrameSlotOperationResult resolvePresentationDispatch(
+        const VulkanLogicalDeviceGeneration&          logical_device_generation,
+        const VulkanSwapchainConfigurationGeneration& configuration_generation,
+        const VulkanSwapchainGeneration&              swapchain_generation,
+        const VulkanSwapchainImagesGeneration&        images_generation,
+        bool                                           clear_required) noexcept;
+    VulkanSwapchainFrameSlotPresentationResult executeAcquireToPresent(
+        const VulkanSwapchainFrameClearColor* clear_color) noexcept;
+
     PFN_vkGetInstanceProcAddr              mGetInstanceProcAddr = nullptr;
     VkInstance                             mInstance            = VK_NULL_HANDLE;
     VkSurfaceKHR                           mSurface             = VK_NULL_HANDLE;
@@ -265,6 +293,7 @@ private:
     PFN_vkQueueSubmit                      mQueueSubmit                         = nullptr;
     PFN_vkAcquireNextImageKHR              mAcquireNextImage                    = nullptr;
     PFN_vkCmdPipelineBarrier               mCmdPipelineBarrier                  = nullptr;
+    PFN_vkCmdClearColorImage               mCmdClearColorImage                  = nullptr;
     PFN_vkQueuePresentKHR                  mQueuePresent                        = nullptr;
     PFN_vkReleaseSwapchainImagesKHR        mReleaseSwapchainImages              = nullptr;
     VulkanSwapchainFrameSlotDisposition    mDisposition                         = VulkanSwapchainFrameSlotDisposition::Reusable;
