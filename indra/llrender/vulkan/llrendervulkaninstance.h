@@ -472,6 +472,74 @@ using VulkanSwapchainFrameSlotParentOperationResult =
 using VulkanSwapchainFrameSlotParentPresentationResult =
     std::variant<VulkanSwapchainFrameSlotParentOperationError, VulkanSwapchainFrameSlotPresentationSuccess>;
 
+struct VulkanSwapchainChainRebuildRequest
+{
+    // A missing sample reports a platform geometry-query failure. A present
+    // extent with either dimension zero is a valid suspended-window sample.
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent, queue, native-window, and drawable-geometry changes.
+    std::uint64_t               mNativeWindowGeneration = 0;
+    std::optional<VkExtent2D>   mDrawableExtent;
+    VulkanInstanceOwnerCheck    mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck mWindowGenerationCheck;
+};
+
+enum class VulkanSwapchainChainRebuildOutcome : std::uint8_t
+{
+    Ready,
+    Suspended
+};
+
+enum class VulkanSwapchainChainRebuildPhase : std::uint8_t
+{
+    Preflight,
+    Retirement,
+    Configuration,
+    Swapchain,
+    Images,
+    FrameSlot,
+    FinalFreshness
+};
+
+enum class VulkanSwapchainChainRebuildCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InvalidDrawableExtent,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    NativeWindowGenerationMismatch,
+    NativeAcquisitionInProgress,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    FrameSlotResetRefused,
+    DeviceRecoveryRequired,
+    ChildFailure,
+    PublicationFailure,
+    RollbackFailure
+};
+
+using VulkanSwapchainChainRebuildChildError =
+    std::variant<std::monostate, VulkanSwapchainConfigurationAcquireError, VulkanSwapchainAcquireError,
+                 VulkanSwapchainImagesAcquireError, VulkanSwapchainFrameSlotAcquireError>;
+
+struct VulkanSwapchainChainRebuildError
+{
+    VulkanSwapchainChainRebuildCode                    mCode  = VulkanSwapchainChainRebuildCode::InvalidInstanceOwnerCheck;
+    VulkanSwapchainChainRebuildPhase                   mPhase = VulkanSwapchainChainRebuildPhase::Preflight;
+    VulkanSwapchainChainRebuildChildError              mChildError;
+    std::optional<VulkanSwapchainFrameSlotDisposition> mFrameSlotDisposition;
+
+    friend constexpr bool operator==(const VulkanSwapchainChainRebuildError&,
+                                     const VulkanSwapchainChainRebuildError&) = default;
+};
+
+using VulkanSwapchainChainRebuildResult =
+    std::variant<VulkanSwapchainChainRebuildError, VulkanSwapchainChainRebuildOutcome>;
+
 // This generation owns the Vulkan objects but borrows the loader behind the
 // originating window's resolver. It must be reset before that window destroys
 // its requirements generation or releases its loader references. If it owns a
@@ -480,7 +548,8 @@ using VulkanSwapchainFrameSlotParentPresentationResult =
 // pending, and no swapchain image remains acquired before destruction or any
 // reset that can transitively destroy it. Destruction while the frame-slot
 // disposition names an acquired or pending obligation violates the caller
-// contract; the bool reset APIs only provide a defensive live-owner guard.
+// contract. The bool reset APIs defensively retain the live owner for those
+// obligations and while an unpublished native acquisition candidate exists.
 class VulkanInstanceGeneration
 {
 public:
@@ -490,6 +559,8 @@ public:
 
     VulkanInstanceGeneration(const VulkanInstanceGeneration&)            = delete;
     VulkanInstanceGeneration& operator=(const VulkanInstanceGeneration&) = delete;
+    // A move attempted from a generation guarded by an in-progress native
+    // acquisition leaves that source intact and produces an empty destination.
     VulkanInstanceGeneration(VulkanInstanceGeneration&& other) noexcept;
     VulkanInstanceGeneration& operator=(VulkanInstanceGeneration&&) = delete;
 
@@ -564,6 +635,7 @@ public:
     VulkanSwapchainAcquireResult          acquireSwapchainGeneration(const VulkanSwapchainRequest& request) noexcept;
     VulkanSwapchainImagesAcquireResult    acquireSwapchainImagesGeneration(const VulkanSwapchainImagesRequest& request) noexcept;
     VulkanSwapchainFrameSlotAcquireResult acquireSwapchainFrameSlotGeneration(const VulkanSwapchainFrameSlotRequest& request) noexcept;
+    VulkanSwapchainChainRebuildResult      rebuildSwapchainChain(const VulkanSwapchainChainRebuildRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentOperationResult retryEmptySwapchainFrameSlotCompletion(
@@ -580,8 +652,9 @@ public:
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     // No operation may still use the slot's fence or semaphore, and its command
     // buffer must not be pending. Callers externally serialize these resets.
-    // False leaves this generation and every parent intact because submitted
-    // work or an acquired image still has an outstanding obligation.
+    // False leaves this generation and every parent intact. It can report an
+    // outstanding submitted/acquired frame obligation, or an in-progress native
+    // child acquisition. The latter refuses even an otherwise idempotent reset.
     bool resetSwapchainFrameSlotGeneration() noexcept;
     bool resetSwapchainImagesGeneration() noexcept;
     bool resetSwapchainGeneration() noexcept;
@@ -595,6 +668,7 @@ public:
 private:
     friend struct VulkanInstanceGenerationFactory;
 
+    class NativeAcquisitionGuard;
     class VulkanSurfaceGeneration;
 
     VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
@@ -607,6 +681,8 @@ private:
                              PFN_vkDestroyInstance               destroy_instance,
                              VkDebugUtilsMessengerEXT            debug_messenger,
                              PFN_vkDestroyDebugUtilsMessengerEXT destroy_debug_messenger) noexcept;
+
+    void noteOwnershipTransition() noexcept { ++mOwnershipTransitionEpoch; }
 
     std::optional<VulkanGlobalDispatchGeneration>           mGlobalDispatch;
     std::unique_ptr<ValidationState>                        mValidationState;
@@ -625,6 +701,8 @@ private:
     std::unique_ptr<VulkanSwapchainGeneration>              mSwapchainGeneration;
     std::unique_ptr<VulkanSwapchainImagesGeneration>        mSwapchainImagesGeneration;
     std::unique_ptr<VulkanSwapchainFrameSlotGeneration>     mSwapchainFrameSlotGeneration;
+    std::uint64_t                                           mOwnershipTransitionEpoch = 0;
+    std::size_t                                             mNativeAcquisitionDepth   = 0;
 };
 
 using VulkanInstanceAcquireResult = std::variant<VulkanInstanceAcquireError, VulkanInstanceGeneration>;
@@ -667,6 +745,10 @@ namespace VulkanInstanceDetail
     VulkanSwapchainFrameSlotAcquireResult acquireSwapchainFrameSlot(VulkanInstanceGeneration&              instance_generation,
                                                                     const VulkanSwapchainFrameSlotRequest& request,
                                                                     AllocationCheckpoint                   allocation_checkpoint) noexcept;
+
+    VulkanSwapchainChainRebuildResult rebuildSwapchainChain(VulkanInstanceGeneration&                 instance_generation,
+                                                             const VulkanSwapchainChainRebuildRequest& request,
+                                                             AllocationCheckpoint                      allocation_checkpoint) noexcept;
 
 } // namespace VulkanInstanceDetail
 

@@ -88,6 +88,10 @@ struct LLWindowMacOSXVulkanOperations
         VkInstance                   instance,
         const VkAllocationCallbacks* allocator,
         VkSurfaceKHR*                surface) noexcept = nullptr;
+    bool (*mResizeNativeWindowForDiagnostic)(void*                             userdata,
+                                             LLWindowMacOSXVulkanNativeWindow& window,
+                                             U32                               backing_width,
+                                             U32                               backing_height) noexcept = nullptr;
 };
 
 enum class LLWindowMacOSXVulkanAcquireCode : U8
@@ -140,6 +144,7 @@ public:
     U32                               drawableWidth() const noexcept { return mNativeWindow.mDrawableWidth; }
     U32                               drawableHeight() const noexcept { return mNativeWindow.mDrawableHeight; }
     bool                              refreshNativeGeometry() noexcept;
+    bool                              resizeNativeDrawableForDiagnostic(U32 backing_width, U32 backing_height) noexcept;
     bool                              hasRequirements() const noexcept { return mRequirements.has_value(); }
     const LLWindowVulkanRequirements* requirements() const noexcept { return mRequirements ? &*mRequirements : nullptr; }
     bool                              isGenerationCurrent(U64 native_window_generation) const noexcept;
@@ -153,6 +158,7 @@ public:
     LLRenderVulkan::VulkanSwapchainAcquireResult              acquireSwapchainGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainImagesAcquireResult        acquireSwapchainImagesGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult     acquireSwapchainFrameSlotGeneration() noexcept;
+    LLRenderVulkan::VulkanSwapchainChainRebuildResult         rebuildSwapchainChain() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult retryEmptySwapchainFrameSlotCompletion() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult acquireToPresentSwapchainFrameSlot() noexcept;
@@ -197,6 +203,13 @@ private:
     using FrameSlotResult = std::variant<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError,
                                          LLRenderVulkan::VulkanSwapchainFrameSlotDisposition,
                                          LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>;
+    enum class NativeGeometryObservation : U8
+    {
+        Ready,
+        Suspended,
+        Stale
+    };
+    NativeGeometryObservation observeNativeGeometry(LLWindowMacOSXVulkanNativeWindow& refreshed) noexcept;
     FrameSlotResult operateSwapchainFrameSlot(FrameSlotOperation operation) noexcept;
 
     LLWindowMacOSXVulkanOperations                            mOperations;

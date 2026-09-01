@@ -103,14 +103,14 @@ void clear_native(LLWindowMacOSXVulkanNative* native) noexcept
 
 bool checked_dimension(CGFloat value, uint32_t& dimension) noexcept
 {
-    if (!std::isfinite(static_cast<double>(value)) || value <= 0.0 ||
+    if (!std::isfinite(static_cast<double>(value)) || value < 0.0 ||
         value > static_cast<CGFloat>(std::numeric_limits<uint32_t>::max()))
     {
         return false;
     }
 
     const double rounded = std::floor(static_cast<double>(value) + 0.5);
-    if (rounded <= 0.0 || rounded > std::numeric_limits<uint32_t>::max())
+    if (rounded < 0.0 || rounded > std::numeric_limits<uint32_t>::max())
     {
         return false;
     }
@@ -159,7 +159,8 @@ LLWindowMacOSXVulkanStatus describe_native(
         native->contents_scale = static_cast<double>(scale);
         native->drawable_width = drawable_width;
         native->drawable_height = drawable_height;
-        return LLWINDOWMACOSXVULKAN_STATUS_SUCCESS;
+        return drawable_width == 0 || drawable_height == 0 ? LLWINDOWMACOSXVULKAN_STATUS_DRAWABLE_UNAVAILABLE
+                                                           : LLWINDOWMACOSXVULKAN_STATUS_SUCCESS;
     }
     @catch (NSException*)
     {
@@ -390,6 +391,71 @@ LLWindowMacOSXVulkanStatus create_native(
         }
     }
 }
+
+LLWindowMacOSXVulkanStatus resize_native_for_diagnostic(
+    uint32_t backing_width,
+    uint32_t backing_height,
+    LLWindowMacOSXVulkanNative* native) noexcept
+{
+    if (!native || !native->token)
+    {
+        return LLWINDOWMACOSXVULKAN_STATUS_INVALID_ARGUMENT;
+    }
+
+    @try
+    {
+        if (![NSThread isMainThread])
+        {
+            return LLWINDOWMACOSXVULKAN_STATUS_MAIN_THREAD_REQUIRED;
+        }
+
+        NativeToken* token = static_cast<NativeToken*>(native->token);
+        if (!token || native->window != (void*)token->window || native->view != (void*)token->view ||
+            native->layer != (void*)token->layer)
+        {
+            return LLWINDOWMACOSXVULKAN_STATUS_INVALID_ARGUMENT;
+        }
+
+        @autoreleasepool
+        {
+            const NSRect requested_backing = NSMakeRect(
+                0.0,
+                0.0,
+                static_cast<CGFloat>(backing_width),
+                static_cast<CGFloat>(backing_height));
+            const NSRect requested_points = [token->view convertRectFromBacking:requested_backing];
+            if (!std::isfinite(static_cast<double>(requested_points.size.width)) ||
+                !std::isfinite(static_cast<double>(requested_points.size.height)) ||
+                requested_points.size.width < 0.0 || requested_points.size.height < 0.0)
+            {
+                return LLWINDOWMACOSXVULKAN_STATUS_GEOMETRY_FAILED;
+            }
+
+            [token->window setContentSize:requested_points.size];
+            [token->view setFrame:NSMakeRect(
+                0.0,
+                0.0,
+                requested_points.size.width,
+                requested_points.size.height)];
+
+            const LLWindowMacOSXVulkanStatus described = describe_native(token, native);
+            if ((described != LLWINDOWMACOSXVULKAN_STATUS_SUCCESS &&
+                 described != LLWINDOWMACOSXVULKAN_STATUS_DRAWABLE_UNAVAILABLE) ||
+                native->drawable_width != backing_width || native->drawable_height != backing_height)
+            {
+                return described == LLWINDOWMACOSXVULKAN_STATUS_SUCCESS ||
+                               described == LLWINDOWMACOSXVULKAN_STATUS_DRAWABLE_UNAVAILABLE
+                           ? LLWINDOWMACOSXVULKAN_STATUS_GEOMETRY_FAILED
+                           : described;
+            }
+            return described;
+        }
+    }
+    @catch (NSException*)
+    {
+        return LLWINDOWMACOSXVULKAN_STATUS_GEOMETRY_FAILED;
+    }
+}
 } // namespace
 
 LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_create(
@@ -433,6 +499,21 @@ LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_refresh(
         {
             return LLWINDOWMACOSXVULKAN_STATUS_GEOMETRY_FAILED;
         }
+    }
+    catch (...)
+    {
+        return LLWINDOWMACOSXVULKAN_STATUS_GEOMETRY_FAILED;
+    }
+}
+
+LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_resize_for_diagnostic(
+    uint32_t backing_width,
+    uint32_t backing_height,
+    LLWindowMacOSXVulkanNative* native) noexcept
+{
+    try
+    {
+        return resize_native_for_diagnostic(backing_width, backing_height, native);
     }
     catch (...)
     {

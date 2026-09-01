@@ -132,6 +132,8 @@ struct FakeState
     VkDevice                   mDevice    = reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(0x22220));
     VkQueue                    mQueue     = reinterpret_cast<VkQueue>(static_cast<std::uintptr_t>(0x33330));
     VkSwapchainKHR             mSwapchain = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(0x44440));
+    std::size_t                mCreateSwapchainCalls  = 0;
+    std::size_t                mDestroySwapchainCalls = 0;
     VkSurfaceCapabilitiesKHR   mSurfaceCapabilities{};
     std::array<VkImage, 3>     mImages{ reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x51000)),
                                     reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x52000)),
@@ -522,12 +524,20 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSwapchain(VkDevice device,
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    ++gVulkanState->mCreateSwapchainCalls;
     *swapchain = gVulkanState->mSwapchain;
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL fakeDestroySwapchain(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks*) noexcept
+VKAPI_ATTR void VKAPI_CALL fakeDestroySwapchain(VkDevice device,
+                                                VkSwapchainKHR swapchain,
+                                                const VkAllocationCallbacks*) noexcept
 {
+    if (gVulkanState && device == gVulkanState->mDevice && swapchain == gVulkanState->mSwapchain)
+    {
+        ++gVulkanState->mDestroySwapchainCalls;
+        gVulkanState->mNextImageView = 0;
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeGetSwapchainImages(VkDevice       device,
@@ -1106,6 +1116,9 @@ void window_sdl_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainFrameSlotGeneration()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainFrameSlotGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain()),
+                                 LLRenderVulkan::VulkanSwapchainChainRebuildResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain()));
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().roundTripEmptySwapchainFrameSlot()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().roundTripEmptySwapchainFrameSlot()));
@@ -2032,6 +2045,94 @@ void window_sdl_vulkan_object::test<18>()
                state.mDrawableSizeCalls == drawable_queries_before_cancel && state.mReleaseSwapchainImagesCalls == 1 &&
                !instance->swapchainFrameAcquiredImageIndex());
     ensure("the recovered presentation owner tears down child-first", owner->resetSwapchainFrameSlotGeneration() && owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<19>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 161, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("swapchain rebuild adapter fixture acquires a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->rebuildSwapchainChain();
+    const auto* missing_error    = std::get_if<VulkanSwapchainChainRebuildError>(&missing_instance);
+    ensure("swapchain rebuild requires a live instance before sampling SDL pixels",
+           missing_error && missing_error->mCode == VulkanSwapchainChainRebuildCode::InstanceNotLive &&
+               missing_error->mPhase == VulkanSwapchainChainRebuildPhase::Preflight && state.mDrawableSizeCalls == 0);
+
+    ensure("the rebuild adapter fixture acquires the complete initial chain", acquireCompleteFrameSlot(*owner));
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("the rebuild adapter fixture retains its exact live parent chain",
+           instance && instance->surface() == fakeSurface() && instance->physicalDevice() == state.mPhysicalDevice &&
+               instance->logicalDevice() == state.mDevice && instance->presentationQueue() == state.mQueue);
+
+    const std::size_t queries_before_invalid = state.mDrawableSizeCalls;
+    state.mDrawableSizeSucceeds              = false;
+    const auto failed_query        = owner->rebuildSwapchainChain();
+    const auto* failed_query_error = std::get_if<VulkanSwapchainChainRebuildError>(&failed_query);
+    ensure("an SDL pixel-query failure is one typed invalid-extent sample",
+           failed_query_error && failed_query_error->mCode == VulkanSwapchainChainRebuildCode::InvalidDrawableExtent &&
+               failed_query_error->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+               state.mDrawableSizeCalls == queries_before_invalid + 1);
+    ensure("an SDL pixel-query failure leaves the complete chain intact",
+           instance->hasSwapchainConfigurationGeneration() && instance->hasSwapchainGeneration() &&
+               instance->hasSwapchainImagesGeneration() && instance->hasSwapchainFrameSlotGeneration() &&
+               state.mCreateSwapchainCalls == 1 && state.mDestroySwapchainCalls == 0);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = -1;
+    state.mDrawableHeight       = 900;
+    const auto negative_width   = owner->rebuildSwapchainChain();
+    const auto* negative_error  = std::get_if<VulkanSwapchainChainRebuildError>(&negative_width);
+    ensure("a negative SDL pixel dimension is one typed invalid-extent sample",
+           negative_error && negative_error->mCode == VulkanSwapchainChainRebuildCode::InvalidDrawableExtent &&
+               negative_error->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+               state.mDrawableSizeCalls == queries_before_invalid + 2 && instance->hasSwapchainFrameSlotGeneration());
+
+    state.mDrawableWidth  = 0;
+    state.mDrawableHeight = 900;
+    const auto suspended          = owner->rebuildSwapchainChain();
+    const auto* suspended_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&suspended);
+    ensure("a zero SDL pixel dimension suspends the swapchain chain",
+           suspended_outcome && *suspended_outcome == VulkanSwapchainChainRebuildOutcome::Suspended &&
+               state.mDrawableSizeCalls == queries_before_invalid + 3);
+    ensure("suspension removes all four swapchain children",
+           !instance->hasSwapchainConfigurationGeneration() && !instance->hasSwapchainGeneration() &&
+               !instance->hasSwapchainImagesGeneration() && !instance->hasSwapchainFrameSlotGeneration() &&
+               state.mCreateSwapchainCalls == 1 && state.mDestroySwapchainCalls == 1);
+    ensure("suspension preserves the exact SDL instance, surface, physical device, logical device, and queue",
+           owner->instanceGeneration() == instance && instance->surface() == fakeSurface() &&
+               instance->physicalDevice() == state.mPhysicalDevice && instance->logicalDevice() == state.mDevice &&
+               instance->presentationQueue() == state.mQueue && owner->isGenerationCurrent(161));
+
+    state.mDrawableWidth  = 1600;
+    state.mDrawableHeight = 900;
+    const auto rebuilt          = owner->rebuildSwapchainChain();
+    const auto* rebuilt_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuilt);
+    ensure("one later nonzero SDL sample rebuilds the complete chain",
+           rebuilt_outcome && *rebuilt_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               state.mDrawableSizeCalls == queries_before_invalid + 4);
+    ensure("the rebuilt configuration retains the new SDL backing-pixel extent",
+           instance->hasSwapchainConfigurationGeneration() && instance->swapchainDrawableExtent().width == 1600 &&
+               instance->swapchainDrawableExtent().height == 900);
+    ensure("the rebuilt chain owns a swapchain, images, views, and frame slot",
+           instance->hasSwapchainGeneration() && instance->hasSwapchainImagesGeneration() &&
+               instance->resolvedSwapchainImageCount() == state.mImages.size() &&
+               instance->hasSwapchainFrameSlotGeneration() && state.mCreateSwapchainCalls == 2 &&
+               state.mDestroySwapchainCalls == 1);
+    ensure("the rebuilt chain still belongs to the exact SDL owner and native-window generation",
+           owner->instanceGeneration() == instance && instance->nativeWindowGeneration() == 161 && owner->isGenerationCurrent(161));
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    ensure("the rebuilt SDL owner tears down child-first", owner->reset());
+    ensure_equals("both earned swapchains are destroyed once", state.mDestroySwapchainCalls, std::size_t{ 2 });
 }
 
 } // namespace tut

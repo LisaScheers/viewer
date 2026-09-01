@@ -39,6 +39,7 @@ namespace
 {
 
 constexpr const char* NATIVE_SMOKE_ENVIRONMENT = "LL_RUN_VULKAN_SDL_WSI_NATIVE";
+constexpr const char* NATIVE_SMOKE_TITLE       = "SDL Vulkan native smoke";
 
 struct SDLState
 {
@@ -61,6 +62,30 @@ bool nativeSmokeRequested()
 {
     const char* value = std::getenv(NATIVE_SMOKE_ENVIRONMENT);
     return value && std::string_view(value) == "1";
+}
+
+SDL_Window* findNativeSmokeWindow()
+{
+    int          window_count = 0;
+    SDL_Window** windows      = SDL_GetWindows(&window_count);
+    SDL_Window*  match        = nullptr;
+    for (int index = 0; windows && index < window_count; ++index)
+    {
+        const SDL_WindowFlags flags = SDL_GetWindowFlags(windows[index]);
+        const char*           title = SDL_GetWindowTitle(windows[index]);
+        if ((flags & SDL_WINDOW_VULKAN) != 0 && (flags & SDL_WINDOW_OPENGL) == 0 && title &&
+            std::strcmp(title, NATIVE_SMOKE_TITLE) == 0)
+        {
+            if (match)
+            {
+                match = nullptr;
+                break;
+            }
+            match = windows[index];
+        }
+    }
+    SDL_free(windows);
+    return match;
 }
 
 std::uint32_t expectedImageCount(const VkSurfaceCapabilitiesKHR& capabilities)
@@ -158,7 +183,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     const SDLState    initial_sdl_state      = currentSDLState();
     const bool        initial_gl_manager     = gGLManager.mInited;
 
-    LLWindow* window = LLWindowManager::createWindow(nullptr, "SDL Vulkan native smoke", "llwindowvulkansdlwsi", 0, 0, 64, 64,
+    LLWindow* window = LLWindowManager::createWindow(nullptr, NATIVE_SMOKE_TITLE, "llwindowvulkansdlwsi", 0, 0, 64, 64,
                                                      LLWindow::GraphicsAPI::Vulkan, LLWindow::FLAG_CREATE_HIDDEN);
 
     bool created                  = window != nullptr;
@@ -167,6 +192,8 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool x11_driver               = created && SDL_GetCurrentVideoDriver() && std::strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0;
     bool no_gl_context            = created && SDL_GL_GetCurrentContext() == nullptr;
     bool no_gl_manager            = created && !gGLManager.mInited;
+    SDL_Window* native_sdl_window = created ? findNativeSmokeWindow() : nullptr;
+    bool native_sdl_window_exact  = native_sdl_window != nullptr;
     bool requirements_published   = false;
     bool generation_current       = false;
     bool resolver_identity        = false;
@@ -217,6 +244,13 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool frame_slot_acquired               = false;
     bool frame_slot_handles_nonnull        = false;
     bool frame_slot_provenance_exact       = false;
+    bool swapchain_resize_requested        = false;
+    bool swapchain_resize_synchronized     = false;
+    bool swapchain_resize_observed         = false;
+    bool swapchain_rebuild_ready           = false;
+    bool swapchain_rebuild_parent_exact    = false;
+    bool swapchain_rebuild_chain_complete  = false;
+    bool swapchain_rebuild_extent_exact    = false;
     bool frame_slot_first_presentation     = false;
     bool frame_slot_second_presentation    = false;
     bool frame_slot_handles_untouched      = false;
@@ -339,7 +373,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
                                              instance_generation->swapchainSurface() != VK_NULL_HANDLE &&
                                              instance_generation->swapchainSurface() == instance_generation->surface();
                 swapchain_images_acquired       = instance_generation->hasSwapchainImagesGeneration();
-                const std::uint32_t image_count = instance_generation->resolvedSwapchainImageCount();
+                std::uint32_t image_count = instance_generation->resolvedSwapchainImageCount();
                 swapchain_images_nonempty       = image_count != 0;
                 swapchain_image_views_complete  = swapchain_images_nonempty;
                 for (std::uint32_t index = 0; swapchain_image_views_complete && index < image_count; ++index)
@@ -364,29 +398,88 @@ void window_vulkan_sdl_wsi_object::test<1>()
 
                 if (frame_slot_provenance_exact && drawable_queried)
                 {
-                    auto*             mutable_generation       = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
+                    auto* mutable_generation = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
+                    FrameSlotOperationContext operation_context{ static_cast<const LLWindowSDL*>(window), instance_generation };
+                    const VkInstance       retained_instance        = instance_generation->instance();
+                    const VkSurfaceKHR     retained_surface         = instance_generation->surface();
+                    const VkPhysicalDevice retained_physical_device = instance_generation->physicalDevice();
+                    const VkDevice         retained_logical_device  = instance_generation->logicalDevice();
+                    const VkQueue          retained_queue           = instance_generation->presentationQueue();
+
+                    const LLCoordScreen requested_size(current_drawable.mX + 32, current_drawable.mY + 24);
+                    swapchain_resize_requested = window->setSize(requested_size);
+                    swapchain_resize_synchronized =
+                        swapchain_resize_requested && native_sdl_window && SDL_SyncWindow(native_sdl_window);
+                    LLCoordWindow resized_drawable;
+                    swapchain_resize_observed = window->getSize(&resized_drawable) && resized_drawable.mX > 0 &&
+                                                resized_drawable.mY > 0 && resized_drawable.mX != current_drawable.mX &&
+                                                resized_drawable.mY != current_drawable.mY;
+
+                    LLRenderVulkan::VulkanSwapchainChainRebuildRequest rebuild_request;
+                    rebuild_request.mNativeWindowGeneration = requirements->nativeWindowGeneration();
+                    if (swapchain_resize_observed)
+                    {
+                        rebuild_request.mDrawableExtent = VkExtent2D{ static_cast<std::uint32_t>(resized_drawable.mX),
+                                                                     static_cast<std::uint32_t>(resized_drawable.mY) };
+                    }
+                    rebuild_request.mInstanceOwnerCheck    = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+                    rebuild_request.mWindowGenerationCheck = { &operation_context, frameSlotWindowGenerationIsCurrent };
+
+                    // The native proof calls the diagnostic core operation directly.
+                    // LLWindowSDL keeps its production forwarding API unchanged.
+                    const auto rebuild_result = mutable_generation->rebuildSwapchainChain(rebuild_request);
+                    const auto* rebuild_outcome =
+                        std::get_if<LLRenderVulkan::VulkanSwapchainChainRebuildOutcome>(&rebuild_result);
+                    swapchain_rebuild_ready = rebuild_outcome &&
+                                              *rebuild_outcome == LLRenderVulkan::VulkanSwapchainChainRebuildOutcome::Ready;
+                    swapchain_rebuild_parent_exact =
+                        instance_generation->instance() == retained_instance && instance_generation->surface() == retained_surface &&
+                        instance_generation->physicalDevice() == retained_physical_device &&
+                        instance_generation->logicalDevice() == retained_logical_device &&
+                        instance_generation->presentationQueue() == retained_queue;
+                    image_count = instance_generation->resolvedSwapchainImageCount();
+                    bool rebuilt_image_views_complete = image_count != 0;
+                    for (std::uint32_t index = 0; rebuilt_image_views_complete && index < image_count; ++index)
+                    {
+                        rebuilt_image_views_complete = instance_generation->swapchainImage(index) != VK_NULL_HANDLE &&
+                                                       instance_generation->swapchainImageView(index) != VK_NULL_HANDLE;
+                    }
+                    swapchain_rebuild_chain_complete = instance_generation->hasSwapchainConfigurationGeneration() &&
+                                                       instance_generation->hasSwapchainGeneration() &&
+                                                       instance_generation->swapchain() != VK_NULL_HANDLE &&
+                                                       instance_generation->hasSwapchainImagesGeneration() &&
+                                                       rebuilt_image_views_complete &&
+                                                       instance_generation->hasSwapchainFrameSlotGeneration() &&
+                                                       instance_generation->swapchainFrameCommandPool() != VK_NULL_HANDLE &&
+                                                       instance_generation->swapchainFrameCommandBuffer() != VK_NULL_HANDLE;
+                    const VkExtent2D rebuilt_drawable = instance_generation->swapchainDrawableExtent();
+                    swapchain_rebuild_extent_exact =
+                        swapchain_resize_observed && rebuilt_drawable.width == static_cast<std::uint32_t>(resized_drawable.mX) &&
+                        rebuilt_drawable.height == static_cast<std::uint32_t>(resized_drawable.mY);
+
                     const VkSemaphore image_available          = instance_generation->swapchainFrameImageAvailableSemaphore();
                     const VkSemaphore presentation_ready       = instance_generation->swapchainFramePresentationReadySemaphore();
                     const VkFence     submission_fence         = instance_generation->swapchainFrameSubmissionFence();
                     const VkFence     present_completion_fence = instance_generation->swapchainFramePresentCompletionFence();
-                    FrameSlotOperationContext operation_context{ static_cast<const LLWindowSDL*>(window), instance_generation };
                     LLRenderVulkan::VulkanSwapchainFrameSlotOperationRequest operation_request;
                     operation_request.mNativeWindowGeneration = requirements->nativeWindowGeneration();
-                    operation_request.mDrawableExtent         = { static_cast<std::uint32_t>(current_drawable.mX),
-                                                                  static_cast<std::uint32_t>(current_drawable.mY) };
+                    operation_request.mDrawableExtent         = rebuilt_drawable;
                     operation_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
                     operation_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
 
-                    const auto first_result       = mutable_generation->acquireToPresentSwapchainFrameSlot(operation_request);
-                    frame_slot_first_presentation = presentationCompleted(first_result, image_count) &&
-                                                    instance_generation->swapchainFrameSlotDisposition() ==
-                                                        LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
-                                                    !instance_generation->swapchainFrameAcquiredImageIndex();
-                    const auto second_result       = mutable_generation->acquireToPresentSwapchainFrameSlot(operation_request);
-                    frame_slot_second_presentation = presentationCompleted(second_result, image_count) &&
-                                                     instance_generation->swapchainFrameSlotDisposition() ==
-                                                         LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
-                                                     !instance_generation->swapchainFrameAcquiredImageIndex();
+                    if (swapchain_rebuild_ready && swapchain_rebuild_chain_complete && swapchain_rebuild_extent_exact)
+                    {
+                        const auto first_result       = mutable_generation->acquireToPresentSwapchainFrameSlot(operation_request);
+                        frame_slot_first_presentation = presentationCompleted(first_result, image_count) &&
+                                                        instance_generation->swapchainFrameSlotDisposition() ==
+                                                            LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                        !instance_generation->swapchainFrameAcquiredImageIndex();
+                        const auto second_result       = mutable_generation->acquireToPresentSwapchainFrameSlot(operation_request);
+                        frame_slot_second_presentation = presentationCompleted(second_result, image_count) &&
+                                                         instance_generation->swapchainFrameSlotDisposition() ==
+                                                             LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                         !instance_generation->swapchainFrameAcquiredImageIndex();
+                    }
                     frame_slot_handles_untouched = image_available != VK_NULL_HANDLE && presentation_ready != VK_NULL_HANDLE &&
                                                    submission_fence != VK_NULL_HANDLE && present_completion_fence != VK_NULL_HANDLE &&
                                                    instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
@@ -472,6 +565,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the native claim runs against SDL's X11 driver", x11_driver);
     ensure("the Vulkan path creates no current OpenGL context", no_gl_context);
     ensure("the Vulkan path does not initialize the OpenGL manager", no_gl_manager);
+    ensure("the native proof identifies the exact Vulkan-only SDL window", native_sdl_window_exact);
     ensure("the window publishes immutable Vulkan instance requirements", requirements_published);
     ensure("the window accepts only its current nonzero native generation", generation_current);
     ensure("the requirements retain SDL's exact resolver", resolver_identity);
@@ -519,10 +613,19 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the automatic frame slot owns all six non-null command and synchronization handles", frame_slot_handles_nonnull);
     ensure("the frame slot retains the exact live queue-family, device, configuration, swapchain, and image parents",
            frame_slot_provenance_exact);
-    ensure("the native SDL owner completes the first acquire-to-present cycle", frame_slot_first_presentation);
-    ensure("the native SDL owner completes the second acquire-to-present cycle", frame_slot_second_presentation);
-    ensure("both presentation cycles retain all four synchronization handles", frame_slot_handles_untouched);
-    ensure("both presentation cycles emit no validation messages", frame_slot_presentation_clean);
+    ensure("the native X11 diagnostic requests a nonzero window resize", swapchain_resize_requested);
+    ensure("SDL applies the asynchronous X11 resize before the drawable query", swapchain_resize_synchronized);
+    ensure("SDL reports a different nonzero backing-pixel extent after the resize", swapchain_resize_observed);
+    ensure("the explicit diagnostic core call rebuilds the swapchain chain", swapchain_rebuild_ready);
+    ensure("swapchain rebuild preserves the exact instance, surface, physical device, logical device, and queue",
+           swapchain_rebuild_parent_exact);
+    ensure("swapchain rebuild publishes a fresh complete configuration, swapchain, image, view, and frame-slot chain",
+           swapchain_rebuild_chain_complete);
+    ensure("the rebuilt configuration retains the resized X11 backing-pixel extent", swapchain_rebuild_extent_exact);
+    ensure("the rebuilt native SDL owner completes the first acquire-to-present cycle", frame_slot_first_presentation);
+    ensure("the rebuilt native SDL owner completes the second acquire-to-present cycle", frame_slot_second_presentation);
+    ensure("both post-rebuild presentation cycles retain all four synchronization handles", frame_slot_handles_untouched);
+    ensure("rebuild and both post-rebuild presentation cycles emit no validation messages", frame_slot_presentation_clean);
     ensure("the native smoke explicitly resets the frame-slot child before its parents", frame_slot_explicitly_reset);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
     ensure("explicit frame-slot reset removes the generation and all six owned handles", frame_slot_removed);

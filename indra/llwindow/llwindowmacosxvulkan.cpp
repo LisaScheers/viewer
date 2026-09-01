@@ -93,6 +93,7 @@ LLWindowMacOSXVulkanNativeCreateCode nativeFailureCode(LLWindowMacOSXVulkanStatu
             return LLWindowMacOSXVulkanNativeCreateCode::ViewFailure;
         case LLWINDOWMACOSXVULKAN_STATUS_LAYER_FAILED:
             return LLWindowMacOSXVulkanNativeCreateCode::LayerFailure;
+        case LLWINDOWMACOSXVULKAN_STATUS_DRAWABLE_UNAVAILABLE:
         case LLWINDOWMACOSXVULKAN_STATUS_GEOMETRY_FAILED:
         case LLWINDOWMACOSXVULKAN_STATUS_DESTROY_FAILED:
             return LLWindowMacOSXVulkanNativeCreateCode::GeometryFailure;
@@ -164,7 +165,24 @@ LLWindowMacOSXVulkanNativeCreateResult createNativeWindow(void*, const LLWindowM
 bool refreshNativeWindow(void*, LLWindowMacOSXVulkanNativeWindow& native_window) noexcept
 {
     LLWindowMacOSXVulkanNative native = bridgeNative(native_window);
-    if (llwindow_macosx_vulkan_native_refresh(&native) != LLWINDOWMACOSXVULKAN_STATUS_SUCCESS)
+    const LLWindowMacOSXVulkanStatus status = llwindow_macosx_vulkan_native_refresh(&native);
+    if (status != LLWINDOWMACOSXVULKAN_STATUS_SUCCESS && status != LLWINDOWMACOSXVULKAN_STATUS_DRAWABLE_UNAVAILABLE)
+    {
+        return false;
+    }
+    native_window = ownedNative(native);
+    return true;
+}
+
+bool resizeNativeWindowForDiagnostic(void*,
+                                     LLWindowMacOSXVulkanNativeWindow& native_window,
+                                     U32                               backing_width,
+                                     U32                               backing_height) noexcept
+{
+    LLWindowMacOSXVulkanNative native = bridgeNative(native_window);
+    const LLWindowMacOSXVulkanStatus status =
+        llwindow_macosx_vulkan_native_resize_for_diagnostic(backing_width, backing_height, &native);
+    if (status != LLWINDOWMACOSXVULKAN_STATUS_SUCCESS && status != LLWINDOWMACOSXVULKAN_STATUS_DRAWABLE_UNAVAILABLE)
     {
         return false;
     }
@@ -351,15 +369,8 @@ LLWindowMacOSXVulkan& LLWindowMacOSXVulkan::operator=(LLWindowMacOSXVulkan&& oth
 
 bool LLWindowMacOSXVulkan::refreshNativeGeometry() noexcept
 {
-    if (!validIdentity(mNativeWindow) || !mOperations.mIsMainThread ||
-        !mOperations.mIsMainThread(mOperations.mUserdata) || !mOperations.mRefreshNativeWindow)
-    {
-        return false;
-    }
-
-    LLWindowMacOSXVulkanNativeWindow refreshed = mNativeWindow;
-    if (!mOperations.mRefreshNativeWindow(mOperations.mUserdata, refreshed) || !sameIdentity(mNativeWindow, refreshed) ||
-        !validGeometry(refreshed))
+    LLWindowMacOSXVulkanNativeWindow refreshed;
+    if (observeNativeGeometry(refreshed) != NativeGeometryObservation::Ready)
     {
         return false;
     }
@@ -367,6 +378,51 @@ bool LLWindowMacOSXVulkan::refreshNativeGeometry() noexcept
     mNativeWindow.mBackingScale   = refreshed.mBackingScale;
     mNativeWindow.mDrawableWidth  = refreshed.mDrawableWidth;
     mNativeWindow.mDrawableHeight = refreshed.mDrawableHeight;
+    return true;
+}
+
+LLWindowMacOSXVulkan::NativeGeometryObservation LLWindowMacOSXVulkan::observeNativeGeometry(
+    LLWindowMacOSXVulkanNativeWindow& refreshed) noexcept
+{
+    if (!validIdentity(mNativeWindow) || !mOperations.mIsMainThread ||
+        !mOperations.mIsMainThread(mOperations.mUserdata) || !mOperations.mRefreshNativeWindow)
+    {
+        return NativeGeometryObservation::Stale;
+    }
+
+    refreshed = mNativeWindow;
+    if (!mOperations.mRefreshNativeWindow(mOperations.mUserdata, refreshed) || !sameIdentity(mNativeWindow, refreshed) ||
+        !std::isfinite(refreshed.mBackingScale) || refreshed.mBackingScale <= 0.0)
+    {
+        return NativeGeometryObservation::Stale;
+    }
+    if (refreshed.mDrawableWidth == 0 || refreshed.mDrawableHeight == 0)
+    {
+        return NativeGeometryObservation::Suspended;
+    }
+    return NativeGeometryObservation::Ready;
+}
+
+bool LLWindowMacOSXVulkan::resizeNativeDrawableForDiagnostic(U32 backing_width, U32 backing_height) noexcept
+{
+    if (backing_width == 0 || backing_height == 0 || !validIdentity(mNativeWindow) || !mOperations.mIsMainThread ||
+        !mOperations.mIsMainThread(mOperations.mUserdata) || !mOperations.mResizeNativeWindowForDiagnostic)
+    {
+        return false;
+    }
+
+    LLWindowMacOSXVulkanNativeWindow resized = mNativeWindow;
+    if (!mOperations.mResizeNativeWindowForDiagnostic(
+            mOperations.mUserdata, resized, backing_width, backing_height) ||
+        !sameIdentity(mNativeWindow, resized) || !validGeometry(resized) || resized.mDrawableWidth != backing_width ||
+        resized.mDrawableHeight != backing_height)
+    {
+        return false;
+    }
+
+    mNativeWindow.mBackingScale   = resized.mBackingScale;
+    mNativeWindow.mDrawableWidth  = resized.mDrawableWidth;
+    mNativeWindow.mDrawableHeight = resized.mDrawableHeight;
     return true;
 }
 
@@ -598,6 +654,48 @@ LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult LLWindowMacOSXVulkan::acqu
     request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
     request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
     return mInstanceGeneration->acquireSwapchainFrameSlotGeneration(request);
+}
+
+LLRenderVulkan::VulkanSwapchainChainRebuildResult LLWindowMacOSXVulkan::rebuildSwapchainChain() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainChainRebuildError{ VulkanSwapchainChainRebuildCode::InstanceNotLive,
+                                                 VulkanSwapchainChainRebuildPhase::Preflight,
+                                                 {},
+                                                 std::nullopt };
+    }
+    if (!mRequirements || !mLoader || !validIdentity(mNativeWindow))
+    {
+        return VulkanSwapchainChainRebuildError{ VulkanSwapchainChainRebuildCode::StaleWindowGeneration,
+                                                 VulkanSwapchainChainRebuildPhase::Preflight,
+                                                 {},
+                                                 std::nullopt };
+    }
+
+    LLWindowMacOSXVulkanNativeWindow refreshed;
+    const NativeGeometryObservation observation = observeNativeGeometry(refreshed);
+    if (observation == NativeGeometryObservation::Stale)
+    {
+        return VulkanSwapchainChainRebuildError{ VulkanSwapchainChainRebuildCode::StaleWindowGeneration,
+                                                 VulkanSwapchainChainRebuildPhase::Preflight,
+                                                 {},
+                                                 std::nullopt };
+    }
+
+    mNativeWindow.mBackingScale   = refreshed.mBackingScale;
+    mNativeWindow.mDrawableWidth  = refreshed.mDrawableWidth;
+    mNativeWindow.mDrawableHeight = refreshed.mDrawableHeight;
+
+    SurfaceAcquireContext context{ this, mInstanceGeneration.get(), &mOperations, mRequirements->resolver(), mNativeWindow.mMetalLayer };
+    VulkanSwapchainChainRebuildRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = VkExtent2D{ refreshed.mDrawableWidth, refreshed.mDrawableHeight };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->rebuildSwapchainChain(request);
 }
 
 LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulkan::roundTripEmptySwapchainFrameSlot() noexcept
@@ -922,7 +1020,8 @@ const LLWindowMacOSXVulkanOperations& defaultLLWindowMacOSXVulkanOperations() no
                                                             createNativeWindow,
                                                             refreshNativeWindow,
                                                             destroyNativeWindow,
-                                                            createMetalSurface };
+                                                            createMetalSurface,
+                                                            resizeNativeWindowForDiagnostic };
     return operations;
 }
 

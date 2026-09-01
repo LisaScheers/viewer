@@ -48,7 +48,8 @@ typedef enum LLWindowMacOSXVulkanStatus
     LLWINDOWMACOSXVULKAN_STATUS_VIEW_FAILED,
     LLWINDOWMACOSXVULKAN_STATUS_LAYER_FAILED,
     LLWINDOWMACOSXVULKAN_STATUS_GEOMETRY_FAILED,
-    LLWINDOWMACOSXVULKAN_STATUS_DESTROY_FAILED
+    LLWINDOWMACOSXVULKAN_STATUS_DESTROY_FAILED,
+    LLWINDOWMACOSXVULKAN_STATUS_DRAWABLE_UNAVAILABLE
 } LLWindowMacOSXVulkanStatus;
 
 typedef struct LLWindowMacOSXVulkanNative
@@ -68,6 +69,11 @@ LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_create(
     LLWindowMacOSXVulkanNative* out_native) LLWINDOWMACOSXVULKAN_NOEXCEPT;
 
 LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_refresh(
+    LLWindowMacOSXVulkanNative* native) LLWINDOWMACOSXVULKAN_NOEXCEPT;
+
+LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_resize_for_diagnostic(
+    uint32_t backing_width,
+    uint32_t backing_height,
     LLWindowMacOSXVulkanNative* native) LLWINDOWMACOSXVULKAN_NOEXCEPT;
 
 LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_destroy(

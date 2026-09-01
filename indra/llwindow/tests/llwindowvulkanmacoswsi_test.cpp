@@ -40,6 +40,8 @@ constexpr char LOADER_PATH_ENVIRONMENT[]  = "LL_VULKAN_MACOS_WSI_LOADER";
 constexpr U64  NATIVE_WINDOW_GENERATION   = 35;
 constexpr U32  BACKING_WIDTH              = 1280;
 constexpr U32  BACKING_HEIGHT             = 720;
+constexpr U32  REBUILT_BACKING_WIDTH      = 1440;
+constexpr U32  REBUILT_BACKING_HEIGHT     = 810;
 
 bool nativeSmokeRequested()
 {
@@ -278,7 +280,7 @@ void window_vulkan_macos_wsi_object::test<1>()
     const auto swapchain_images_error = owner->acquireSwapchainImagesGeneration();
     ensure("the exact live swapchain resolves its real images and creates matching views", !swapchain_images_error.has_value());
     ensure("the instance parent owns one swapchain-image generation", instance_generation->hasSwapchainImagesGeneration());
-    const std::uint32_t resolved_image_count = instance_generation->resolvedSwapchainImageCount();
+    std::uint32_t resolved_image_count = instance_generation->resolvedSwapchainImageCount();
     ensure("the real MoltenVK swapchain image collection is nonempty", resolved_image_count != 0);
     for (std::uint32_t index = 0; index < resolved_image_count; ++index)
     {
@@ -315,6 +317,45 @@ void window_vulkan_macos_wsi_object::test<1>()
                   std::uint32_t{ 0 });
     ensure("frame-slot acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("frame-slot acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const VkSurfaceKHR    retained_surface         = instance_generation->surface();
+    const VkPhysicalDevice retained_physical_device = instance_generation->physicalDevice();
+    const VkDevice         retained_logical_device  = instance_generation->logicalDevice();
+    const VkQueue          retained_queue           = instance_generation->presentationQueue();
+    ensure("the native diagnostic seam changes the hidden Cocoa drawable to one different backing extent",
+           owner->resizeNativeDrawableForDiagnostic(REBUILT_BACKING_WIDTH, REBUILT_BACKING_HEIGHT));
+    ensure("the resized native owner publishes the exact changed backing pixels",
+           owner->drawableWidth() == REBUILT_BACKING_WIDTH && owner->drawableHeight() == REBUILT_BACKING_HEIGHT);
+
+    const auto  rebuild_result  = owner->rebuildSwapchainChain();
+    const auto* rebuild_outcome = std::get_if<LLRenderVulkan::VulkanSwapchainChainRebuildOutcome>(&rebuild_result);
+    ensure("the current Cocoa owner rebuilds the complete swapchain-dependent chain",
+           rebuild_outcome && *rebuild_outcome == LLRenderVulkan::VulkanSwapchainChainRebuildOutcome::Ready &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
+               instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainFrameSlotGeneration());
+    const VkExtent2D rebuilt_drawable_extent = instance_generation->swapchainDrawableExtent();
+    ensure("the rebuilt configuration authenticates the changed Cocoa backing extent",
+           rebuilt_drawable_extent.width == REBUILT_BACKING_WIDTH &&
+               rebuilt_drawable_extent.height == REBUILT_BACKING_HEIGHT &&
+               owner->drawableWidth() == rebuilt_drawable_extent.width && owner->drawableHeight() == rebuilt_drawable_extent.height);
+    ensure("same-surface rebuild retains every older Vulkan parent and borrowed queue",
+           instance_generation->surface() == retained_surface && instance_generation->physicalDevice() == retained_physical_device &&
+               instance_generation->logicalDevice() == retained_logical_device &&
+               instance_generation->presentationQueue() == retained_queue);
+    resolved_image_count = instance_generation->resolvedSwapchainImageCount();
+    ensure("the rebuilt MoltenVK swapchain publishes a complete nonempty image and frame-slot chain",
+           resolved_image_count != 0 && instance_generation->swapchain() != VK_NULL_HANDLE &&
+               instance_generation->swapchainImage(0) != VK_NULL_HANDLE &&
+               instance_generation->swapchainImageView(0) != VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameCommandBuffer() != VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameImageAvailableSemaphore() != VK_NULL_HANDLE &&
+               instance_generation->swapchainFramePresentationReadySemaphore() != VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameSubmissionFence() != VK_NULL_HANDLE &&
+               instance_generation->swapchainFramePresentCompletionFence() != VK_NULL_HANDLE);
+    ensure_equals("changed-extent rebuild emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("changed-extent rebuild creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("changed-extent rebuild leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     const VkSemaphore image_available          = instance_generation->swapchainFrameImageAvailableSemaphore();
     const VkSemaphore presentation_ready       = instance_generation->swapchainFramePresentationReadySemaphore();
@@ -426,8 +467,8 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("required validation remains live during explicit surface destruction", instance_generation->validationEnabled());
     ensure("the private Cocoa and Metal owner remains live after surface reset", owner->hasNativeWindow());
     ensure("the private Metal geometry remains live after surface reset", owner->refreshNativeGeometry());
-    ensure_equals("the live Metal layer retains its backing-pixel width", owner->drawableWidth(), BACKING_WIDTH);
-    ensure_equals("the live Metal layer retains its backing-pixel height", owner->drawableHeight(), BACKING_HEIGHT);
+    ensure_equals("the live Metal layer retains its rebuilt backing-pixel width", owner->drawableWidth(), REBUILT_BACKING_WIDTH);
+    ensure_equals("the live Metal layer retains its rebuilt backing-pixel height", owner->drawableHeight(), REBUILT_BACKING_HEIGHT);
     ensure("the exact requirements generation remains live after surface reset",
            owner->requirements() == requirements && owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION));
 

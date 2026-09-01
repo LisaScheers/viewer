@@ -15,6 +15,7 @@
 
 #include "linden_common.h"
 
+#include "llwindowmacosxvulkan-objc.h"
 #include "llwindowmacosxvulkan.h"
 #include "lltut.h"
 
@@ -53,6 +54,7 @@ enum class Event
     GetResolver,
     CreateNative,
     RefreshNative,
+    ResizeNative,
     CreateInstance,
     CreateDebugMessenger,
     CreateSurface,
@@ -78,6 +80,24 @@ enum class RefreshMutation
 
 struct FakeState
 {
+    FakeState()
+    {
+        mPhysicalProperties.apiVersion = VK_API_VERSION_1_1;
+        mPhysicalProperties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        std::memcpy(mPhysicalProperties.deviceName, "macOS adapter fake", sizeof("macOS adapter fake"));
+        mSurfaceCapabilities.minImageCount       = 2;
+        mSurfaceCapabilities.maxImageCount       = 3;
+        mSurfaceCapabilities.currentExtent       = { std::numeric_limits<std::uint32_t>::max(),
+                                                      std::numeric_limits<std::uint32_t>::max() };
+        mSurfaceCapabilities.minImageExtent      = { 64, 64 };
+        mSurfaceCapabilities.maxImageExtent      = { 4096, 2160 };
+        mSurfaceCapabilities.maxImageArrayLayers = 1;
+        mSurfaceCapabilities.supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+        mSurfaceCapabilities.currentTransform    = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+        mSurfaceCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        mSurfaceCapabilities.supportedUsageFlags     = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
+
     std::array<Event, 96> mEvents{};
     std::size_t           mEventCount = 0;
 
@@ -94,6 +114,11 @@ struct FakeState
     F64                                                 mRefreshScale    = 2.0;
     U32                                                 mRefreshWidth    = 1280;
     U32                                                 mRefreshHeight   = 720;
+    bool                                                mResizeSucceeds  = true;
+    RefreshMutation                                     mResizeMutation  = RefreshMutation::None;
+    std::size_t                                         mResizeCount     = 0;
+    U32                                                 mResizeWidth     = 0;
+    U32                                                 mResizeHeight    = 0;
 
     bool mLoaderOpens  = true;
     bool mResolverLive = true;
@@ -145,6 +170,38 @@ struct FakeState
     bool                        mAllOwnersGoneBeforeLoaderClose         = false;
     bool                        mSurfaceCapabilities2Enabled            = false;
     bool                        mSurfaceMaintenanceEnabled              = false;
+
+    VkPhysicalDevice           mPhysicalDevice = reinterpret_cast<VkPhysicalDevice>(static_cast<std::uintptr_t>(0x11110));
+    VkPhysicalDeviceProperties mPhysicalProperties{};
+    VkDevice                   mDevice    = reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(0x22220));
+    VkQueue                    mQueue     = reinterpret_cast<VkQueue>(static_cast<std::uintptr_t>(0x33330));
+    VkSwapchainKHR             mSwapchain = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(0x44440));
+    VkSurfaceCapabilitiesKHR   mSurfaceCapabilities{};
+    std::array<VkImage, 3>     mImages{ reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x51000)),
+                                    reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x52000)),
+                                    reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x53000)) };
+    std::array<VkImageView, 3> mImageViews{ reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x61000)),
+                                            reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x62000)),
+                                            reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x63000)) };
+    std::size_t                mNextImageView              = 0;
+    VkCommandPool              mCommandPool                = reinterpret_cast<VkCommandPool>(static_cast<std::uintptr_t>(0x71000));
+    VkCommandBuffer            mCommandBuffer              = reinterpret_cast<VkCommandBuffer>(static_cast<std::uintptr_t>(0x72000));
+    VkSemaphore                mImageAvailableSemaphore    = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x73000));
+    VkFence                    mSubmissionFence            = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x74000));
+    VkSemaphore                mPresentationReadySemaphore = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x75000));
+    VkFence                    mPresentCompletionFence     = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x76000));
+    std::size_t                mCreateSwapchainCount       = 0;
+    std::size_t                mDestroySwapchainCount      = 0;
+    VkSwapchainKHR             mLastOldSwapchain           = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(1));
+    VkExtent2D                 mLastSwapchainExtent{};
+    std::size_t                mCreateImageViewCount       = 0;
+    std::size_t                mDestroyImageViewCount      = 0;
+    std::size_t                mCreateCommandPoolCount     = 0;
+    std::size_t                mDestroyCommandPoolCount    = 0;
+    std::size_t                mCreateSemaphoreCount       = 0;
+    std::size_t                mDestroySemaphoreCount      = 0;
+    std::size_t                mCreateFenceCount           = 0;
+    std::size_t                mDestroyFenceCount          = 0;
 
     void record(Event event) noexcept
     {
@@ -324,6 +381,389 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroySurface(VkInstance instance, VkSurfaceKHR 
     gState->mLoaderLiveDuringSurfaceDestroy = gState->mLoaderLive;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL fakeEnumeratePhysicalDevices(VkInstance instance,
+                                                             std::uint32_t* count,
+                                                             VkPhysicalDevice* devices) noexcept
+{
+    if (!gState || instance != gState->mInstance || !count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (!devices)
+    {
+        *count = 1;
+        return VK_SUCCESS;
+    }
+    if (*count == 0)
+    {
+        return VK_INCOMPLETE;
+    }
+    devices[0] = gState->mPhysicalDevice;
+    *count     = 1;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice device,
+                                                            VkPhysicalDeviceProperties* properties) noexcept
+{
+    if (gState && device == gState->mPhysicalDevice && properties)
+    {
+        *properties = gState->mPhysicalProperties;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice         device,
+                                                                      std::uint32_t*           count,
+                                                                      VkQueueFamilyProperties* properties) noexcept
+{
+    if (!gState || device != gState->mPhysicalDevice || !count)
+    {
+        return;
+    }
+    if (!properties)
+    {
+        *count = 1;
+        return;
+    }
+    if (*count != 0)
+    {
+        properties[0]            = {};
+        properties[0].queueFlags = VK_QUEUE_GRAPHICS_BIT;
+        properties[0].queueCount = 1;
+        *count                   = 1;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetPhysicalDeviceSurfaceSupport(VkPhysicalDevice device,
+                                                                   std::uint32_t    queue_family,
+                                                                   VkSurfaceKHR     surface,
+                                                                   VkBool32*        supported) noexcept
+{
+    if (!gState || device != gState->mPhysicalDevice || queue_family != 0 || surface != gState->mSurface || !supported)
+    {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    *supported = VK_TRUE;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysicalDevice       device,
+                                                                      const char*            layer,
+                                                                      std::uint32_t*         count,
+                                                                      VkExtensionProperties* properties) noexcept
+{
+    if (!gState || device != gState->mPhysicalDevice || layer || !count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (!properties)
+    {
+        *count = 2;
+        return VK_SUCCESS;
+    }
+    if (*count < 2)
+    {
+        return VK_INCOMPLETE;
+    }
+    properties[0] = {};
+    std::memcpy(properties[0].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME, sizeof(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
+    properties[1] = {};
+    std::memcpy(properties[1].extensionName, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+                sizeof(VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME));
+    *count = 2;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures2(VkPhysicalDevice physical_device,
+                                                           VkPhysicalDeviceFeatures2* features) noexcept
+{
+    if (!gState || physical_device != gState->mPhysicalDevice || !features)
+    {
+        return;
+    }
+    for (VkBaseOutStructure* extension = static_cast<VkBaseOutStructure*>(features->pNext); extension; extension = extension->pNext)
+    {
+        if (extension->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR)
+        {
+            reinterpret_cast<VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(extension)->swapchainMaintenance1 = VK_TRUE;
+        }
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures(VkPhysicalDevice device, VkPhysicalDeviceFeatures* features) noexcept
+{
+    if (gState && device == gState->mPhysicalDevice && features)
+    {
+        *features                  = {};
+        features->independentBlend = VK_TRUE;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice device,
+                                                const VkDeviceCreateInfo*,
+                                                const VkAllocationCallbacks*,
+                                                VkDevice* logical_device) noexcept
+{
+    if (!gState || device != gState->mPhysicalDevice || !logical_device)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *logical_device = gState->mDevice;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyDevice(VkDevice, const VkAllocationCallbacks*) noexcept
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetDeviceQueue(VkDevice      device,
+                                              std::uint32_t queue_family,
+                                              std::uint32_t queue_index,
+                                              VkQueue*      queue) noexcept
+{
+    if (gState && device == gState->mDevice && queue_family == 0 && queue_index == 0 && queue)
+    {
+        *queue = gState->mQueue;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfaceCapabilities(VkPhysicalDevice          device,
+                                                          VkSurfaceKHR              surface,
+                                                          VkSurfaceCapabilitiesKHR* capabilities) noexcept
+{
+    if (!gState || device != gState->mPhysicalDevice || surface != gState->mSurface || !capabilities)
+    {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    *capabilities = gState->mSurfaceCapabilities;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfaceFormats(VkPhysicalDevice    device,
+                                                     VkSurfaceKHR        surface,
+                                                     std::uint32_t*      count,
+                                                     VkSurfaceFormatKHR* formats) noexcept
+{
+    if (!gState || device != gState->mPhysicalDevice || surface != gState->mSurface || !count)
+    {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    if (!formats)
+    {
+        *count = 1;
+        return VK_SUCCESS;
+    }
+    if (*count == 0)
+    {
+        return VK_INCOMPLETE;
+    }
+    formats[0] = { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
+    *count     = 1;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfacePresentModes(VkPhysicalDevice  device,
+                                                          VkSurfaceKHR      surface,
+                                                          std::uint32_t*    count,
+                                                          VkPresentModeKHR* modes) noexcept
+{
+    if (!gState || device != gState->mPhysicalDevice || surface != gState->mSurface || !count)
+    {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    if (!modes)
+    {
+        *count = 1;
+        return VK_SUCCESS;
+    }
+    if (*count == 0)
+    {
+        return VK_INCOMPLETE;
+    }
+    modes[0] = VK_PRESENT_MODE_FIFO_KHR;
+    *count   = 1;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSwapchain(VkDevice device,
+                                                   const VkSwapchainCreateInfoKHR* create_info,
+                                                   const VkAllocationCallbacks*,
+                                                   VkSwapchainKHR* swapchain) noexcept
+{
+    if (!gState || device != gState->mDevice || !create_info || !swapchain)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mCreateSwapchainCount;
+    gState->mLastOldSwapchain    = create_info->oldSwapchain;
+    gState->mLastSwapchainExtent = create_info->imageExtent;
+    *swapchain                   = gState->mSwapchain;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroySwapchain(VkDevice device,
+                                                VkSwapchainKHR swapchain,
+                                                const VkAllocationCallbacks*) noexcept
+{
+    if (gState && device == gState->mDevice && swapchain == gState->mSwapchain)
+    {
+        ++gState->mDestroySwapchainCount;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetSwapchainImages(VkDevice       device,
+                                                      VkSwapchainKHR swapchain,
+                                                      std::uint32_t* count,
+                                                      VkImage*       images) noexcept
+{
+    if (!gState || device != gState->mDevice || swapchain != gState->mSwapchain || !count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (!images)
+    {
+        *count = static_cast<std::uint32_t>(gState->mImages.size());
+        return VK_SUCCESS;
+    }
+    const std::size_t written = std::min<std::size_t>(*count, gState->mImages.size());
+    std::copy_n(gState->mImages.begin(), written, images);
+    *count = static_cast<std::uint32_t>(written);
+    return written == gState->mImages.size() ? VK_SUCCESS : VK_INCOMPLETE;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateImageView(VkDevice device,
+                                                   const VkImageViewCreateInfo*,
+                                                   const VkAllocationCallbacks*,
+                                                   VkImageView* image_view) noexcept
+{
+    if (!gState || device != gState->mDevice || !image_view)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *image_view = gState->mImageViews[gState->mNextImageView++ % gState->mImageViews.size()];
+    ++gState->mCreateImageViewCount;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyImageView(VkDevice device,
+                                                VkImageView image_view,
+                                                const VkAllocationCallbacks*) noexcept
+{
+    if (gState && device == gState->mDevice && image_view != VK_NULL_HANDLE)
+    {
+        ++gState->mDestroyImageViewCount;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateCommandPool(VkDevice device,
+                                                     const VkCommandPoolCreateInfo*,
+                                                     const VkAllocationCallbacks*,
+                                                     VkCommandPool* command_pool) noexcept
+{
+    if (!gState || device != gState->mDevice || !command_pool)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mCreateCommandPoolCount;
+    *command_pool = gState->mCommandPool;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyCommandPool(VkDevice device,
+                                                  VkCommandPool command_pool,
+                                                  const VkAllocationCallbacks*) noexcept
+{
+    if (gState && device == gState->mDevice && command_pool == gState->mCommandPool)
+    {
+        ++gState->mDestroyCommandPoolCount;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateCommandBuffers(VkDevice device,
+                                                          const VkCommandBufferAllocateInfo*,
+                                                          VkCommandBuffer* command_buffer) noexcept
+{
+    if (!gState || device != gState->mDevice || !command_buffer)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *command_buffer = gState->mCommandBuffer;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSemaphore(VkDevice device,
+                                                   const VkSemaphoreCreateInfo*,
+                                                   const VkAllocationCallbacks*,
+                                                   VkSemaphore* semaphore) noexcept
+{
+    if (!gState || device != gState->mDevice || !semaphore)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *semaphore = gState->mCreateSemaphoreCount++ % 2 == 0 ? gState->mImageAvailableSemaphore
+                                                          : gState->mPresentationReadySemaphore;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroySemaphore(VkDevice device,
+                                                VkSemaphore semaphore,
+                                                const VkAllocationCallbacks*) noexcept
+{
+    if (gState && device == gState->mDevice && semaphore != VK_NULL_HANDLE)
+    {
+        ++gState->mDestroySemaphoreCount;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateFence(VkDevice device,
+                                               const VkFenceCreateInfo*,
+                                               const VkAllocationCallbacks*,
+                                               VkFence* fence) noexcept
+{
+    if (!gState || device != gState->mDevice || !fence)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *fence = gState->mCreateFenceCount++ % 2 == 0 ? gState->mSubmissionFence : gState->mPresentCompletionFence;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyFence(VkDevice device, VkFence fence, const VkAllocationCallbacks*) noexcept
+{
+    if (gState && device == gState->mDevice && fence != VK_NULL_HANDLE)
+    {
+        ++gState->mDestroyFenceCount;
+    }
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
+{
+    if (!gState || device != gState->mDevice || !name)
+    {
+        return nullptr;
+    }
+#define LL_MACOS_VULKAN_DEVICE_COMMAND(command) \
+    if (std::strcmp(name, "vk" #command) == 0)  \
+    return eraseFunctionType(fake##command)
+    if (std::strcmp(name, "vkCreateSwapchainKHR") == 0)
+        return eraseFunctionType(fakeCreateSwapchain);
+    if (std::strcmp(name, "vkDestroySwapchainKHR") == 0)
+        return eraseFunctionType(fakeDestroySwapchain);
+    if (std::strcmp(name, "vkGetSwapchainImagesKHR") == 0)
+        return eraseFunctionType(fakeGetSwapchainImages);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CreateImageView);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(DestroyImageView);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CreateCommandPool);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(DestroyCommandPool);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(AllocateCommandBuffers);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CreateSemaphore);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(DestroySemaphore);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CreateFence);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(DestroyFence);
+#undef LL_MACOS_VULKAN_DEVICE_COMMAND
+    return nullptr;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance instance, const char* name) noexcept
 {
     if (!gState || !name)
@@ -366,6 +806,34 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
     {
         return gState->mExposeDestroySurface ? eraseFunctionType(fakeDestroySurface) : nullptr;
     }
+    if (std::strcmp(name, "vkEnumeratePhysicalDevices") == 0)
+        return eraseFunctionType(fakeEnumeratePhysicalDevices);
+    if (std::strcmp(name, "vkGetPhysicalDeviceProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceProperties);
+    if (std::strcmp(name, "vkGetPhysicalDeviceQueueFamilyProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceQueueFamilyProperties);
+    if (std::strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceSurfaceSupport);
+    if (std::strcmp(name, "vkEnumerateDeviceExtensionProperties") == 0)
+        return eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
+    if (std::strcmp(name, "vkGetPhysicalDeviceFeatures2") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFeatures2);
+    if (std::strcmp(name, "vkGetPhysicalDeviceFeatures") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFeatures);
+    if (std::strcmp(name, "vkCreateDevice") == 0)
+        return eraseFunctionType(fakeCreateDevice);
+    if (std::strcmp(name, "vkDestroyDevice") == 0)
+        return eraseFunctionType(fakeDestroyDevice);
+    if (std::strcmp(name, "vkGetDeviceQueue") == 0)
+        return eraseFunctionType(fakeGetDeviceQueue);
+    if (std::strcmp(name, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == 0)
+        return eraseFunctionType(fakeGetSurfaceCapabilities);
+    if (std::strcmp(name, "vkGetPhysicalDeviceSurfaceFormatsKHR") == 0)
+        return eraseFunctionType(fakeGetSurfaceFormats);
+    if (std::strcmp(name, "vkGetPhysicalDeviceSurfacePresentModesKHR") == 0)
+        return eraseFunctionType(fakeGetSurfacePresentModes);
+    if (std::strcmp(name, "vkGetDeviceProcAddr") == 0)
+        return eraseFunctionType(fakeGetDeviceProcAddr);
     return nullptr;
 }
 
@@ -474,6 +942,56 @@ bool refreshNativeWindow(void* userdata, LLWindowMacOSXVulkanNativeWindow& nativ
     return true;
 }
 
+bool resizeNativeWindowForDiagnostic(void*                             userdata,
+                                     LLWindowMacOSXVulkanNativeWindow& native,
+                                     U32                               backing_width,
+                                     U32                               backing_height) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::ResizeNative);
+    ++state.mResizeCount;
+    state.mResizeWidth  = backing_width;
+    state.mResizeHeight = backing_height;
+    if (!state.mResizeSucceeds)
+    {
+        return false;
+    }
+
+    native.mBackingScale   = state.mRefreshScale;
+    native.mDrawableWidth  = backing_width;
+    native.mDrawableHeight = backing_height;
+    switch (state.mResizeMutation)
+    {
+        case RefreshMutation::None:
+            break;
+        case RefreshMutation::Token:
+            native.mToken = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x9090));
+            break;
+        case RefreshMutation::Window:
+            native.mWindow = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x9090));
+            break;
+        case RefreshMutation::View:
+            native.mView = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x9090));
+            break;
+        case RefreshMutation::Layer:
+            native.mMetalLayer = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x9090));
+            break;
+        case RefreshMutation::ZeroScale:
+            native.mBackingScale = 0.0;
+            break;
+        case RefreshMutation::InfiniteScale:
+            native.mBackingScale = std::numeric_limits<F64>::infinity();
+            break;
+        case RefreshMutation::ZeroWidth:
+            native.mDrawableWidth = 0;
+            break;
+        case RefreshMutation::ZeroHeight:
+            native.mDrawableHeight = 0;
+            break;
+    }
+    return true;
+}
+
 void destroyNativeWindow(void* userdata, LLWindowMacOSXVulkanNativeWindow& native) noexcept
 {
     auto& state = *static_cast<FakeState*>(userdata);
@@ -518,8 +1036,16 @@ LLRenderVulkan::VulkanSurfaceCreateOutcome createSurface(void*                  
 
 LLWindowMacOSXVulkanOperations fakeOperations(FakeState& state) noexcept
 {
-    return { &state,       isMainThread, openLoader, closeLoader, getResolver, createNativeWindow, refreshNativeWindow, destroyNativeWindow,
-             createSurface };
+    return { &state,
+             isMainThread,
+             openLoader,
+             closeLoader,
+             getResolver,
+             createNativeWindow,
+             refreshNativeWindow,
+             destroyNativeWindow,
+             createSurface,
+             resizeNativeWindowForDiagnostic };
 }
 
 LLWindowMacOSXVulkanCreateInfo createInfo()
@@ -570,6 +1096,22 @@ const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError* operationErr
     return std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result);
 }
 
+const LLRenderVulkan::VulkanSwapchainChainRebuildError* rebuildError(
+    const LLRenderVulkan::VulkanSwapchainChainRebuildResult& result) noexcept
+{
+    return std::get_if<LLRenderVulkan::VulkanSwapchainChainRebuildError>(&result);
+}
+
+bool acquireCompleteSwapchainChain(LLWindowMacOSXVulkan& owner) noexcept
+{
+    using namespace LLRenderVulkan;
+    return !owner.acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
+           !owner.acquireSurfaceGeneration() && !owner.acquirePresentationDeviceGeneration() &&
+           !owner.acquireLogicalDeviceGeneration() && !owner.acquireSwapchainConfigurationGeneration() &&
+           !owner.acquireSwapchainGeneration() && !owner.acquireSwapchainImagesGeneration() &&
+           !owner.acquireSwapchainFrameSlotGeneration();
+}
+
 void failAllocation()
 {
     throw std::bad_alloc();
@@ -592,6 +1134,17 @@ template<>
 template<>
 void window_macosx_vulkan_object::test<1>()
 {
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_SUCCESS == 0);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_INVALID_ARGUMENT == 1);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_MAIN_THREAD_REQUIRED == 2);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_APPLICATION_FAILED == 3);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_STORAGE_FAILED == 4);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_WINDOW_FAILED == 5);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_VIEW_FAILED == 6);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_LAYER_FAILED == 7);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_GEOMETRY_FAILED == 8);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_DESTROY_FAILED == 9);
+    static_assert(LLWINDOWMACOSXVULKAN_STATUS_DRAWABLE_UNAVAILABLE == 10);
     static_assert(!std::is_copy_constructible_v<LLWindowMacOSXVulkan>);
     static_assert(!std::is_copy_assignable_v<LLWindowMacOSXVulkan>);
     static_assert(std::is_nothrow_move_constructible_v<LLWindowMacOSXVulkan>);
@@ -606,6 +1159,10 @@ void window_macosx_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().rebuildSwapchainChain()),
+                                 LLRenderVulkan::VulkanSwapchainChainRebuildResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().rebuildSwapchainChain()));
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resizeNativeDrawableForDiagnostic(U32{}, U32{})));
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().roundTripEmptySwapchainFrameSlot()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().roundTripEmptySwapchainFrameSlot()));
@@ -632,8 +1189,21 @@ void window_macosx_vulkan_object::test<1>()
     const auto& operations = defaultLLWindowMacOSXVulkanOperations();
     ensure("the production operation table is complete",
            operations.mIsMainThread && operations.mOpenLoader && operations.mCloseLoader && operations.mGetResolver &&
-               operations.mCreateNativeWindow && operations.mRefreshNativeWindow && operations.mDestroyNativeWindow &&
-               operations.mCreateSurface);
+               operations.mCreateNativeWindow && operations.mRefreshNativeWindow && operations.mResizeNativeWindowForDiagnostic &&
+               operations.mDestroyNativeWindow && operations.mCreateSurface);
+
+    const LLWindowMacOSXVulkanOperations legacy_positional_operations{ nullptr,
+                                                                       isMainThread,
+                                                                       openLoader,
+                                                                       closeLoader,
+                                                                       getResolver,
+                                                                       createNativeWindow,
+                                                                       refreshNativeWindow,
+                                                                       destroyNativeWindow,
+                                                                       createSurface };
+    ensure("the appended diagnostic callback preserves old positional operation initializers",
+           legacy_positional_operations.mCreateSurface == createSurface &&
+               legacy_positional_operations.mResizeNativeWindowForDiagnostic == nullptr);
 }
 
 template<>
@@ -732,6 +1302,16 @@ void window_macosx_vulkan_object::test<3>()
     operations.mRefreshNativeWindow = nullptr;
     invalid                         = acquireLLWindowMacOSXVulkan(info, 1, operations);
     ensureAcquireError("a missing refresh operation is rejected", invalid, LLWindowMacOSXVulkanAcquireCode::InvalidOperations);
+
+    FakeState no_resize_state;
+    operations                                  = fakeOperations(no_resize_state);
+    operations.mResizeNativeWindowForDiagnostic = nullptr;
+    auto no_resize                              = acquireLLWindowMacOSXVulkan(info, 1, operations);
+    auto* no_resize_owner                       = acquiredWindow(no_resize);
+    ensure("a missing diagnostic resize seam does not invalidate ordinary ownership", no_resize_owner != nullptr);
+    ensure("a missing diagnostic resize seam rejects only an explicit diagnostic resize",
+           !no_resize_owner->resizeNativeDrawableForDiagnostic(1600, 900));
+    ensure("the owner without a diagnostic resize seam tears down normally", no_resize_owner->reset());
 
     operations                = fakeOperations(invalid_state);
     operations.mCreateSurface = nullptr;
@@ -1499,6 +2079,178 @@ void window_macosx_vulkan_object::test<16>()
     ensure("frame-slot adapter fixture teardown succeeds", owner->reset());
     ensure_equals("frame-slot adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("frame-slot adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_macosx_vulkan_object::test<17>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState   state;
+    ScopedState active(state);
+    auto        result = acquireLLWindowMacOSXVulkan(createInfo(), 171, fakeOperations(state));
+    auto*       owner  = acquiredWindow(result);
+    ensure("swapchain-rebuild adapter fixture acquired a native owner", owner != nullptr);
+
+    const auto  missing_instance_result = owner->rebuildSwapchainChain();
+    const auto* missing_instance        = rebuildError(missing_instance_result);
+    ensure("swapchain rebuild requires a live instance before observing Cocoa geometry",
+           missing_instance && missing_instance->mCode == VulkanSwapchainChainRebuildCode::InstanceNotLive &&
+               missing_instance->mPhase == VulkanSwapchainChainRebuildPhase::Preflight && state.mRefreshCount == 0);
+
+    ensure("swapchain-rebuild adapter fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    const std::size_t refreshes_after_instance = state.mRefreshCount;
+
+    state.mRefreshSucceeds        = false;
+    const auto  failed_result     = owner->rebuildSwapchainChain();
+    const auto* failed            = rebuildError(failed_result);
+    ensure("a failed Cocoa observation is a stale rebuild request",
+           failed && failed->mCode == VulkanSwapchainChainRebuildCode::StaleWindowGeneration &&
+               failed->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+               state.mRefreshCount == refreshes_after_instance + 1 && owner->drawableWidth() == 1280 &&
+               owner->drawableHeight() == 720);
+
+    state.mRefreshSucceeds = true;
+    state.mRefreshMutation = RefreshMutation::View;
+    const auto  stale_identity_result = owner->rebuildSwapchainChain();
+    const auto* stale_identity        = rebuildError(stale_identity_result);
+    ensure("a changed private Cocoa identity is rejected before rebuilding an older parent",
+           stale_identity && stale_identity->mCode == VulkanSwapchainChainRebuildCode::StaleWindowGeneration &&
+               stale_identity->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+               state.mRefreshCount == refreshes_after_instance + 2 && owner->drawableWidth() == 1280 &&
+               owner->drawableHeight() == 720);
+
+    state.mRefreshMutation = RefreshMutation::None;
+    state.mMainThread      = false;
+    const auto  off_main_result = owner->rebuildSwapchainChain();
+    const auto* off_main        = rebuildError(off_main_result);
+    ensure("an off-main rebuild is rejected without observing or retiring native state",
+           off_main && off_main->mCode == VulkanSwapchainChainRebuildCode::StaleWindowGeneration &&
+               off_main->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+               state.mRefreshCount == refreshes_after_instance + 2 && owner->drawableWidth() == 1280 &&
+               owner->drawableHeight() == 720);
+
+    state.mMainThread    = true;
+    state.mRefreshWidth  = 0;
+    state.mRefreshHeight = 0;
+    const auto  zero_result = owner->rebuildSwapchainChain();
+    const auto* zero        = rebuildError(zero_result);
+    ensure("zero Cocoa pixels are observed as available suspension geometry rather than stale identity",
+           zero && zero->mCode == VulkanSwapchainChainRebuildCode::SurfaceNotLive &&
+               zero->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+               state.mRefreshCount == refreshes_after_instance + 3 && owner->drawableWidth() == 0 && owner->drawableHeight() == 0);
+
+    state.mRefreshScale  = 1.5;
+    state.mRefreshWidth  = 1536;
+    state.mRefreshHeight = 864;
+    const auto  restore_result = owner->rebuildSwapchainChain();
+    const auto* restore        = rebuildError(restore_result);
+    ensure("restored positive Cocoa pixels are forwarded through the exact live instance parent",
+           restore && restore->mCode == VulkanSwapchainChainRebuildCode::SurfaceNotLive &&
+               restore->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+               state.mRefreshCount == refreshes_after_instance + 4 && owner->backingScale() == 1.5 &&
+               owner->drawableWidth() == 1536 && owner->drawableHeight() == 864);
+
+    ensure("the explicit diagnostic resize rejects zero dimensions without native mutation",
+           !owner->resizeNativeDrawableForDiagnostic(0, 900) && state.mResizeCount == 0 && owner->drawableWidth() == 1536 &&
+               owner->drawableHeight() == 864);
+    ensure("the explicit diagnostic resize accepts one exact positive backing extent",
+           owner->resizeNativeDrawableForDiagnostic(1600, 900) && state.mResizeCount == 1 && state.mResizeWidth == 1600 &&
+               state.mResizeHeight == 900 && owner->drawableWidth() == 1600 && owner->drawableHeight() == 900);
+
+    state.mResizeMutation = RefreshMutation::Layer;
+    ensure("the diagnostic seam rejects changed Metal-layer identity",
+           !owner->resizeNativeDrawableForDiagnostic(1920, 1080) && state.mResizeCount == 2 && owner->drawableWidth() == 1600 &&
+               owner->drawableHeight() == 900);
+    state.mResizeMutation = RefreshMutation::None;
+    state.mMainThread     = false;
+    ensure("the diagnostic resize is main-thread-only and performs no off-main callback",
+           !owner->resizeNativeDrawableForDiagnostic(1920, 1080) && state.mResizeCount == 2);
+
+    state.mMainThread         = true;
+    state.mOwnerDuringDestroy = owner;
+    ensure("swapchain-rebuild adapter fixture teardown succeeds", owner->reset());
+    ensure_equals("rebuild adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+
+    FakeState full_state;
+    active.use(full_state);
+    auto  full_result = acquireLLWindowMacOSXVulkan(createInfo(), 172, fakeOperations(full_state));
+    auto* full_owner  = acquiredWindow(full_result);
+    ensure("suspend-and-restore fixture acquired a native owner", full_owner != nullptr);
+    ensure("suspend-and-restore fixture acquired a complete authenticated swapchain chain",
+           acquireCompleteSwapchainChain(*full_owner));
+
+    const VulkanInstanceGeneration* full_generation = full_owner->instanceGeneration();
+    ensure("the complete fixture publishes every required generation",
+           full_generation && full_generation->hasSurfaceGeneration() && full_generation->hasPresentationDeviceGeneration() &&
+               full_generation->hasLogicalDeviceGeneration() && full_generation->hasSwapchainConfigurationGeneration() &&
+               full_generation->hasSwapchainGeneration() && full_generation->hasSwapchainImagesGeneration() &&
+               full_generation->hasSwapchainFrameSlotGeneration());
+    const VkSurfaceKHR    retained_surface         = full_generation->surface();
+    const VkPhysicalDevice retained_physical_device = full_generation->physicalDevice();
+    const VkDevice         retained_device          = full_generation->logicalDevice();
+    const VkQueue          retained_queue           = full_generation->presentationQueue();
+    ensure("the initial diagnostic swapchain uses a null old-swapchain handoff",
+           full_state.mCreateSwapchainCount == 1 && full_state.mLastOldSwapchain == VK_NULL_HANDLE);
+
+    full_state.mRefreshWidth  = 0;
+    full_state.mRefreshHeight = 720;
+    const auto  suspended_result  = full_owner->rebuildSwapchainChain();
+    const auto* suspended_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&suspended_result);
+    ensure("zero backing width produces the typed suspended outcome",
+           suspended_outcome && *suspended_outcome == VulkanSwapchainChainRebuildOutcome::Suspended &&
+               full_owner->drawableWidth() == 0 && full_owner->drawableHeight() == 720);
+    ensure("suspension removes the configuration, swapchain, images, views, and frame slot",
+           !full_generation->hasSwapchainConfigurationGeneration() && !full_generation->hasSwapchainGeneration() &&
+               !full_generation->hasSwapchainImagesGeneration() && !full_generation->hasSwapchainFrameSlotGeneration() &&
+               full_generation->swapchain() == VK_NULL_HANDLE && full_generation->resolvedSwapchainImageCount() == 0 &&
+               full_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE);
+    ensure("suspension retains the exact surface, selection, logical device, and queue parents",
+           full_generation->surface() == retained_surface && full_generation->physicalDevice() == retained_physical_device &&
+               full_generation->logicalDevice() == retained_device && full_generation->presentationQueue() == retained_queue);
+    ensure("suspension destroys each youngest owned resource exactly once without creating a replacement",
+           full_state.mCreateSwapchainCount == 1 && full_state.mDestroySwapchainCount == 1 &&
+               full_state.mCreateImageViewCount == full_state.mImages.size() &&
+               full_state.mDestroyImageViewCount == full_state.mImages.size() && full_state.mCreateCommandPoolCount == 1 &&
+               full_state.mDestroyCommandPoolCount == 1 && full_state.mCreateSemaphoreCount == 2 &&
+               full_state.mDestroySemaphoreCount == 2 && full_state.mCreateFenceCount == 2 && full_state.mDestroyFenceCount == 2);
+
+    const auto  repeated_suspend_result  = full_owner->rebuildSwapchainChain();
+    const auto* repeated_suspend_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&repeated_suspend_result);
+    ensure("a repeated zero sample remains stably suspended without extra destruction",
+           repeated_suspend_outcome && *repeated_suspend_outcome == VulkanSwapchainChainRebuildOutcome::Suspended &&
+               full_state.mCreateSwapchainCount == 1 && full_state.mDestroySwapchainCount == 1 &&
+               full_state.mDestroyImageViewCount == full_state.mImages.size() && full_state.mDestroyCommandPoolCount == 1);
+
+    full_state.mRefreshScale  = 1.5;
+    full_state.mRefreshWidth  = 1600;
+    full_state.mRefreshHeight = 900;
+    const auto  restored_result  = full_owner->rebuildSwapchainChain();
+    const auto* restored_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&restored_result);
+    ensure("a positive restored extent rebuilds the complete youngest chain",
+           restored_outcome && *restored_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               full_generation->hasSwapchainConfigurationGeneration() && full_generation->hasSwapchainGeneration() &&
+               full_generation->hasSwapchainImagesGeneration() && full_generation->hasSwapchainFrameSlotGeneration() &&
+               full_owner->backingScale() == 1.5 && full_owner->drawableWidth() == 1600 && full_owner->drawableHeight() == 900);
+    const VkExtent2D restored_extent = full_generation->swapchainDrawableExtent();
+    ensure("restoration authenticates one exact extent and still retains every older parent",
+           restored_extent.width == 1600 && restored_extent.height == 900 &&
+               full_generation->surface() == retained_surface && full_generation->physicalDevice() == retained_physical_device &&
+               full_generation->logicalDevice() == retained_device && full_generation->presentationQueue() == retained_queue);
+    ensure("restoration creates an initial-form swapchain and one complete fresh child set",
+           full_state.mCreateSwapchainCount == 2 && full_state.mLastOldSwapchain == VK_NULL_HANDLE &&
+               full_state.mLastSwapchainExtent.width == 1600 && full_state.mLastSwapchainExtent.height == 900 &&
+               full_state.mCreateImageViewCount == full_state.mImages.size() * 2 && full_state.mCreateCommandPoolCount == 2 &&
+               full_state.mCreateSemaphoreCount == 4 && full_state.mCreateFenceCount == 4);
+
+    full_state.mOwnerDuringDestroy = full_owner;
+    ensure("suspend-and-restore fixture teardown succeeds", full_owner->reset());
+    ensure("restored teardown releases the second youngest child set exactly once",
+           full_state.mDestroySwapchainCount == 2 && full_state.mDestroyImageViewCount == full_state.mImages.size() * 2 &&
+               full_state.mDestroyCommandPoolCount == 2 && full_state.mDestroySemaphoreCount == 4 &&
+               full_state.mDestroyFenceCount == 4);
 }
 
 } // namespace tut

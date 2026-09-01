@@ -128,18 +128,48 @@ namespace
         return { code, operation_error };
     }
 
+    VulkanSwapchainChainRebuildError swapchainChainRebuildFailure(
+        VulkanSwapchainChainRebuildCode                    code,
+        VulkanSwapchainChainRebuildPhase                   phase,
+        VulkanSwapchainChainRebuildChildError              child_error            = {},
+        std::optional<VulkanSwapchainFrameSlotDisposition> frame_slot_disposition = std::nullopt) noexcept
+    {
+        return { code, phase, std::move(child_error), frame_slot_disposition };
+    }
+
     bool current(const VulkanWindowGenerationCheck& check, std::uint64_t generation) noexcept
     {
         return generation != 0 && check.mIsCurrent && check.mIsCurrent(check.mUserdata, generation);
     }
 
-    VulkanSurfaceAcquireResult surfaceFreshness(const VulkanSurfaceRequest& request, const VulkanInstanceGeneration& generation) noexcept
+    VulkanSurfaceAcquireResult surfaceFreshness(const VulkanSurfaceRequest&      request,
+                                                const VulkanInstanceGeneration& generation,
+                                                const std::uint64_t*             ownership_epoch,
+                                                std::uint64_t                    expected_epoch) noexcept
     {
-        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasSurfaceGeneration())
+        {
+            return surfaceFailure(VulkanSurfaceAcquireCode::SurfaceAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return surfaceFailure(VulkanSurfaceAcquireCode::InstanceNotLive);
+        }
+        if (!owner_current)
         {
             return surfaceFailure(VulkanSurfaceAcquireCode::StaleInstanceOwner);
         }
-        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasSurfaceGeneration())
+        {
+            return surfaceFailure(VulkanSurfaceAcquireCode::SurfaceAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return surfaceFailure(VulkanSurfaceAcquireCode::InstanceNotLive);
+        }
+        if (!window_current)
         {
             return surfaceFailure(VulkanSurfaceAcquireCode::StaleWindowGeneration);
         }
@@ -147,13 +177,33 @@ namespace
     }
 
     VulkanPresentationDeviceAcquireResult presentationDeviceFreshness(const VulkanPresentationDeviceRequest& request,
-                                                                      const VulkanInstanceGeneration&        generation) noexcept
+                                                                      const VulkanInstanceGeneration&        generation,
+                                                                      const std::uint64_t* ownership_epoch,
+                                                                      std::uint64_t        expected_epoch) noexcept
     {
-        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasPresentationDeviceGeneration())
+        {
+            return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::PresentationDeviceAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::SurfaceNotLive);
+        }
+        if (!owner_current)
         {
             return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::StaleInstanceOwner);
         }
-        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasPresentationDeviceGeneration())
+        {
+            return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::PresentationDeviceAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::SurfaceNotLive);
+        }
+        if (!window_current)
         {
             return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::StaleWindowGeneration);
         }
@@ -161,13 +211,33 @@ namespace
     }
 
     VulkanLogicalDeviceAcquireResult logicalDeviceFreshness(const VulkanLogicalDeviceRequest& request,
-                                                            const VulkanInstanceGeneration&   generation) noexcept
+                                                            const VulkanInstanceGeneration&   generation,
+                                                            const std::uint64_t* ownership_epoch,
+                                                            std::uint64_t        expected_epoch) noexcept
     {
-        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasLogicalDeviceGeneration())
+        {
+            return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::LogicalDeviceAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::PresentationDeviceNotLive);
+        }
+        if (!owner_current)
         {
             return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::StaleInstanceOwner);
         }
-        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasLogicalDeviceGeneration())
+        {
+            return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::LogicalDeviceAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::PresentationDeviceNotLive);
+        }
+        if (!window_current)
         {
             return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::StaleWindowGeneration);
         }
@@ -175,13 +245,35 @@ namespace
     }
 
     VulkanSwapchainConfigurationAcquireResult swapchainConfigurationFreshness(const VulkanSwapchainConfigurationRequest& request,
-                                                                              const VulkanInstanceGeneration& generation) noexcept
+                                                                              const VulkanInstanceGeneration& generation,
+                                                                              const std::uint64_t* ownership_epoch,
+                                                                              std::uint64_t expected_epoch) noexcept
     {
-        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasSwapchainConfigurationGeneration())
+        {
+            return swapchainConfigurationFailure(
+                VulkanSwapchainConfigurationAcquireCode::SwapchainConfigurationAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::LogicalDeviceNotLive);
+        }
+        if (!owner_current)
         {
             return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::StaleInstanceOwner);
         }
-        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasSwapchainConfigurationGeneration())
+        {
+            return swapchainConfigurationFailure(
+                VulkanSwapchainConfigurationAcquireCode::SwapchainConfigurationAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::LogicalDeviceNotLive);
+        }
+        if (!window_current)
         {
             return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::StaleWindowGeneration);
         }
@@ -189,13 +281,33 @@ namespace
     }
 
     VulkanSwapchainAcquireResult swapchainFreshness(const VulkanSwapchainRequest&   request,
-                                                    const VulkanInstanceGeneration& generation) noexcept
+                                                    const VulkanInstanceGeneration& generation,
+                                                    const std::uint64_t* ownership_epoch,
+                                                    std::uint64_t        expected_epoch) noexcept
     {
-        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasSwapchainGeneration())
+        {
+            return swapchainFailure(VulkanSwapchainAcquireCode::SwapchainAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return swapchainFailure(VulkanSwapchainAcquireCode::SwapchainConfigurationNotLive);
+        }
+        if (!owner_current)
         {
             return swapchainFailure(VulkanSwapchainAcquireCode::StaleInstanceOwner);
         }
-        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasSwapchainGeneration())
+        {
+            return swapchainFailure(VulkanSwapchainAcquireCode::SwapchainAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return swapchainFailure(VulkanSwapchainAcquireCode::SwapchainConfigurationNotLive);
+        }
+        if (!window_current)
         {
             return swapchainFailure(VulkanSwapchainAcquireCode::StaleWindowGeneration);
         }
@@ -203,13 +315,33 @@ namespace
     }
 
     VulkanSwapchainImagesAcquireResult swapchainImagesFreshness(const VulkanSwapchainImagesRequest& request,
-                                                                const VulkanInstanceGeneration&     generation) noexcept
+                                                                const VulkanInstanceGeneration&     generation,
+                                                                const std::uint64_t* ownership_epoch,
+                                                                std::uint64_t        expected_epoch) noexcept
     {
-        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasSwapchainImagesGeneration())
+        {
+            return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::SwapchainImagesAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::SwapchainNotLive);
+        }
+        if (!owner_current)
         {
             return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::StaleInstanceOwner);
         }
-        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasSwapchainImagesGeneration())
+        {
+            return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::SwapchainImagesAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::SwapchainNotLive);
+        }
+        if (!window_current)
         {
             return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::StaleWindowGeneration);
         }
@@ -217,13 +349,33 @@ namespace
     }
 
     VulkanSwapchainFrameSlotAcquireResult swapchainFrameSlotFreshness(const VulkanSwapchainFrameSlotRequest& request,
-                                                                      const VulkanInstanceGeneration&        generation) noexcept
+                                                                      const VulkanInstanceGeneration&        generation,
+                                                                      const std::uint64_t* ownership_epoch,
+                                                                      std::uint64_t        expected_epoch) noexcept
     {
-        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasSwapchainFrameSlotGeneration())
+        {
+            return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::SwapchainFrameSlotAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::SwapchainImagesNotLive);
+        }
+        if (!owner_current)
         {
             return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::StaleInstanceOwner);
         }
-        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasSwapchainFrameSlotGeneration())
+        {
+            return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::SwapchainFrameSlotAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::SwapchainImagesNotLive);
+        }
+        if (!window_current)
         {
             return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::StaleWindowGeneration);
         }
@@ -522,6 +674,11 @@ struct VulkanInstanceGenerationFactory
         const VulkanSwapchainFrameSlotRequest&     request,
         VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
 
+    static VulkanSwapchainChainRebuildResult rebuildSwapchainChain(
+        VulkanInstanceGeneration&                  instance_generation,
+        const VulkanSwapchainChainRebuildRequest&  request,
+        VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+
     static VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot(
         VulkanInstanceGeneration&                       instance_generation,
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
@@ -555,6 +712,29 @@ struct VulkanInstanceGenerationFactory
                                                                     SwapchainFrameSlotParentOperation               operation) noexcept;
 };
 
+class VulkanInstanceGeneration::NativeAcquisitionGuard
+{
+public:
+    explicit NativeAcquisitionGuard(VulkanInstanceGeneration& generation) noexcept :
+        mGeneration(generation)
+    {
+        ++mGeneration.mNativeAcquisitionDepth;
+    }
+
+    ~NativeAcquisitionGuard() noexcept
+    {
+        --mGeneration.mNativeAcquisitionDepth;
+    }
+
+    NativeAcquisitionGuard(const NativeAcquisitionGuard&)            = delete;
+    NativeAcquisitionGuard& operator=(const NativeAcquisitionGuard&) = delete;
+    NativeAcquisitionGuard(NativeAcquisitionGuard&&)                 = delete;
+    NativeAcquisitionGuard& operator=(NativeAcquisitionGuard&&)      = delete;
+
+private:
+    VulkanInstanceGeneration& mGeneration;
+};
+
 VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
                                                    std::unique_ptr<ValidationState>&&  validation_state,
                                                    std::vector<std::string>&&          enabled_extensions,
@@ -574,7 +754,8 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanGlobalDispatchGeneratio
     mInstance(instance),
     mDestroyInstance(destroy_instance),
     mDebugMessenger(debug_messenger),
-    mDestroyDebugMessenger(destroy_debug_messenger)
+    mDestroyDebugMessenger(destroy_debug_messenger),
+    mOwnershipTransitionEpoch(1)
 {
 }
 
@@ -583,25 +764,37 @@ VulkanInstanceGeneration::~VulkanInstanceGeneration() noexcept
     reset();
 }
 
-VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& other) noexcept :
-    mGlobalDispatch(std::move(other.mGlobalDispatch)),
-    mValidationState(std::move(other.mValidationState)),
-    mEnabledExtensions(std::move(other.mEnabledExtensions)),
-    mEnabledLayers(std::move(other.mEnabledLayers)),
-    mNativeWindowGeneration(std::exchange(other.mNativeWindowGeneration, 0)),
-    mPortabilityEnumeration(std::exchange(other.mPortabilityEnumeration, false)),
-    mInstance(std::exchange(other.mInstance, VK_NULL_HANDLE)),
-    mDestroyInstance(std::exchange(other.mDestroyInstance, nullptr)),
-    mDebugMessenger(std::exchange(other.mDebugMessenger, VK_NULL_HANDLE)),
-    mDestroyDebugMessenger(std::exchange(other.mDestroyDebugMessenger, nullptr)),
-    mSurfaceGeneration(std::move(other.mSurfaceGeneration)),
-    mPresentationDeviceGeneration(std::move(other.mPresentationDeviceGeneration)),
-    mLogicalDeviceGeneration(std::move(other.mLogicalDeviceGeneration)),
-    mSwapchainConfigurationGeneration(std::move(other.mSwapchainConfigurationGeneration)),
-    mSwapchainGeneration(std::move(other.mSwapchainGeneration)),
-    mSwapchainImagesGeneration(std::move(other.mSwapchainImagesGeneration)),
-    mSwapchainFrameSlotGeneration(std::move(other.mSwapchainFrameSlotGeneration))
+VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& other) noexcept
 {
+    // A live native candidate retains the source generation as its destruction
+    // parent. A reentrant move therefore leaves that source intact and produces
+    // an empty destination until the acquisition transaction has completed.
+    if (other.mNativeAcquisitionDepth != 0)
+    {
+        return;
+    }
+
+    if (other.mGlobalDispatch)
+    {
+        mGlobalDispatch.emplace(std::move(*other.mGlobalDispatch));
+    }
+    mValidationState                  = std::move(other.mValidationState);
+    mEnabledExtensions                = std::move(other.mEnabledExtensions);
+    mEnabledLayers                    = std::move(other.mEnabledLayers);
+    mNativeWindowGeneration           = std::exchange(other.mNativeWindowGeneration, 0);
+    mPortabilityEnumeration           = std::exchange(other.mPortabilityEnumeration, false);
+    mInstance                         = std::exchange(other.mInstance, VK_NULL_HANDLE);
+    mDestroyInstance                  = std::exchange(other.mDestroyInstance, nullptr);
+    mDebugMessenger                   = std::exchange(other.mDebugMessenger, VK_NULL_HANDLE);
+    mDestroyDebugMessenger            = std::exchange(other.mDestroyDebugMessenger, nullptr);
+    mSurfaceGeneration                = std::move(other.mSurfaceGeneration);
+    mPresentationDeviceGeneration     = std::move(other.mPresentationDeviceGeneration);
+    mLogicalDeviceGeneration          = std::move(other.mLogicalDeviceGeneration);
+    mSwapchainConfigurationGeneration = std::move(other.mSwapchainConfigurationGeneration);
+    mSwapchainGeneration              = std::move(other.mSwapchainGeneration);
+    mSwapchainImagesGeneration        = std::move(other.mSwapchainImagesGeneration);
+    mSwapchainFrameSlotGeneration     = std::move(other.mSwapchainFrameSlotGeneration);
+    mOwnershipTransitionEpoch         = std::exchange(other.mOwnershipTransitionEpoch, 0);
     other.mGlobalDispatch.reset();
 }
 
@@ -937,6 +1130,12 @@ VulkanSwapchainFrameSlotAcquireResult VulkanInstanceGeneration::acquireSwapchain
     return VulkanInstanceDetail::acquireSwapchainFrameSlot(*this, request, nullptr);
 }
 
+VulkanSwapchainChainRebuildResult VulkanInstanceGeneration::rebuildSwapchainChain(
+    const VulkanSwapchainChainRebuildRequest& request) noexcept
+{
+    return VulkanInstanceDetail::rebuildSwapchainChain(*this, request, nullptr);
+}
+
 VulkanSwapchainFrameSlotParentOperationResult VulkanInstanceGeneration::roundTripEmptySwapchainFrameSlot(
     const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
 {
@@ -981,96 +1180,171 @@ VulkanSwapchainFrameSlotParentOperationResult VulkanInstanceGeneration::retrySwa
 
 bool VulkanInstanceGeneration::resetSwapchainFrameSlotGeneration() noexcept
 {
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
     if (mSwapchainFrameSlotGeneration && !frameSlotDispositionAllowsReset(mSwapchainFrameSlotGeneration->disposition()))
     {
         return false;
     }
-    mSwapchainFrameSlotGeneration.reset();
+    if (mSwapchainFrameSlotGeneration)
+    {
+        mSwapchainFrameSlotGeneration.reset();
+        noteOwnershipTransition();
+    }
     return true;
 }
 
 bool VulkanInstanceGeneration::resetSwapchainImagesGeneration() noexcept
 {
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
     if (!resetSwapchainFrameSlotGeneration())
     {
         return false;
     }
-    mSwapchainImagesGeneration.reset();
+    if (mSwapchainImagesGeneration)
+    {
+        mSwapchainImagesGeneration.reset();
+        noteOwnershipTransition();
+    }
     return true;
 }
 
 bool VulkanInstanceGeneration::resetSwapchainGeneration() noexcept
 {
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
     if (!resetSwapchainImagesGeneration())
     {
         return false;
     }
-    mSwapchainGeneration.reset();
+    if (mSwapchainGeneration)
+    {
+        mSwapchainGeneration.reset();
+        noteOwnershipTransition();
+    }
     return true;
 }
 
 bool VulkanInstanceGeneration::resetSwapchainConfigurationGeneration() noexcept
 {
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
     if (!resetSwapchainGeneration())
     {
         return false;
     }
-    mSwapchainConfigurationGeneration.reset();
+    if (mSwapchainConfigurationGeneration)
+    {
+        mSwapchainConfigurationGeneration.reset();
+        noteOwnershipTransition();
+    }
     return true;
 }
 
 bool VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
 {
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
     if (!resetSwapchainConfigurationGeneration())
     {
         return false;
     }
-    mLogicalDeviceGeneration.reset();
+    if (mLogicalDeviceGeneration)
+    {
+        mLogicalDeviceGeneration.reset();
+        noteOwnershipTransition();
+    }
     return true;
 }
 
 bool VulkanInstanceGeneration::resetPresentationDeviceGeneration() noexcept
 {
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
     if (!resetLogicalDeviceGeneration())
     {
         return false;
     }
-    mPresentationDeviceGeneration.reset();
+    if (mPresentationDeviceGeneration)
+    {
+        mPresentationDeviceGeneration.reset();
+        noteOwnershipTransition();
+    }
     return true;
 }
 
 bool VulkanInstanceGeneration::resetSurfaceGeneration() noexcept
 {
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
     if (!resetPresentationDeviceGeneration())
     {
         return false;
     }
-    mSurfaceGeneration.reset();
+    if (mSurfaceGeneration)
+    {
+        mSurfaceGeneration.reset();
+        noteOwnershipTransition();
+    }
     return true;
 }
 
 bool VulkanInstanceGeneration::reset() noexcept
 {
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
     if (!resetSurfaceGeneration())
     {
         return false;
     }
 
-    if (mDebugMessenger != VK_NULL_HANDLE && mDestroyDebugMessenger)
+    const bool had_debug_messenger = mDebugMessenger != VK_NULL_HANDLE;
+    if (had_debug_messenger && mDestroyDebugMessenger)
     {
         mDestroyDebugMessenger(mInstance, mDebugMessenger, nullptr);
     }
     mDebugMessenger        = VK_NULL_HANDLE;
     mDestroyDebugMessenger = nullptr;
+    if (had_debug_messenger)
+    {
+        noteOwnershipTransition();
+    }
 
-    if (mInstance != VK_NULL_HANDLE && mDestroyInstance)
+    const bool had_instance = mInstance != VK_NULL_HANDLE;
+    if (had_instance && mDestroyInstance)
     {
         mDestroyInstance(mInstance, nullptr);
     }
     mInstance        = VK_NULL_HANDLE;
     mDestroyInstance = nullptr;
+    if (had_instance)
+    {
+        noteOwnershipTransition();
+    }
 
+    const bool had_global_dispatch = mGlobalDispatch.has_value();
     mGlobalDispatch.reset();
+    if (had_global_dispatch)
+    {
+        noteOwnershipTransition();
+    }
     mEnabledExtensions.clear();
     mEnabledLayers.clear();
     mNativeWindowGeneration = 0;
@@ -1114,9 +1388,18 @@ VulkanSurfaceAcquireResult VulkanInstanceGenerationFactory::acquireSurface(
         return surfaceFailure(VulkanSurfaceAcquireCode::NativeWindowGenerationMismatch);
     }
 
+    const std::uint64_t acquisition_epoch = instance_generation.mOwnershipTransitionEpoch;
+    const auto freshness_check = [&]() noexcept
+    {
+        return surfaceFreshness(request,
+                                instance_generation,
+                                &instance_generation.mOwnershipTransitionEpoch,
+                                acquisition_epoch);
+    };
+
     // Boundary 1: the exact instance owner and native window must both still
     // own the generation before its extension policy is consulted.
-    if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+    if (VulkanSurfaceAcquireResult freshness = freshness_check())
     {
         return freshness;
     }
@@ -1126,10 +1409,11 @@ VulkanSurfaceAcquireResult VulkanInstanceGenerationFactory::acquireSurface(
     }
 
     // Boundary 2: do not consult the loader after either owner becomes stale.
-    if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+    if (VulkanSurfaceAcquireResult freshness = freshness_check())
     {
         return freshness;
     }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
     const PFN_vkDestroySurfaceKHR destroy_surface = resolveInstanceCommand<PFN_vkDestroySurfaceKHR>(
         instance_generation.mGlobalDispatch->getInstanceProcAddr(), instance_generation.mInstance, "vkDestroySurfaceKHR");
     if (!destroy_surface)
@@ -1139,7 +1423,7 @@ VulkanSurfaceAcquireResult VulkanInstanceGenerationFactory::acquireSurface(
 
     // Boundary 3: destruction capability is available, but no platform object
     // exists yet.
-    if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+    if (VulkanSurfaceAcquireResult freshness = freshness_check())
     {
         return freshness;
     }
@@ -1149,12 +1433,20 @@ VulkanSurfaceAcquireResult VulkanInstanceGenerationFactory::acquireSurface(
         if (allocation_checkpoint)
         {
             allocation_checkpoint();
+            if (instance_generation.mSurfaceGeneration)
+            {
+                return surfaceFailure(VulkanSurfaceAcquireCode::SurfaceAlreadyOwned);
+            }
+            if (instance_generation.mOwnershipTransitionEpoch != acquisition_epoch)
+            {
+                return surfaceFailure(VulkanSurfaceAcquireCode::InstanceNotLive);
+            }
         }
         auto pending = std::make_unique<VulkanInstanceGeneration::VulkanSurfaceGeneration>();
 
         // Boundary 4: allocation cannot leave a created surface without an
         // owner, and freshness is checked once more immediately before create.
-        if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+        if (VulkanSurfaceAcquireResult freshness = freshness_check())
         {
             return freshness;
         }
@@ -1181,12 +1473,13 @@ VulkanSurfaceAcquireResult VulkanInstanceGenerationFactory::acquireSurface(
 
         // Boundary 5: the pending child owns rollback before either freshness
         // callback can reject publication.
-        if (VulkanSurfaceAcquireResult freshness = surfaceFreshness(request, instance_generation))
+        if (VulkanSurfaceAcquireResult freshness = freshness_check())
         {
             return freshness;
         }
 
         instance_generation.mSurfaceGeneration = std::move(pending);
+        instance_generation.noteOwnershipTransition();
         return std::nullopt;
     }
     catch (const std::bad_alloc&)
@@ -1230,10 +1523,19 @@ VulkanPresentationDeviceAcquireResult VulkanInstanceGenerationFactory::acquirePr
     {
         return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::NativeWindowGenerationMismatch);
     }
-    if (VulkanPresentationDeviceAcquireResult freshness = presentationDeviceFreshness(request, instance_generation))
+    const std::uint64_t acquisition_epoch = instance_generation.mOwnershipTransitionEpoch;
+    const auto freshness_check = [&]() noexcept
+    {
+        return presentationDeviceFreshness(request,
+                                           instance_generation,
+                                           &instance_generation.mOwnershipTransitionEpoch,
+                                           acquisition_epoch);
+    };
+    if (VulkanPresentationDeviceAcquireResult freshness = freshness_check())
     {
         return freshness;
     }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
 
     const VkInstance            instance = instance_generation.mInstance;
     const VkSurfaceKHR          surface  = instance_generation.surface();
@@ -1253,11 +1555,19 @@ VulkanPresentationDeviceAcquireResult VulkanInstanceGenerationFactory::acquirePr
         if (allocation_checkpoint)
         {
             allocation_checkpoint();
+            if (instance_generation.mPresentationDeviceGeneration)
+            {
+                return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::PresentationDeviceAlreadyOwned);
+            }
+            if (instance_generation.mOwnershipTransitionEpoch != acquisition_epoch)
+            {
+                return presentationDeviceFailure(VulkanPresentationDeviceAcquireCode::SurfaceNotLive);
+            }
         }
         auto pending =
             std::make_unique<VulkanPhysicalDeviceGeneration>(std::move(std::get<VulkanPhysicalDeviceGeneration>(selection_result)));
 
-        if (VulkanPresentationDeviceAcquireResult freshness = presentationDeviceFreshness(request, instance_generation))
+        if (VulkanPresentationDeviceAcquireResult freshness = freshness_check())
         {
             return freshness;
         }
@@ -1268,6 +1578,7 @@ VulkanPresentationDeviceAcquireResult VulkanInstanceGenerationFactory::acquirePr
         }
 
         instance_generation.mPresentationDeviceGeneration = std::move(pending);
+        instance_generation.noteOwnershipTransition();
         return std::nullopt;
     }
     catch (const std::bad_alloc&)
@@ -1315,10 +1626,19 @@ VulkanLogicalDeviceAcquireResult VulkanInstanceGenerationFactory::acquireLogical
     {
         return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::NativeWindowGenerationMismatch);
     }
-    if (VulkanLogicalDeviceAcquireResult freshness = logicalDeviceFreshness(request, instance_generation))
+    const std::uint64_t acquisition_epoch = instance_generation.mOwnershipTransitionEpoch;
+    const auto freshness_check = [&]() noexcept
+    {
+        return logicalDeviceFreshness(request,
+                                      instance_generation,
+                                      &instance_generation.mOwnershipTransitionEpoch,
+                                      acquisition_epoch);
+    };
+    if (VulkanLogicalDeviceAcquireResult freshness = freshness_check())
     {
         return freshness;
     }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
 
     const VkInstance                      instance        = instance_generation.mInstance;
     const VkSurfaceKHR                    surface         = instance_generation.surface();
@@ -1337,11 +1657,19 @@ VulkanLogicalDeviceAcquireResult VulkanInstanceGenerationFactory::acquireLogical
         if (allocation_checkpoint)
         {
             allocation_checkpoint();
+            if (instance_generation.mLogicalDeviceGeneration)
+            {
+                return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::LogicalDeviceAlreadyOwned);
+            }
+            if (instance_generation.mOwnershipTransitionEpoch != acquisition_epoch)
+            {
+                return logicalDeviceFailure(VulkanLogicalDeviceAcquireCode::PresentationDeviceNotLive);
+            }
         }
         auto pending =
             std::make_unique<VulkanLogicalDeviceGeneration>(std::move(std::get<VulkanLogicalDeviceGeneration>(resolution_result)));
 
-        if (VulkanLogicalDeviceAcquireResult freshness = logicalDeviceFreshness(request, instance_generation))
+        if (VulkanLogicalDeviceAcquireResult freshness = freshness_check())
         {
             return freshness;
         }
@@ -1354,6 +1682,7 @@ VulkanLogicalDeviceAcquireResult VulkanInstanceGenerationFactory::acquireLogical
         }
 
         instance_generation.mLogicalDeviceGeneration = std::move(pending);
+        instance_generation.noteOwnershipTransition();
         return std::nullopt;
     }
     catch (const std::bad_alloc&)
@@ -1410,10 +1739,24 @@ VulkanSwapchainConfigurationAcquireResult VulkanInstanceGenerationFactory::acqui
     {
         return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::NativeWindowGenerationMismatch);
     }
-    if (VulkanSwapchainConfigurationAcquireResult freshness = swapchainConfigurationFreshness(request, instance_generation))
+    const std::uint64_t acquisition_epoch = instance_generation.mOwnershipTransitionEpoch;
+    const auto freshness_check = [&]() noexcept
+    {
+        return swapchainConfigurationFreshness(request,
+                                               instance_generation,
+                                               &instance_generation.mOwnershipTransitionEpoch,
+                                               acquisition_epoch);
+    };
+    if (VulkanSwapchainConfigurationAcquireResult freshness = freshness_check())
     {
         return freshness;
     }
+    if (instance_generation.mSwapchainConfigurationGeneration)
+    {
+        return swapchainConfigurationFailure(
+            VulkanSwapchainConfigurationAcquireCode::SwapchainConfigurationAlreadyOwned);
+    }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
 
     const VkInstance                      instance        = instance_generation.mInstance;
     const VkSurfaceKHR                    surface         = instance_generation.surface();
@@ -1436,13 +1779,27 @@ VulkanSwapchainConfigurationAcquireResult VulkanInstanceGenerationFactory::acqui
         if (allocation_checkpoint)
         {
             allocation_checkpoint();
+            if (instance_generation.mSwapchainConfigurationGeneration)
+            {
+                return swapchainConfigurationFailure(
+                    VulkanSwapchainConfigurationAcquireCode::SwapchainConfigurationAlreadyOwned);
+            }
+            if (instance_generation.mOwnershipTransitionEpoch != acquisition_epoch)
+            {
+                return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::LogicalDeviceNotLive);
+            }
         }
         auto pending = std::make_unique<VulkanSwapchainConfigurationGeneration>(
             std::move(std::get<VulkanSwapchainConfigurationGeneration>(resolution_result)));
 
-        if (VulkanSwapchainConfigurationAcquireResult freshness = swapchainConfigurationFreshness(request, instance_generation))
+        if (VulkanSwapchainConfigurationAcquireResult freshness = freshness_check())
         {
             return freshness;
+        }
+        if (instance_generation.mSwapchainConfigurationGeneration)
+        {
+            return swapchainConfigurationFailure(
+                VulkanSwapchainConfigurationAcquireCode::SwapchainConfigurationAlreadyOwned);
         }
         if (instance_generation.mInstance != instance || !instance_generation.mSurfaceGeneration ||
             instance_generation.surface() != surface || instance_generation.mPresentationDeviceGeneration.get() != selection ||
@@ -1455,6 +1812,7 @@ VulkanSwapchainConfigurationAcquireResult VulkanInstanceGenerationFactory::acqui
         }
 
         instance_generation.mSwapchainConfigurationGeneration = std::move(pending);
+        instance_generation.noteOwnershipTransition();
         return std::nullopt;
     }
     catch (const std::bad_alloc&)
@@ -1520,10 +1878,23 @@ VulkanSwapchainAcquireResult VulkanInstanceGenerationFactory::acquireSwapchain(
     {
         return swapchainFailure(VulkanSwapchainAcquireCode::DrawableExtentMismatch);
     }
-    if (VulkanSwapchainAcquireResult freshness = swapchainFreshness(request, instance_generation))
+    const std::uint64_t acquisition_epoch = instance_generation.mOwnershipTransitionEpoch;
+    const auto freshness_check = [&]() noexcept
+    {
+        return swapchainFreshness(request,
+                                  instance_generation,
+                                  &instance_generation.mOwnershipTransitionEpoch,
+                                  acquisition_epoch);
+    };
+    if (VulkanSwapchainAcquireResult freshness = freshness_check())
     {
         return freshness;
     }
+    if (instance_generation.mSwapchainGeneration)
+    {
+        return swapchainFailure(VulkanSwapchainAcquireCode::SwapchainAlreadyOwned);
+    }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
 
     const VkInstance                              instance        = instance_generation.mInstance;
     const VkSurfaceKHR                            surface         = instance_generation.surface();
@@ -1551,12 +1922,24 @@ VulkanSwapchainAcquireResult VulkanInstanceGenerationFactory::acquireSwapchain(
         if (allocation_checkpoint)
         {
             allocation_checkpoint();
+            if (instance_generation.mSwapchainGeneration)
+            {
+                return swapchainFailure(VulkanSwapchainAcquireCode::SwapchainAlreadyOwned);
+            }
+            if (instance_generation.mOwnershipTransitionEpoch != acquisition_epoch)
+            {
+                return swapchainFailure(VulkanSwapchainAcquireCode::SwapchainConfigurationNotLive);
+            }
         }
         auto pending = std::make_unique<VulkanSwapchainGeneration>(std::move(std::get<VulkanSwapchainGeneration>(resolution_result)));
 
-        if (VulkanSwapchainAcquireResult freshness = swapchainFreshness(request, instance_generation))
+        if (VulkanSwapchainAcquireResult freshness = freshness_check())
         {
             return freshness;
+        }
+        if (instance_generation.mSwapchainGeneration)
+        {
+            return swapchainFailure(VulkanSwapchainAcquireCode::SwapchainAlreadyOwned);
         }
         if (instance_generation.mInstance != instance || !instance_generation.mSurfaceGeneration ||
             instance_generation.surface() != surface || instance_generation.mPresentationDeviceGeneration.get() != selection ||
@@ -1571,6 +1954,7 @@ VulkanSwapchainAcquireResult VulkanInstanceGenerationFactory::acquireSwapchain(
         }
 
         instance_generation.mSwapchainGeneration = std::move(pending);
+        instance_generation.noteOwnershipTransition();
         return std::nullopt;
     }
     catch (const std::bad_alloc&)
@@ -1640,10 +2024,23 @@ VulkanSwapchainImagesAcquireResult VulkanInstanceGenerationFactory::acquireSwapc
     {
         return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::DrawableExtentMismatch);
     }
-    if (VulkanSwapchainImagesAcquireResult freshness = swapchainImagesFreshness(request, instance_generation))
+    const std::uint64_t acquisition_epoch = instance_generation.mOwnershipTransitionEpoch;
+    const auto freshness_check = [&]() noexcept
+    {
+        return swapchainImagesFreshness(request,
+                                        instance_generation,
+                                        &instance_generation.mOwnershipTransitionEpoch,
+                                        acquisition_epoch);
+    };
+    if (VulkanSwapchainImagesAcquireResult freshness = freshness_check())
     {
         return freshness;
     }
+    if (instance_generation.mSwapchainImagesGeneration)
+    {
+        return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::SwapchainImagesAlreadyOwned);
+    }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
 
     const VkInstance                              instance                         = instance_generation.mInstance;
     const std::uint64_t                           native_window_generation         = instance_generation.mNativeWindowGeneration;
@@ -1681,11 +2078,19 @@ VulkanSwapchainImagesAcquireResult VulkanInstanceGenerationFactory::acquireSwapc
         if (allocation_checkpoint)
         {
             allocation_checkpoint();
+            if (instance_generation.mSwapchainImagesGeneration)
+            {
+                return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::SwapchainImagesAlreadyOwned);
+            }
+            if (instance_generation.mOwnershipTransitionEpoch != acquisition_epoch)
+            {
+                return swapchainImagesFailure(VulkanSwapchainImagesAcquireCode::SwapchainNotLive);
+            }
         }
         auto pending =
             std::make_unique<VulkanSwapchainImagesGeneration>(std::move(std::get<VulkanSwapchainImagesGeneration>(resolution_result)));
 
-        if (VulkanSwapchainImagesAcquireResult freshness = swapchainImagesFreshness(request, instance_generation))
+        if (VulkanSwapchainImagesAcquireResult freshness = freshness_check())
         {
             return freshness;
         }
@@ -1713,6 +2118,7 @@ VulkanSwapchainImagesAcquireResult VulkanInstanceGenerationFactory::acquireSwapc
         }
 
         instance_generation.mSwapchainImagesGeneration = std::move(pending);
+        instance_generation.noteOwnershipTransition();
         return std::nullopt;
     }
     catch (const std::bad_alloc&)
@@ -1787,10 +2193,23 @@ VulkanSwapchainFrameSlotAcquireResult VulkanInstanceGenerationFactory::acquireSw
     {
         return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::DrawableExtentMismatch);
     }
-    if (VulkanSwapchainFrameSlotAcquireResult freshness = swapchainFrameSlotFreshness(request, instance_generation))
+    const std::uint64_t acquisition_epoch = instance_generation.mOwnershipTransitionEpoch;
+    const auto freshness_check = [&]() noexcept
+    {
+        return swapchainFrameSlotFreshness(request,
+                                           instance_generation,
+                                           &instance_generation.mOwnershipTransitionEpoch,
+                                           acquisition_epoch);
+    };
+    if (VulkanSwapchainFrameSlotAcquireResult freshness = freshness_check())
     {
         return freshness;
     }
+    if (instance_generation.mSwapchainFrameSlotGeneration)
+    {
+        return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::SwapchainFrameSlotAlreadyOwned);
+    }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
 
     const VkInstance                              instance                         = instance_generation.mInstance;
     const std::uint64_t                           native_window_generation         = instance_generation.mNativeWindowGeneration;
@@ -1847,11 +2266,19 @@ VulkanSwapchainFrameSlotAcquireResult VulkanInstanceGenerationFactory::acquireSw
         if (allocation_checkpoint)
         {
             allocation_checkpoint();
+            if (instance_generation.mSwapchainFrameSlotGeneration)
+            {
+                return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::SwapchainFrameSlotAlreadyOwned);
+            }
+            if (instance_generation.mOwnershipTransitionEpoch != acquisition_epoch)
+            {
+                return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::SwapchainImagesNotLive);
+            }
         }
         auto pending = std::make_unique<VulkanSwapchainFrameSlotGeneration>(
             std::move(std::get<VulkanSwapchainFrameSlotGeneration>(resolution_result)));
 
-        if (VulkanSwapchainFrameSlotAcquireResult freshness = swapchainFrameSlotFreshness(request, instance_generation))
+        if (VulkanSwapchainFrameSlotAcquireResult freshness = freshness_check())
         {
             return freshness;
         }
@@ -1902,12 +2329,400 @@ VulkanSwapchainFrameSlotAcquireResult VulkanInstanceGenerationFactory::acquireSw
         }
 
         instance_generation.mSwapchainFrameSlotGeneration = std::move(pending);
+        instance_generation.noteOwnershipTransition();
         return std::nullopt;
     }
     catch (const std::bad_alloc&)
     {
         return swapchainFrameSlotFailure(VulkanSwapchainFrameSlotAcquireCode::AllocationFailure);
     }
+}
+
+VulkanSwapchainChainRebuildResult VulkanInstanceGenerationFactory::rebuildSwapchainChain(
+    VulkanInstanceGeneration&                  instance_generation,
+    const VulkanSwapchainChainRebuildRequest&  request,
+    VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept
+{
+    constexpr VulkanSwapchainChainRebuildPhase preflight = VulkanSwapchainChainRebuildPhase::Preflight;
+
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::InvalidInstanceOwnerCheck, preflight);
+    }
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::InvalidWindowGenerationCheck, preflight);
+    }
+    if (request.mNativeWindowGeneration == 0)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::InvalidNativeWindowGeneration, preflight);
+    }
+    if (!request.mDrawableExtent)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::InvalidDrawableExtent, preflight);
+    }
+    if (instance_generation.mNativeAcquisitionDepth != 0)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::NativeAcquisitionInProgress, preflight);
+    }
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance ||
+        !instance_generation.mGlobalDispatch || !instance_generation.mGlobalDispatch->getInstanceProcAddr() ||
+        instance_generation.mNativeWindowGeneration == 0)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::InstanceNotLive, preflight);
+    }
+    if (!instance_generation.mSurfaceGeneration || instance_generation.surface() == VK_NULL_HANDLE ||
+        instance_generation.surfaceNativeWindowGeneration() == 0)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::SurfaceNotLive, preflight);
+    }
+    if (!instance_generation.mPresentationDeviceGeneration || instance_generation.physicalDevice() == VK_NULL_HANDLE)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PresentationDeviceNotLive, preflight);
+    }
+    if (!instance_generation.mLogicalDeviceGeneration || instance_generation.logicalDevice() == VK_NULL_HANDLE ||
+        instance_generation.presentationQueue() == VK_NULL_HANDLE)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::LogicalDeviceNotLive, preflight);
+    }
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+        request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::NativeWindowGenerationMismatch, preflight);
+    }
+
+    const auto* global_dispatch        = &*instance_generation.mGlobalDispatch;
+    const auto* surface_generation     = instance_generation.mSurfaceGeneration.get();
+    const auto* selection              = instance_generation.mPresentationDeviceGeneration.get();
+    const auto* logical_device         = instance_generation.mLogicalDeviceGeneration.get();
+    const auto* original_configuration = instance_generation.mSwapchainConfigurationGeneration.get();
+    const auto* original_swapchain     = instance_generation.mSwapchainGeneration.get();
+    const auto* original_images        = instance_generation.mSwapchainImagesGeneration.get();
+    const auto* original_frame_slot    = instance_generation.mSwapchainFrameSlotGeneration.get();
+    const std::uint64_t original_ownership_epoch = instance_generation.mOwnershipTransitionEpoch;
+
+    const PFN_vkGetInstanceProcAddr get_instance_proc_addr           = global_dispatch->getInstanceProcAddr();
+    const VkInstance                instance                         = instance_generation.mInstance;
+    const std::uint64_t             native_window_generation         = instance_generation.mNativeWindowGeneration;
+    const VkSurfaceKHR              surface                          = surface_generation->surface();
+    const std::uint64_t             surface_native_window_generation = surface_generation->nativeWindowGeneration();
+    const VkPhysicalDevice          physical_device                  = selection->physicalDevice();
+    const std::uint32_t             physical_device_index            = selection->physicalDeviceIndex();
+    const VkDevice                  device                           = logical_device->device();
+    const VkQueue                   queue                            = logical_device->queue();
+    const std::uint32_t             queue_family                     = logical_device->queueFamilyIndex();
+    const std::uint32_t             queue_index                      = logical_device->queueIndex();
+    const VkExtent2D                drawable_extent                  = *request.mDrawableExtent;
+
+    const auto parents_still_live = [&]() noexcept
+    {
+        return instance_generation.mGlobalDispatch && &*instance_generation.mGlobalDispatch == global_dispatch &&
+               instance_generation.mGlobalDispatch->getInstanceProcAddr() == get_instance_proc_addr &&
+               instance_generation.mInstance == instance && instance_generation.mDestroyInstance &&
+               instance_generation.mNativeWindowGeneration == native_window_generation &&
+               instance_generation.mSurfaceGeneration.get() == surface_generation &&
+               surface_generation->surface() == surface &&
+               surface_generation->nativeWindowGeneration() == surface_native_window_generation &&
+               instance_generation.mPresentationDeviceGeneration.get() == selection &&
+               selection->getInstanceProcAddr() == get_instance_proc_addr && selection->physicalDevice() == physical_device &&
+               selection->physicalDeviceIndex() == physical_device_index && selection->selectedFor(instance, surface) &&
+               instance_generation.mLogicalDeviceGeneration.get() == logical_device &&
+               logical_device->getInstanceProcAddr() == get_instance_proc_addr && logical_device->device() == device &&
+               logical_device->queue() == queue && logical_device->queueFamilyIndex() == queue_family &&
+               logical_device->queueIndex() == queue_index && logical_device->createdFor(*selection);
+    };
+
+    const auto chain_is_authentic = [&]() noexcept
+    {
+        const auto* configuration = instance_generation.mSwapchainConfigurationGeneration.get();
+        const auto* swapchain     = instance_generation.mSwapchainGeneration.get();
+        const auto* images        = instance_generation.mSwapchainImagesGeneration.get();
+        const auto* frame_slot    = instance_generation.mSwapchainFrameSlotGeneration.get();
+
+        if ((swapchain && !configuration) || (images && !swapchain) || (frame_slot && !images))
+        {
+            return false;
+        }
+        if (configuration && !configuration->createdFor(*selection, *logical_device, configuration->drawableExtent()))
+        {
+            return false;
+        }
+        if (swapchain && !swapchain->createdFor(*logical_device, *configuration))
+        {
+            return false;
+        }
+        if (images && !images->createdFor(*logical_device, *configuration, *swapchain))
+        {
+            return false;
+        }
+        return !frame_slot || frame_slot->createdFor(*logical_device, *configuration, *swapchain, *images);
+    };
+
+    const auto reset_refusal = [&](VulkanSwapchainChainRebuildPhase      phase,
+                                   VulkanSwapchainChainRebuildChildError child_error)
+        -> std::optional<VulkanSwapchainChainRebuildError>
+    {
+        if (!instance_generation.mSwapchainFrameSlotGeneration)
+        {
+            return std::nullopt;
+        }
+        const VulkanSwapchainFrameSlotDisposition disposition =
+            instance_generation.mSwapchainFrameSlotGeneration->disposition();
+        if (disposition == VulkanSwapchainFrameSlotDisposition::DeviceLost)
+        {
+            return swapchainChainRebuildFailure(
+                VulkanSwapchainChainRebuildCode::DeviceRecoveryRequired, phase, std::move(child_error), disposition);
+        }
+        if (!frameSlotDispositionAllowsReset(disposition))
+        {
+            return swapchainChainRebuildFailure(
+                VulkanSwapchainChainRebuildCode::FrameSlotResetRefused, phase, std::move(child_error), disposition);
+        }
+        return std::nullopt;
+    };
+
+    if (!parents_still_live())
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PublicationFailure, preflight);
+    }
+    if (!chain_is_authentic())
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PublicationFailure, preflight);
+    }
+    if (auto error = reset_refusal(preflight, {}))
+    {
+        return *error;
+    }
+
+    const auto original_children_still_published = [&]() noexcept
+    {
+        return instance_generation.mSwapchainConfigurationGeneration.get() == original_configuration &&
+               instance_generation.mSwapchainGeneration.get() == original_swapchain &&
+               instance_generation.mSwapchainImagesGeneration.get() == original_images &&
+               instance_generation.mSwapchainFrameSlotGeneration.get() == original_frame_slot;
+    };
+
+    const bool instance_owner_current =
+        request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, instance_generation);
+    if (auto error = reset_refusal(preflight, {}))
+    {
+        return *error;
+    }
+    if (instance_generation.mOwnershipTransitionEpoch != original_ownership_epoch)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PublicationFailure, preflight);
+    }
+    if (!instance_owner_current)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::StaleInstanceOwner, preflight);
+    }
+    if (!parents_still_live() || !chain_is_authentic() || !original_children_still_published())
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PublicationFailure, preflight);
+    }
+
+    const bool window_generation_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+    if (auto error = reset_refusal(preflight, {}))
+    {
+        return *error;
+    }
+    if (instance_generation.mOwnershipTransitionEpoch != original_ownership_epoch)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PublicationFailure, preflight);
+    }
+    if (!window_generation_current)
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::StaleWindowGeneration, preflight);
+    }
+    if (!parents_still_live() || !chain_is_authentic() || !original_children_still_published())
+    {
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PublicationFailure, preflight);
+    }
+    if (auto error = reset_refusal(preflight, {}))
+    {
+        return *error;
+    }
+
+    if (!instance_generation.resetSwapchainConfigurationGeneration())
+    {
+        const std::optional<VulkanSwapchainFrameSlotDisposition> disposition =
+            instance_generation.swapchainFrameSlotDisposition();
+        const VulkanSwapchainChainRebuildCode code =
+            disposition == VulkanSwapchainFrameSlotDisposition::DeviceLost
+                ? VulkanSwapchainChainRebuildCode::DeviceRecoveryRequired
+                : VulkanSwapchainChainRebuildCode::FrameSlotResetRefused;
+        return swapchainChainRebuildFailure(code, VulkanSwapchainChainRebuildPhase::Retirement, {}, disposition);
+    }
+
+    const auto no_swapchain_children = [&]() noexcept
+    {
+        return !instance_generation.mSwapchainConfigurationGeneration && !instance_generation.mSwapchainGeneration &&
+               !instance_generation.mSwapchainImagesGeneration && !instance_generation.mSwapchainFrameSlotGeneration;
+    };
+    const auto rollback_children = [&]() noexcept
+    {
+        return instance_generation.resetSwapchainConfigurationGeneration() && no_swapchain_children();
+    };
+    const auto rollback_or_report = [&](VulkanSwapchainChainRebuildError error)
+    {
+        if (auto refusal = reset_refusal(error.mPhase, error.mChildError))
+        {
+            return *refusal;
+        }
+        if (rollback_children())
+        {
+            return error;
+        }
+        if (auto refusal = reset_refusal(error.mPhase, error.mChildError))
+        {
+            return *refusal;
+        }
+        return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::RollbackFailure,
+                                            error.mPhase,
+                                            std::move(error.mChildError),
+                                            instance_generation.swapchainFrameSlotDisposition());
+    };
+    const auto final_freshness = [&]() -> std::optional<VulkanSwapchainChainRebuildError>
+    {
+        const std::uint64_t owner_callback_epoch = instance_generation.mOwnershipTransitionEpoch;
+        const bool owner_current =
+            request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, instance_generation);
+        if (auto error = reset_refusal(VulkanSwapchainChainRebuildPhase::FinalFreshness, {}))
+        {
+            return *error;
+        }
+        if (instance_generation.mOwnershipTransitionEpoch != owner_callback_epoch)
+        {
+            return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PublicationFailure,
+                                                VulkanSwapchainChainRebuildPhase::FinalFreshness);
+        }
+        if (!owner_current)
+        {
+            return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::StaleInstanceOwner,
+                                                VulkanSwapchainChainRebuildPhase::FinalFreshness);
+        }
+
+        const std::uint64_t window_callback_epoch = instance_generation.mOwnershipTransitionEpoch;
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (auto error = reset_refusal(VulkanSwapchainChainRebuildPhase::FinalFreshness, {}))
+        {
+            return *error;
+        }
+        if (instance_generation.mOwnershipTransitionEpoch != window_callback_epoch)
+        {
+            return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PublicationFailure,
+                                                VulkanSwapchainChainRebuildPhase::FinalFreshness);
+        }
+        if (!window_current)
+        {
+            return swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::StaleWindowGeneration,
+                                                VulkanSwapchainChainRebuildPhase::FinalFreshness);
+        }
+        return std::nullopt;
+    };
+    const auto publication_failure = [&](VulkanSwapchainChainRebuildPhase phase)
+    {
+        return rollback_or_report(
+            swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::PublicationFailure, phase));
+    };
+
+    if (!parents_still_live() || !no_swapchain_children())
+    {
+        return publication_failure(VulkanSwapchainChainRebuildPhase::Retirement);
+    }
+
+    if (drawable_extent.width == 0 || drawable_extent.height == 0)
+    {
+        if (auto error = final_freshness())
+        {
+            return rollback_or_report(*error);
+        }
+        if (!parents_still_live() || !no_swapchain_children())
+        {
+            return publication_failure(VulkanSwapchainChainRebuildPhase::FinalFreshness);
+        }
+        return VulkanSwapchainChainRebuildOutcome::Suspended;
+    }
+
+    const VulkanSwapchainConfigurationRequest configuration_request{ request.mNativeWindowGeneration, drawable_extent,
+                                                                     request.mInstanceOwnerCheck,
+                                                                     request.mWindowGenerationCheck };
+    if (VulkanSwapchainConfigurationAcquireResult error =
+            acquireSwapchainConfiguration(instance_generation, configuration_request, allocation_checkpoint))
+    {
+        return rollback_or_report(swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::ChildFailure,
+                                                               VulkanSwapchainChainRebuildPhase::Configuration,
+                                                               VulkanSwapchainChainRebuildChildError{ *error }));
+    }
+    if (!parents_still_live() || !chain_is_authentic())
+    {
+        return publication_failure(VulkanSwapchainChainRebuildPhase::Configuration);
+    }
+
+    const VulkanSwapchainRequest swapchain_request{ request.mNativeWindowGeneration, drawable_extent,
+                                                    request.mInstanceOwnerCheck, request.mWindowGenerationCheck };
+    if (VulkanSwapchainAcquireResult error = acquireSwapchain(instance_generation, swapchain_request, allocation_checkpoint))
+    {
+        return rollback_or_report(swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::ChildFailure,
+                                                               VulkanSwapchainChainRebuildPhase::Swapchain,
+                                                               VulkanSwapchainChainRebuildChildError{ *error }));
+    }
+    if (!parents_still_live() || !chain_is_authentic())
+    {
+        return publication_failure(VulkanSwapchainChainRebuildPhase::Swapchain);
+    }
+
+    const VulkanSwapchainImagesRequest images_request{ request.mNativeWindowGeneration, drawable_extent,
+                                                       request.mInstanceOwnerCheck, request.mWindowGenerationCheck };
+    if (VulkanSwapchainImagesAcquireResult error = acquireSwapchainImages(instance_generation, images_request, allocation_checkpoint))
+    {
+        return rollback_or_report(swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::ChildFailure,
+                                                               VulkanSwapchainChainRebuildPhase::Images,
+                                                               VulkanSwapchainChainRebuildChildError{ *error }));
+    }
+    if (!parents_still_live() || !chain_is_authentic())
+    {
+        return publication_failure(VulkanSwapchainChainRebuildPhase::Images);
+    }
+
+    const VulkanSwapchainFrameSlotRequest frame_slot_request{ request.mNativeWindowGeneration, drawable_extent,
+                                                              request.mInstanceOwnerCheck,
+                                                              request.mWindowGenerationCheck };
+    if (VulkanSwapchainFrameSlotAcquireResult error =
+            acquireSwapchainFrameSlot(instance_generation, frame_slot_request, allocation_checkpoint))
+    {
+        return rollback_or_report(swapchainChainRebuildFailure(VulkanSwapchainChainRebuildCode::ChildFailure,
+                                                               VulkanSwapchainChainRebuildPhase::FrameSlot,
+                                                               VulkanSwapchainChainRebuildChildError{ *error }));
+    }
+    if (!parents_still_live() || !chain_is_authentic())
+    {
+        return publication_failure(VulkanSwapchainChainRebuildPhase::FrameSlot);
+    }
+
+    if (auto error = final_freshness())
+    {
+        return rollback_or_report(*error);
+    }
+    if (auto error = reset_refusal(VulkanSwapchainChainRebuildPhase::FinalFreshness, {}))
+    {
+        return *error;
+    }
+
+    const auto* configuration = instance_generation.mSwapchainConfigurationGeneration.get();
+    const auto* swapchain     = instance_generation.mSwapchainGeneration.get();
+    const auto* images        = instance_generation.mSwapchainImagesGeneration.get();
+    const auto* frame_slot    = instance_generation.mSwapchainFrameSlotGeneration.get();
+    if (!parents_still_live() || !configuration || !swapchain || !images || !frame_slot ||
+        !configuration->createdFor(*selection, *logical_device, drawable_extent) ||
+        !swapchain->createdFor(*logical_device, *configuration) ||
+        !images->createdFor(*logical_device, *configuration, *swapchain) ||
+        !frame_slot->createdFor(*logical_device, *configuration, *swapchain, *images))
+    {
+        return publication_failure(VulkanSwapchainChainRebuildPhase::FinalFreshness);
+    }
+
+    return VulkanSwapchainChainRebuildOutcome::Ready;
 }
 
 SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchainFrameSlot(
@@ -2660,6 +3475,13 @@ namespace VulkanInstanceDetail
                                                                     AllocationCheckpoint                   allocation_checkpoint) noexcept
     {
         return VulkanInstanceGenerationFactory::acquireSwapchainFrameSlot(instance_generation, request, allocation_checkpoint);
+    }
+
+    VulkanSwapchainChainRebuildResult rebuildSwapchainChain(VulkanInstanceGeneration&                 instance_generation,
+                                                             const VulkanSwapchainChainRebuildRequest& request,
+                                                             AllocationCheckpoint                      allocation_checkpoint) noexcept
+    {
+        return VulkanInstanceGenerationFactory::rebuildSwapchainChain(instance_generation, request, allocation_checkpoint);
     }
 
 } // namespace VulkanInstanceDetail
