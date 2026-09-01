@@ -46,7 +46,8 @@ enum class VulkanPhysicalDeviceCommand : std::uint8_t
     GetPhysicalDeviceProperties,
     GetPhysicalDeviceQueueFamilyProperties,
     GetPhysicalDeviceSurfaceSupport,
-    EnumerateDeviceExtensionProperties
+    EnumerateDeviceExtensionProperties,
+    GetPhysicalDeviceFeatures2
 };
 
 enum class VulkanPhysicalDeviceRejection : std::uint8_t
@@ -55,6 +56,8 @@ enum class VulkanPhysicalDeviceRejection : std::uint8_t
     UnsupportedApiVariant,
     InsufficientApiVersion,
     MissingSwapchainExtension,
+    MissingSwapchainMaintenance1Extension,
+    SwapchainMaintenance1FeatureUnsupported,
     MissingUnifiedGraphicsPresentQueueFamily
 };
 
@@ -116,6 +119,7 @@ public:
     std::uint32_t                     apiVersion() const noexcept { return mProperties.apiVersion; }
     std::uint32_t                     queueFamilyIndex() const noexcept { return mQueueFamilyIndex; }
     const VkQueueFamilyProperties&    queueFamilyProperties() const noexcept { return mQueueFamilyProperties; }
+    bool                              swapchainMaintenance1Supported() const noexcept { return mSwapchainMaintenance1Supported; }
     bool                              portabilitySubsetAdvertised() const noexcept { return mPortabilitySubsetAdvertised; }
     bool                              portabilitySubsetRequired() const noexcept { return mPortabilitySubsetAdvertised; }
     std::span<const std::string_view> requiredDeviceExtensions() const noexcept
@@ -135,6 +139,7 @@ private:
                                    const VkPhysicalDeviceProperties& properties,
                                    std::uint32_t                     queue_family_index,
                                    const VkQueueFamilyProperties&    queue_family_properties,
+                                   bool                              swapchain_maintenance_1_supported,
                                    bool                              portability_subset_advertised) noexcept;
 
     PFN_vkGetInstanceProcAddr       mGetInstanceProcAddr = nullptr;
@@ -145,8 +150,9 @@ private:
     VkPhysicalDeviceProperties      mProperties{};
     std::uint32_t                   mQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     VkQueueFamilyProperties         mQueueFamilyProperties{};
-    bool                            mPortabilitySubsetAdvertised = false;
-    std::array<std::string_view, 2> mRequiredDeviceExtensions{};
+    bool                            mSwapchainMaintenance1Supported = false;
+    bool                            mPortabilitySubsetAdvertised    = false;
+    std::array<std::string_view, 3> mRequiredDeviceExtensions{};
     std::size_t                     mRequiredDeviceExtensionCount = 0;
 };
 

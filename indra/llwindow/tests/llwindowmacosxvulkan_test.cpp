@@ -28,12 +28,24 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace
 {
+
+#if defined(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)
+constexpr std::string_view SURFACE_CAPABILITIES_2_EXTENSION = VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME;
+#else
+constexpr std::string_view SURFACE_CAPABILITIES_2_EXTENSION = "VK_KHR_get_surface_capabilities2";
+#endif
+#if defined(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
+constexpr std::string_view SURFACE_MAINTENANCE_EXTENSION = VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
+#else
+constexpr std::string_view SURFACE_MAINTENANCE_EXTENSION = "VK_KHR_surface_maintenance1";
+#endif
 
 enum class Event
 {
@@ -131,6 +143,8 @@ struct FakeState
     bool                        mInstanceGoneBeforeNativeDestroy        = false;
     bool                        mLoaderLiveDuringNativeDestroy          = false;
     bool                        mAllOwnersGoneBeforeLoaderClose         = false;
+    bool                        mSurfaceCapabilities2Enabled            = false;
+    bool                        mSurfaceMaintenanceEnabled              = false;
 
     void record(Event event) noexcept
     {
@@ -180,8 +194,9 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateInstanceExtensionProperties(const ch
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    constexpr std::array<const char*, 4> extensions{ VK_KHR_SURFACE_EXTENSION_NAME, "VK_EXT_metal_surface",
-                                                     VK_EXT_DEBUG_UTILS_EXTENSION_NAME, "VK_KHR_portability_enumeration" };
+    constexpr std::array<const char*, 6> extensions{ VK_KHR_SURFACE_EXTENSION_NAME,      "VK_EXT_metal_surface",
+                                                     VK_EXT_DEBUG_UTILS_EXTENSION_NAME,  "VK_KHR_portability_enumeration",
+                                                     "VK_KHR_get_surface_capabilities2", "VK_KHR_surface_maintenance1" };
     if (!properties)
     {
         *count = static_cast<std::uint32_t>(extensions.size());
@@ -218,13 +233,28 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateInstanceLayerProperties(std::uint32_
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL fakeCreateInstance(const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance* instance) noexcept
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateInstance(const VkInstanceCreateInfo* create_info,
+                                                  const VkAllocationCallbacks*,
+                                                  VkInstance* instance) noexcept
 {
-    if (!gState || !instance)
+    if (!gState || !create_info || !instance)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     gState->record(Event::CreateInstance);
+    gState->mSurfaceCapabilities2Enabled = false;
+    gState->mSurfaceMaintenanceEnabled   = false;
+    for (std::uint32_t index = 0; index < create_info->enabledExtensionCount; ++index)
+    {
+        if (create_info->ppEnabledExtensionNames[index] == SURFACE_CAPABILITIES_2_EXTENSION)
+        {
+            gState->mSurfaceCapabilities2Enabled = true;
+        }
+        if (create_info->ppEnabledExtensionNames[index] == SURFACE_MAINTENANCE_EXTENSION)
+        {
+            gState->mSurfaceMaintenanceEnabled = true;
+        }
+    }
     *instance = gState->mNullInstance ? VK_NULL_HANDLE : gState->mInstance;
     return gState->mInstanceResult;
 }
@@ -582,6 +612,13 @@ void window_macosx_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().retryEmptySwapchainFrameSlotCompletion()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retryEmptySwapchainFrameSlotCompletion()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireToPresentSwapchainFrameSlot()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireToPresentSwapchainFrameSlot()));
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotPresentation()));
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotPresentationCompletion()));
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().cancelSwapchainFrameSlotPresentation()));
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotCancellationCompletion()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainFrameSlotGeneration()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainImagesGeneration()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainGeneration()));
@@ -941,6 +978,14 @@ void window_macosx_vulkan_object::test<8>()
                owner->instanceGeneration()->apiVersion() == VK_API_VERSION_1_1 &&
                owner->instanceGeneration()->nativeWindowGeneration() == 31 && owner->instanceGeneration()->validationEnabled() &&
                owner->instanceGeneration()->portabilityEnumerationEnabled());
+    const auto& enabled_extensions = owner->instanceGeneration()->enabledExtensions();
+    ensure("explicit diagnostic instance acquisition adds surface maintenance dependencies in exact order",
+           state.mSurfaceCapabilities2Enabled && state.mSurfaceMaintenanceEnabled && enabled_extensions.size() == 6 &&
+               enabled_extensions[0] == VK_KHR_SURFACE_EXTENSION_NAME && enabled_extensions[1] == "VK_EXT_metal_surface" &&
+               enabled_extensions[2] == SURFACE_CAPABILITIES_2_EXTENSION && enabled_extensions[3] == SURFACE_MAINTENANCE_EXTENSION &&
+               enabled_extensions[4] == VK_EXT_DEBUG_UTILS_EXTENSION_NAME && enabled_extensions[5] == "VK_KHR_portability_enumeration" &&
+               owner->requirements()->requiredInstanceExtensions() ==
+                   std::vector<std::string>{ VK_KHR_SURFACE_EXTENSION_NAME, "VK_EXT_metal_surface" });
 
     ensure("the Metal surface generation is acquired", !owner->acquireSurfaceGeneration());
     ensure("the parent owns the exact surface generation",
@@ -1430,7 +1475,23 @@ void window_macosx_vulkan_object::test<16>()
     const auto* missing_selection_retry        = operationError(missing_selection_retry_result);
     ensure("completion retry does not refresh geometry when no configuration has retained an extent",
            missing_selection_retry &&
-               missing_selection_retry->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               missing_selection_retry->mCode == VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive &&
+               state.mRefreshCount == refreshes_after_surface + 2);
+    const auto  presentation_retry_result = owner->retrySwapchainFrameSlotPresentation();
+    const auto* presentation_retry        = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&presentation_retry_result);
+    const auto  presentation_completion_retry_result = owner->retrySwapchainFrameSlotPresentationCompletion();
+    const auto* presentation_completion_retry =
+        std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&presentation_completion_retry_result);
+    const auto  cancellation_result       = owner->cancelSwapchainFrameSlotPresentation();
+    const auto* cancellation              = operationError(cancellation_result);
+    const auto  cancellation_retry_result = owner->retrySwapchainFrameSlotCancellationCompletion();
+    const auto* cancellation_retry        = operationError(cancellation_retry_result);
+    ensure("presentation and cancellation retries use retained geometry without refreshing Cocoa state",
+           presentation_retry && presentation_retry->mCode == VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive &&
+               presentation_completion_retry &&
+               presentation_completion_retry->mCode == VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive &&
+               cancellation && cancellation->mCode == VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive &&
+               cancellation_retry && cancellation_retry->mCode == VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive &&
                state.mRefreshCount == refreshes_after_surface + 2);
     ensure("an unowned frame-slot generation reports no explicit reset", !owner->resetSwapchainFrameSlotGeneration());
 

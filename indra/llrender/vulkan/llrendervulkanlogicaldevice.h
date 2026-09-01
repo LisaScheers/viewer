@@ -71,22 +71,23 @@ public:
     VulkanLogicalDeviceGeneration(VulkanLogicalDeviceGeneration&& other) noexcept;
     VulkanLogicalDeviceGeneration& operator=(VulkanLogicalDeviceGeneration&&) = delete;
 
-    PFN_vkGetInstanceProcAddr         getInstanceProcAddr() const noexcept { return mGetInstanceProcAddr; }
-    VkInstance                        instance() const noexcept { return mInstance; }
-    VkSurfaceKHR                      surface() const noexcept { return mSurface; }
-    VkPhysicalDevice                  physicalDevice() const noexcept { return mPhysicalDevice; }
-    std::uint32_t                     physicalDeviceIndex() const noexcept { return mPhysicalDeviceIndex; }
-    VkDevice                          device() const noexcept { return mDevice; }
-    VkQueue                           queue() const noexcept { return mQueue; }
-    std::uint32_t                     queueFamilyIndex() const noexcept { return mQueueFamilyIndex; }
-    std::uint32_t                     queueIndex() const noexcept { return mQueueIndex; }
-    const VkPhysicalDeviceFeatures&   enabledFeatures() const noexcept { return mEnabledFeatures; }
-    bool                              independentBlendEnabled() const noexcept { return mEnabledFeatures.independentBlend == VK_TRUE; }
+    PFN_vkGetInstanceProcAddr       getInstanceProcAddr() const noexcept { return mGetInstanceProcAddr; }
+    VkInstance                      instance() const noexcept { return mInstance; }
+    VkSurfaceKHR                    surface() const noexcept { return mSurface; }
+    VkPhysicalDevice                physicalDevice() const noexcept { return mPhysicalDevice; }
+    std::uint32_t                   physicalDeviceIndex() const noexcept { return mPhysicalDeviceIndex; }
+    VkDevice                        device() const noexcept { return mDevice; }
+    VkQueue                         queue() const noexcept { return mQueue; }
+    std::uint32_t                   queueFamilyIndex() const noexcept { return mQueueFamilyIndex; }
+    std::uint32_t                   queueIndex() const noexcept { return mQueueIndex; }
+    const VkPhysicalDeviceFeatures& enabledFeatures() const noexcept { return mEnabledFeatures; }
+    bool                            independentBlendEnabled() const noexcept { return mEnabledFeatures.independentBlend == VK_TRUE; }
+    bool swapchainMaintenance1Enabled() const noexcept { return mEnabledSwapchainMaintenance1Features.swapchainMaintenance1 == VK_TRUE; }
     std::span<const std::string_view> enabledDeviceExtensions() const noexcept
     {
         return std::span<const std::string_view>(mEnabledDeviceExtensions.data(), mEnabledDeviceExtensionCount);
     }
-    bool portabilitySubsetEnabled() const noexcept { return mEnabledDeviceExtensionCount == 2; }
+    bool portabilitySubsetEnabled() const noexcept { return mEnabledDeviceExtensionCount == 3; }
     bool createdFor(const VulkanPhysicalDeviceGeneration& physical_device_generation) const noexcept;
 
     void reset() noexcept;
@@ -99,19 +100,20 @@ private:
                                   VkQueue                               queue,
                                   PFN_vkDestroyDevice                   destroy_device) noexcept;
 
-    PFN_vkGetInstanceProcAddr       mGetInstanceProcAddr = nullptr;
-    VkInstance                      mInstance            = VK_NULL_HANDLE;
-    VkSurfaceKHR                    mSurface             = VK_NULL_HANDLE;
-    VkPhysicalDevice                mPhysicalDevice      = VK_NULL_HANDLE;
-    std::uint32_t                   mPhysicalDeviceIndex = 0;
-    VkDevice                        mDevice              = VK_NULL_HANDLE;
-    VkQueue                         mQueue               = VK_NULL_HANDLE;
-    std::uint32_t                   mQueueFamilyIndex    = VK_QUEUE_FAMILY_IGNORED;
-    std::uint32_t                   mQueueIndex          = 0;
-    VkPhysicalDeviceFeatures        mEnabledFeatures{};
-    std::array<std::string_view, 2> mEnabledDeviceExtensions{};
-    std::size_t                     mEnabledDeviceExtensionCount = 0;
-    PFN_vkDestroyDevice             mDestroyDevice               = nullptr;
+    PFN_vkGetInstanceProcAddr                        mGetInstanceProcAddr = nullptr;
+    VkInstance                                       mInstance            = VK_NULL_HANDLE;
+    VkSurfaceKHR                                     mSurface             = VK_NULL_HANDLE;
+    VkPhysicalDevice                                 mPhysicalDevice      = VK_NULL_HANDLE;
+    std::uint32_t                                    mPhysicalDeviceIndex = 0;
+    VkDevice                                         mDevice              = VK_NULL_HANDLE;
+    VkQueue                                          mQueue               = VK_NULL_HANDLE;
+    std::uint32_t                                    mQueueFamilyIndex    = VK_QUEUE_FAMILY_IGNORED;
+    std::uint32_t                                    mQueueIndex          = 0;
+    VkPhysicalDeviceFeatures                         mEnabledFeatures{};
+    VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR mEnabledSwapchainMaintenance1Features{};
+    std::array<std::string_view, 3>                  mEnabledDeviceExtensions{};
+    std::size_t                                      mEnabledDeviceExtensionCount = 0;
+    PFN_vkDestroyDevice                              mDestroyDevice               = nullptr;
 };
 
 using VulkanLogicalDeviceResolutionResult = std::variant<VulkanLogicalDeviceResolutionError, VulkanLogicalDeviceGeneration>;

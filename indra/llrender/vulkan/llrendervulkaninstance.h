@@ -469,14 +469,17 @@ struct VulkanSwapchainFrameSlotParentOperationError
 
 using VulkanSwapchainFrameSlotParentOperationResult =
     std::variant<VulkanSwapchainFrameSlotParentOperationError, VulkanSwapchainFrameSlotDisposition>;
+using VulkanSwapchainFrameSlotParentPresentationResult =
+    std::variant<VulkanSwapchainFrameSlotParentOperationError, VulkanSwapchainFrameSlotPresentationSuccess>;
 
 // This generation owns the Vulkan objects but borrows the loader behind the
 // originating window's resolver. It must be reset before that window destroys
 // its requirements generation or releases its loader references. If it owns a
 // frame slot, callers must externally serialize host access and ensure no
-// operation still uses the slot's fence or semaphore and its command buffer is
-// not pending before destruction or any reset that can transitively destroy it.
-// Destruction while the frame-slot disposition is Pending violates the caller
+// operation still uses a slot fence or semaphore, its command buffer is not
+// pending, and no swapchain image remains acquired before destruction or any
+// reset that can transitively destroy it. Destruction while the frame-slot
+// disposition names an acquired or pending obligation violates the caller
 // contract; the bool reset APIs only provide a defensive live-owner guard.
 class VulkanInstanceGeneration
 {
@@ -509,6 +512,7 @@ public:
     std::uint32_t                     presentationQueueFamilyIndex() const noexcept;
     VkQueueFamilyProperties           presentationQueueFamilyProperties() const noexcept;
     std::span<const std::string_view> requiredDeviceExtensions() const noexcept;
+    bool                              swapchainMaintenance1Supported() const noexcept;
     bool                              portabilitySubsetRequired() const noexcept;
     bool                              hasLogicalDeviceGeneration() const noexcept;
     VkDevice                          logicalDevice() const noexcept;
@@ -518,6 +522,7 @@ public:
     std::uint32_t                     logicalDeviceQueueIndex() const noexcept;
     VkPhysicalDeviceFeatures          logicalDeviceEnabledFeatures() const noexcept;
     std::span<const std::string_view> enabledDeviceExtensions() const noexcept;
+    bool                              swapchainMaintenance1Enabled() const noexcept;
     bool                              portabilitySubsetEnabled() const noexcept;
     bool                              hasSwapchainConfigurationGeneration() const noexcept;
     VkExtent2D                        swapchainDrawableExtent() const noexcept;
@@ -544,7 +549,10 @@ public:
     VkCommandPool                     swapchainFrameCommandPool() const noexcept;
     VkCommandBuffer                   swapchainFrameCommandBuffer() const noexcept;
     VkSemaphore                       swapchainFrameImageAvailableSemaphore() const noexcept;
+    VkSemaphore                       swapchainFramePresentationReadySemaphore() const noexcept;
     VkFence                           swapchainFrameSubmissionFence() const noexcept;
+    VkFence                           swapchainFramePresentCompletionFence() const noexcept;
+    std::optional<std::uint32_t>      swapchainFrameAcquiredImageIndex() const noexcept;
 
     std::optional<VulkanSwapchainFrameSlotDisposition> swapchainFrameSlotDisposition() const noexcept;
 
@@ -560,10 +568,20 @@ public:
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentOperationResult retryEmptySwapchainFrameSlotCompletion(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+    VulkanSwapchainFrameSlotParentPresentationResult acquireToPresentSwapchainFrameSlot(
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+    VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation(
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+    VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentationCompletion(
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+    VulkanSwapchainFrameSlotParentOperationResult cancelSwapchainFrameSlotPresentation(
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+    VulkanSwapchainFrameSlotParentOperationResult retrySwapchainFrameSlotCancellationCompletion(
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     // No operation may still use the slot's fence or semaphore, and its command
     // buffer must not be pending. Callers externally serialize these resets.
     // False leaves this generation and every parent intact because submitted
-    // work still has a completion obligation.
+    // work or an acquired image still has an outstanding obligation.
     bool resetSwapchainFrameSlotGeneration() noexcept;
     bool resetSwapchainImagesGeneration() noexcept;
     bool resetSwapchainGeneration() noexcept;

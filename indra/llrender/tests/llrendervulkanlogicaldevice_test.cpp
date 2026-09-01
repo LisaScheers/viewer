@@ -86,7 +86,7 @@ struct FakeState
     VkPhysicalDevice           mCreatePhysicalDevice    = VK_NULL_HANDLE;
     bool                       mAllResolvedBeforeCreate = false;
     bool                       mCreateInfoExact         = false;
-    std::array<std::string, 2> mCreatedExtensions{};
+    std::array<std::string, 3> mCreatedExtensions{};
     std::size_t                mCreatedExtensionCount = 0;
 
     std::size_t   mQueueCalls       = 0;
@@ -200,7 +200,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysical
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    const std::uint32_t required_count = gFakeState->mPortabilitySubset ? 2 : 1;
+    const std::uint32_t required_count = gFakeState->mPortabilitySubset ? 3 : 2;
     if (!properties)
     {
         *count = required_count;
@@ -212,13 +212,29 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysical
     }
     properties[0] = {};
     std::strncpy(properties[0].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
+    properties[1] = {};
+    std::strncpy(properties[1].extensionName, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
     if (gFakeState->mPortabilitySubset)
     {
-        properties[1] = {};
-        std::strncpy(properties[1].extensionName, "VK_KHR_portability_subset", VK_MAX_EXTENSION_NAME_SIZE - 1);
+        properties[2] = {};
+        std::strncpy(properties[2].extensionName, "VK_KHR_portability_subset", VK_MAX_EXTENSION_NAME_SIZE - 1);
     }
     *count = required_count;
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures2(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures2* features) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !features)
+    {
+        return;
+    }
+    auto* maintenance = static_cast<VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(features->pNext);
+    if (maintenance && features->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 &&
+        maintenance->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR && maintenance->pNext == nullptr)
+    {
+        maintenance->swapchainMaintenance1 = VK_TRUE;
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures* features) noexcept
@@ -249,6 +265,13 @@ bool exactEnabledFeatures(const VkPhysicalDeviceFeatures* features) noexcept
     return std::memcmp(features, &expected, sizeof(expected)) == 0;
 }
 
+bool exactSwapchainMaintenanceFeature(const void* next) noexcept
+{
+    const auto* maintenance = static_cast<const VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(next);
+    return maintenance && maintenance->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR &&
+           maintenance->pNext == nullptr && maintenance->swapchainMaintenance1 == VK_TRUE;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice             physical_device,
                                                 const VkDeviceCreateInfo*    create_info,
                                                 const VkAllocationCallbacks* allocator,
@@ -265,10 +288,10 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice             phy
     gFakeState->mCreatedExtensionCount   = 0;
 
     bool exact = physical_device == gFakeState->mPhysicalDevice && allocator == nullptr && create_info &&
-                 create_info->sType == VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO && create_info->pNext == nullptr && create_info->flags == 0 &&
-                 create_info->queueCreateInfoCount == 1 && create_info->pQueueCreateInfos && create_info->enabledLayerCount == 0 &&
-                 create_info->ppEnabledLayerNames == nullptr &&
-                 create_info->enabledExtensionCount == (gFakeState->mPortabilitySubset ? 2u : 1u) && create_info->ppEnabledExtensionNames &&
+                 create_info->sType == VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO && exactSwapchainMaintenanceFeature(create_info->pNext) &&
+                 create_info->flags == 0 && create_info->queueCreateInfoCount == 1 && create_info->pQueueCreateInfos &&
+                 create_info->enabledLayerCount == 0 && create_info->ppEnabledLayerNames == nullptr &&
+                 create_info->enabledExtensionCount == (gFakeState->mPortabilitySubset ? 3u : 2u) && create_info->ppEnabledExtensionNames &&
                  exactEnabledFeatures(create_info->pEnabledFeatures);
     if (exact)
     {
@@ -280,7 +303,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice             phy
 
     if (create_info && create_info->ppEnabledExtensionNames)
     {
-        gFakeState->mCreatedExtensionCount = std::min<std::size_t>(create_info->enabledExtensionCount, 2);
+        gFakeState->mCreatedExtensionCount = std::min<std::size_t>(create_info->enabledExtensionCount, 3);
         for (std::size_t index = 0; index < gFakeState->mCreatedExtensionCount; ++index)
         {
             const char* name = create_info->ppEnabledExtensionNames[index];
@@ -291,10 +314,11 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice             phy
             }
             gFakeState->mCreatedExtensions[index] = name;
         }
-        exact = exact && gFakeState->mCreatedExtensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        exact = exact && gFakeState->mCreatedExtensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+                gFakeState->mCreatedExtensions[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
         if (gFakeState->mPortabilitySubset)
         {
-            exact = exact && gFakeState->mCreatedExtensions[1] == "VK_KHR_portability_subset";
+            exact = exact && gFakeState->mCreatedExtensions[2] == "VK_KHR_portability_subset";
         }
     }
     gFakeState->mCreateInfoExact = exact;
@@ -356,6 +380,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
     if (std::strcmp(name, "vkEnumerateDeviceExtensionProperties") == 0)
     {
         return eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceFeatures2") == 0)
+    {
+        return eraseFunctionType(fakeGetPhysicalDeviceFeatures2);
     }
 
     gFakeState->mLogicalCommandLookups.emplace_back(name);
@@ -519,8 +547,9 @@ void render_vulkan_logical_device_object::test<4>()
            state.mAllResolvedBeforeFeatures && state.mAllResolvedBeforeCreate);
     ensure("the device create transaction is exact",
            state.mCreateCalls == 1 && state.mCreatePhysicalDevice == state.mPhysicalDevice && state.mCreateInfoExact);
-    ensure("only swapchain is enabled when portability subset was absent",
-           state.mCreatedExtensionCount == 1 && state.mCreatedExtensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    ensure("swapchain maintenance follows swapchain when portability subset was absent",
+           state.mCreatedExtensionCount == 2 && state.mCreatedExtensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+               state.mCreatedExtensions[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
     ensure("queue zero is retrieved from the selected family",
            state.mQueueCalls == 1 && state.mQueueDevice == state.mDeviceOutput && state.mQueueFamilyInput == state.mQueueFamily &&
                state.mQueueIndexInput == 0);
@@ -529,13 +558,15 @@ void render_vulkan_logical_device_object::test<4>()
                generation.surface() == state.mSurface && generation.physicalDevice() == state.mPhysicalDevice &&
                generation.device() == state.mDeviceOutput && generation.queue() == state.mQueueOutput &&
                generation.queueFamilyIndex() == state.mQueueFamily && generation.queueIndex() == 0 && generation.createdFor(selection));
-    ensure("only independentBlend is retained as enabled", generation.independentBlendEnabled());
+    ensure("the required core and chained features are retained",
+           generation.independentBlendEnabled() && generation.swapchainMaintenance1Enabled());
     VkPhysicalDeviceFeatures expected_features{};
     expected_features.independentBlend = VK_TRUE;
     ensure("the retained feature structure contains no extra feature",
            std::memcmp(&generation.enabledFeatures(), &expected_features, sizeof(expected_features)) == 0);
     ensure("the retained extension policy has fixed owned identity",
-           generation.enabledDeviceExtensions().size() == 1 && generation.enabledDeviceExtensions()[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+           generation.enabledDeviceExtensions().size() == 2 && generation.enabledDeviceExtensions()[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+               generation.enabledDeviceExtensions()[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME &&
                !generation.portabilitySubsetEnabled());
 
     generation.reset();
@@ -559,14 +590,17 @@ void render_vulkan_logical_device_object::test<5>()
     auto generation          = takeGeneration(resolveVulkanLogicalDeviceGeneration(selection));
     auto moved               = std::move(generation);
 
-    ensure("portability subset follows swapchain in exact create order",
-           state.mCreateInfoExact && state.mCreatedExtensionCount == 2 && state.mCreatedExtensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
-               state.mCreatedExtensions[1] == "VK_KHR_portability_subset");
-    ensure("the moved generation retains the exact two-extension policy",
-           moved.portabilitySubsetEnabled() && moved.enabledDeviceExtensions().size() == 2 &&
+    ensure("portability subset follows both required extensions in exact create order",
+           state.mCreateInfoExact && state.mCreatedExtensionCount == 3 && state.mCreatedExtensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+               state.mCreatedExtensions[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME &&
+               state.mCreatedExtensions[2] == "VK_KHR_portability_subset");
+    ensure("the moved generation retains the exact three-extension policy and chained feature",
+           moved.portabilitySubsetEnabled() && moved.swapchainMaintenance1Enabled() && moved.enabledDeviceExtensions().size() == 3 &&
                moved.enabledDeviceExtensions()[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
-               moved.enabledDeviceExtensions()[1] == "VK_KHR_portability_subset" && moved.createdFor(selection));
-    ensure("move disarms the source owner", generation.device() == VK_NULL_HANDLE && generation.queue() == VK_NULL_HANDLE);
+               moved.enabledDeviceExtensions()[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME &&
+               moved.enabledDeviceExtensions()[2] == "VK_KHR_portability_subset" && moved.createdFor(selection));
+    ensure("move disarms the source owner and its retained maintenance capability",
+           generation.device() == VK_NULL_HANDLE && generation.queue() == VK_NULL_HANDLE && !generation.swapchainMaintenance1Enabled());
 
     moved.reset();
     ensure("the moved owner destroys its device exactly once", state.mDestroyCalls == 1 && state.mDestroyedDevice == state.mDeviceOutput);

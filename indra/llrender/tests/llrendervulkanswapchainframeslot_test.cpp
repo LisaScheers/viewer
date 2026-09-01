@@ -62,7 +62,11 @@ enum class MissingCommand : std::uint8_t
     BeginCommandBuffer,
     EndCommandBuffer,
     ResetFences,
-    QueueSubmit
+    QueueSubmit,
+    AcquireNextImage,
+    CmdPipelineBarrier,
+    QueuePresent,
+    ReleaseSwapchainImages
 };
 
 struct FenceWaitRecord
@@ -70,6 +74,7 @@ struct FenceWaitRecord
     VkDevice      mDevice     = VK_NULL_HANDLE;
     std::uint32_t mFenceCount = 0;
     VkFence       mFence      = VK_NULL_HANDLE;
+    VkFence       mSecondFence = VK_NULL_HANDLE;
     VkBool32      mWaitAll    = VK_FALSE;
     std::uint64_t mTimeout    = 0;
 };
@@ -85,6 +90,7 @@ struct FenceResetRecord
     VkDevice      mDevice     = VK_NULL_HANDLE;
     std::uint32_t mFenceCount = 0;
     VkFence       mFence      = VK_NULL_HANDLE;
+    VkFence       mSecondFence = VK_NULL_HANDLE;
 };
 
 struct QueueSubmitRecord
@@ -101,6 +107,48 @@ struct QueueSubmitRecord
     VkCommandBuffer mCommandBuffer        = VK_NULL_HANDLE;
     std::uint32_t   mSignalSemaphoreCount = 0;
     bool            mSignalSemaphoresNull = false;
+    VkSemaphore     mWaitSemaphore        = VK_NULL_HANDLE;
+    VkPipelineStageFlags mWaitStage       = 0;
+    VkSemaphore     mSignalSemaphore      = VK_NULL_HANDLE;
+};
+
+struct AcquireRecord
+{
+    VkDevice       mDevice    = VK_NULL_HANDLE;
+    VkSwapchainKHR mSwapchain = VK_NULL_HANDLE;
+    std::uint64_t  mTimeout   = 0;
+    VkSemaphore    mSemaphore = VK_NULL_HANDLE;
+    VkFence        mFence     = VK_NULL_HANDLE;
+};
+
+struct BarrierRecord
+{
+    VkCommandBuffer       mCommandBuffer = VK_NULL_HANDLE;
+    VkPipelineStageFlags  mSourceStage   = 0;
+    VkPipelineStageFlags  mDestinationStage = 0;
+    VkDependencyFlags     mDependencyFlags = 0;
+    std::uint32_t         mMemoryBarrierCount = 0;
+    std::uint32_t         mBufferBarrierCount = 0;
+    std::uint32_t         mImageBarrierCount = 0;
+    VkImageMemoryBarrier  mImageBarrier{};
+};
+
+struct PresentRecord
+{
+    VkQueue             mQueue = VK_NULL_HANDLE;
+    VkPresentInfoKHR    mInfo{};
+    VkSwapchainKHR      mSwapchain = VK_NULL_HANDLE;
+    std::uint32_t       mImageIndex = 0;
+    VkSemaphore         mWaitSemaphore = VK_NULL_HANDLE;
+    VkSwapchainPresentFenceInfoKHR mFenceInfo{};
+    VkFence             mFence = VK_NULL_HANDLE;
+};
+
+struct ReleaseRecord
+{
+    VkDevice                          mDevice = VK_NULL_HANDLE;
+    VkReleaseSwapchainImagesInfoKHR   mInfo{};
+    std::uint32_t                     mImageIndex = 0;
 };
 
 struct FakeState
@@ -146,6 +194,9 @@ struct FakeState
     VkResult        mFenceResult          = VK_SUCCESS;
     VkFence         mFenceOutput          = fakeHandle<VkFence>(0x9300);
 
+    VkSemaphore presentationReadySemaphore() const noexcept { return fakeHandle<VkSemaphore>(0x9201); }
+    VkFence     presentCompletionFence() const noexcept { return fakeHandle<VkFence>(0x9301); }
+
     std::vector<VkResult> mWaitResults;
     std::size_t           mNextWaitResult           = 0;
     VkResult              mResetCommandBufferResult = VK_SUCCESS;
@@ -153,6 +204,15 @@ struct FakeState
     VkResult              mEndCommandBufferResult   = VK_SUCCESS;
     VkResult              mResetFencesResult        = VK_SUCCESS;
     VkResult              mQueueSubmitResult        = VK_SUCCESS;
+    std::vector<VkResult> mQueueSubmitResults;
+    std::size_t           mNextQueueSubmitResult = 0;
+    std::vector<VkResult> mAcquireResults;
+    std::vector<std::uint32_t> mAcquireIndices;
+    std::size_t           mNextAcquireResult = 0;
+    std::vector<VkResult> mPresentResults;
+    std::size_t           mNextPresentResult = 0;
+    std::vector<VkResult> mReleaseResults;
+    std::size_t           mNextReleaseResult = 0;
 
     std::vector<std::string>                 mEvents;
     std::vector<VkDevice>                    mMutationDevices;
@@ -170,6 +230,10 @@ struct FakeState
     std::vector<VkCommandBuffer>             mEndedCommandBuffers;
     std::vector<FenceResetRecord>            mFenceResets;
     std::vector<QueueSubmitRecord>           mQueueSubmits;
+    std::vector<AcquireRecord>               mAcquires;
+    std::vector<BarrierRecord>               mBarriers;
+    std::vector<PresentRecord>               mPresents;
+    std::vector<ReleaseRecord>               mReleases;
 
     std::size_t mNextImageView = 0;
 
@@ -200,7 +264,15 @@ struct FakeState
         mEndedCommandBuffers.clear();
         mFenceResets.clear();
         mQueueSubmits.clear();
+        mAcquires.clear();
+        mBarriers.clear();
+        mPresents.clear();
+        mReleases.clear();
         mNextWaitResult = 0;
+        mNextQueueSubmitResult = 0;
+        mNextAcquireResult = 0;
+        mNextPresentResult = 0;
+        mNextReleaseResult = 0;
     }
 };
 
@@ -304,17 +376,34 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysical
     }
     if (!properties)
     {
-        *count = 1;
+        *count = 2;
         return VK_SUCCESS;
     }
-    if (*count == 0)
+    if (*count < 2)
     {
         return VK_INCOMPLETE;
     }
     properties[0] = {};
     std::strncpy(properties[0].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
-    *count = 1;
+    properties[1] = {};
+    std::strncpy(properties[1].extensionName, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
+    *count = 2;
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures2(VkPhysicalDevice physical_device,
+                                                           VkPhysicalDeviceFeatures2* features) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !features)
+    {
+        return;
+    }
+    auto* maintenance = static_cast<VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(features->pNext);
+    if (features->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 && maintenance &&
+        maintenance->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR)
+    {
+        maintenance->swapchainMaintenance1 = VK_TRUE;
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures* features) noexcept
@@ -479,6 +568,15 @@ const std::vector<std::string>& expectedExecutionLookups()
     return names;
 }
 
+const std::vector<std::string>& expectedPresentationLookups()
+{
+    static const std::vector<std::string> names{ "vkWaitForFences",      "vkResetCommandBuffer", "vkBeginCommandBuffer",
+                                                 "vkEndCommandBuffer",   "vkResetFences",        "vkQueueSubmit",
+                                                 "vkAcquireNextImageKHR", "vkCmdPipelineBarrier", "vkQueuePresentKHR",
+                                                 "vkReleaseSwapchainImagesKHR" };
+    return names;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateCommandPool(VkDevice                       device,
                                                      const VkCommandPoolCreateInfo* create_info,
                                                      const VkAllocationCallbacks*   allocator,
@@ -539,9 +637,10 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSemaphore(VkDevice                     
     }
     gFakeState->mEvents.emplace_back("create semaphore");
     gFakeState->mMutationDevices.push_back(device);
+    const std::size_t semaphore_index = gFakeState->mSemaphoreInfos.size();
     gFakeState->mSemaphoreInfos.push_back(*create_info);
     gFakeState->mAllocatorNull.push_back(allocator == nullptr);
-    *semaphore = gFakeState->mSemaphoreOutput;
+    *semaphore = semaphore_index == 0 ? gFakeState->mSemaphoreOutput : gFakeState->presentationReadySemaphore();
     return gFakeState->mSemaphoreResult;
 }
 
@@ -568,9 +667,10 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateFence(VkDevice                     devi
     }
     gFakeState->mEvents.emplace_back("create fence");
     gFakeState->mMutationDevices.push_back(device);
+    const std::size_t fence_index = gFakeState->mFenceInfos.size();
     gFakeState->mFenceInfos.push_back(*create_info);
     gFakeState->mAllocatorNull.push_back(allocator == nullptr);
-    *fence = gFakeState->mFenceOutput;
+    *fence = fence_index == 0 ? gFakeState->mFenceOutput : gFakeState->presentCompletionFence();
     return gFakeState->mFenceResult;
 }
 
@@ -594,7 +694,8 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeWaitForFences(VkDevice device, std::uint32_t 
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     gFakeState->mEvents.emplace_back("wait fence");
-    gFakeState->mFenceWaits.push_back({ device, fence_count, fences[0], wait_all, timeout });
+    gFakeState->mFenceWaits.push_back(
+        { device, fence_count, fences[0], fence_count > 1 ? fences[1] : VK_NULL_HANDLE, wait_all, timeout });
     if (gFakeState->mNextWaitResult < gFakeState->mWaitResults.size())
     {
         return gFakeState->mWaitResults[gFakeState->mNextWaitResult++];
@@ -646,7 +747,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeResetFences(VkDevice device, std::uint32_t fe
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     gFakeState->mEvents.emplace_back("reset fence");
-    gFakeState->mFenceResets.push_back({ device, fence_count, fences[0] });
+    gFakeState->mFenceResets.push_back({ device, fence_count, fences[0], fence_count > 1 ? fences[1] : VK_NULL_HANDLE });
     return gFakeState->mResetFencesResult;
 }
 
@@ -665,8 +766,95 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeQueueSubmit(VkQueue             queue,
         { queue, submit_count, fence, submit.sType, submit.pNext == nullptr, submit.waitSemaphoreCount, submit.pWaitSemaphores == nullptr,
           submit.pWaitDstStageMask == nullptr, submit.commandBufferCount,
           submit.commandBufferCount != 0 && submit.pCommandBuffers ? submit.pCommandBuffers[0] : VK_NULL_HANDLE,
-          submit.signalSemaphoreCount, submit.pSignalSemaphores == nullptr });
+          submit.signalSemaphoreCount, submit.pSignalSemaphores == nullptr,
+          submit.waitSemaphoreCount && submit.pWaitSemaphores ? submit.pWaitSemaphores[0] : VK_NULL_HANDLE,
+          submit.waitSemaphoreCount && submit.pWaitDstStageMask ? submit.pWaitDstStageMask[0] : 0,
+          submit.signalSemaphoreCount && submit.pSignalSemaphores ? submit.pSignalSemaphores[0] : VK_NULL_HANDLE });
+    if (gFakeState->mNextQueueSubmitResult < gFakeState->mQueueSubmitResults.size())
+    {
+        return gFakeState->mQueueSubmitResults[gFakeState->mNextQueueSubmitResult++];
+    }
     return gFakeState->mQueueSubmitResult;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice device, VkSwapchainKHR swapchain, std::uint64_t timeout,
+                                                     VkSemaphore semaphore, VkFence fence, std::uint32_t* image_index) noexcept
+{
+    if (!gFakeState || !image_index)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    gFakeState->mEvents.emplace_back("acquire image");
+    gFakeState->mAcquires.push_back({ device, swapchain, timeout, semaphore, fence });
+    const std::size_t call = gFakeState->mNextAcquireResult++;
+    *image_index = call < gFakeState->mAcquireIndices.size() ? gFakeState->mAcquireIndices[call] : 0;
+    return call < gFakeState->mAcquireResults.size() ? gFakeState->mAcquireResults[call] : VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer command_buffer, VkPipelineStageFlags source_stage,
+                                                   VkPipelineStageFlags destination_stage, VkDependencyFlags dependency_flags,
+                                                   std::uint32_t memory_barrier_count, const VkMemoryBarrier*,
+                                                   std::uint32_t buffer_barrier_count, const VkBufferMemoryBarrier*,
+                                                   std::uint32_t image_barrier_count,
+                                                   const VkImageMemoryBarrier* image_barriers) noexcept
+{
+    if (!gFakeState)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("pipeline barrier");
+    BarrierRecord record{ command_buffer, source_stage, destination_stage, dependency_flags, memory_barrier_count,
+                          buffer_barrier_count, image_barrier_count, {} };
+    if (image_barrier_count && image_barriers)
+    {
+        record.mImageBarrier = image_barriers[0];
+    }
+    gFakeState->mBarriers.push_back(record);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
+{
+    if (!gFakeState || !present_info)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    gFakeState->mEvents.emplace_back("queue present");
+    PresentRecord record;
+    record.mQueue = queue;
+    record.mInfo  = *present_info;
+    if (present_info->swapchainCount && present_info->pSwapchains && present_info->pImageIndices)
+    {
+        record.mSwapchain  = present_info->pSwapchains[0];
+        record.mImageIndex = present_info->pImageIndices[0];
+    }
+    if (present_info->waitSemaphoreCount && present_info->pWaitSemaphores)
+    {
+        record.mWaitSemaphore = present_info->pWaitSemaphores[0];
+    }
+    if (present_info->pNext)
+    {
+        record.mFenceInfo = *static_cast<const VkSwapchainPresentFenceInfoKHR*>(present_info->pNext);
+        if (record.mFenceInfo.swapchainCount && record.mFenceInfo.pFences)
+        {
+            record.mFence = record.mFenceInfo.pFences[0];
+        }
+    }
+    gFakeState->mPresents.push_back(record);
+    const std::size_t call = gFakeState->mNextPresentResult++;
+    return call < gFakeState->mPresentResults.size() ? gFakeState->mPresentResults[call] : VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device,
+                                                           const VkReleaseSwapchainImagesInfoKHR* release_info) noexcept
+{
+    if (!gFakeState || !release_info || !release_info->pImageIndices || release_info->imageIndexCount == 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    gFakeState->mEvents.emplace_back("release image");
+    gFakeState->mReleases.push_back({ device, *release_info, release_info->pImageIndices[0] });
+    const std::size_t call = gFakeState->mNextReleaseResult++;
+    return call < gFakeState->mReleaseResults.size() ? gFakeState->mReleaseResults[call] : VK_SUCCESS;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
@@ -714,6 +902,15 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return gFakeState->mMissingCommand == MissingCommand::ResetFences ? nullptr : eraseFunctionType(fakeResetFences);
     if (std::strcmp(name, "vkQueueSubmit") == 0)
         return gFakeState->mMissingCommand == MissingCommand::QueueSubmit ? nullptr : eraseFunctionType(fakeQueueSubmit);
+    if (std::strcmp(name, "vkAcquireNextImageKHR") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::AcquireNextImage ? nullptr : eraseFunctionType(fakeAcquireNextImage);
+    if (std::strcmp(name, "vkCmdPipelineBarrier") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::CmdPipelineBarrier ? nullptr : eraseFunctionType(fakeCmdPipelineBarrier);
+    if (std::strcmp(name, "vkQueuePresentKHR") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::QueuePresent ? nullptr : eraseFunctionType(fakeQueuePresent);
+    if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::ReleaseSwapchainImages ? nullptr
+                                                                                    : eraseFunctionType(fakeReleaseSwapchainImages);
     return nullptr;
 }
 
@@ -735,6 +932,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
     if (std::strcmp(name, "vkGetPhysicalDeviceFeatures") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceFeatures);
+    if (std::strcmp(name, "vkGetPhysicalDeviceFeatures2") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFeatures2);
     if (std::strcmp(name, "vkCreateDevice") == 0)
         return eraseFunctionType(fakeCreateDevice);
     if (std::strcmp(name, "vkDestroyDevice") == 0)
@@ -850,6 +1049,26 @@ void ensureOperationError(const VulkanSwapchainFrameSlotOperationResult& result,
 VulkanSwapchainFrameSlotOperationResult resolveExecution(VulkanSwapchainFrameSlotGeneration& generation, Parents& parents)
 {
     return generation.resolveEmptySubmissionDispatch(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages);
+}
+
+VulkanSwapchainFrameSlotOperationResult resolvePresentation(VulkanSwapchainFrameSlotGeneration& generation, Parents& parents)
+{
+    return generation.resolvePresentationDispatch(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages);
+}
+
+const VulkanSwapchainFrameSlotPresentationSuccess& requirePresentationSuccess(
+    const VulkanSwapchainFrameSlotPresentationResult& result)
+{
+    const auto* success = std::get_if<VulkanSwapchainFrameSlotPresentationSuccess>(&result);
+    tut::ensure("frame-slot presentation returns typed success", success != nullptr);
+    return *success;
+}
+
+const VulkanSwapchainFrameSlotOperationError& requirePresentationError(const VulkanSwapchainFrameSlotPresentationResult& result)
+{
+    const auto* error = std::get_if<VulkanSwapchainFrameSlotOperationError>(&result);
+    tut::ensure("frame-slot presentation returns a typed operation error", error != nullptr);
+    return *error;
 }
 
 } // namespace
@@ -981,11 +1200,15 @@ void render_vulkan_swapchain_frame_slot_object::test<3>()
            state.mInstanceLookups == std::vector<std::string>{ "vkGetDeviceProcAddr" } && state.mDeviceLookups == expectedDeviceLookups() &&
                state.mAllResolvedBeforeMutation);
     ensure("resources are created in dependency order",
-           state.mEvents == std::vector<std::string>{ "create pool", "allocate buffer", "create semaphore", "create fence" });
+           state.mEvents == std::vector<std::string>{ "create pool", "allocate buffer", "create semaphore", "create semaphore",
+                                                      "create fence", "create fence" });
     ensureOnlyExactDevice(state);
-    ensure("creation exposes all four exact owned handles",
+    ensure("creation exposes all six exact owned handles",
            generation.commandPool() == state.mCommandPoolOutput && generation.commandBuffer() == state.mCommandBufferOutput &&
-               generation.imageAvailableSemaphore() == state.mSemaphoreOutput && generation.submissionFence() == state.mFenceOutput);
+               generation.imageAvailableSemaphore() == state.mSemaphoreOutput &&
+               generation.presentationReadySemaphore() == state.presentationReadySemaphore() &&
+               generation.submissionFence() == state.mFenceOutput &&
+               generation.presentCompletionFence() == state.presentCompletionFence());
     ensure("the generation authenticates its exact four parents",
            generation.createdFor(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages));
     ensure("command pool creation is zero-linked, resettable, and bound to the exact queue family",
@@ -998,29 +1221,39 @@ void render_vulkan_swapchain_frame_slot_object::test<3>()
                state.mCommandBufferInfos[0].pNext == nullptr && state.mCommandBufferInfos[0].commandPool == state.mCommandPoolOutput &&
                state.mCommandBufferInfos[0].level == VK_COMMAND_BUFFER_LEVEL_PRIMARY &&
                state.mCommandBufferInfos[0].commandBufferCount == 1);
-    ensure("the image-available semaphore is a zero-flag binary semaphore",
-           state.mSemaphoreInfos.size() == 1 && state.mSemaphoreInfos[0].sType == VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO &&
-               state.mSemaphoreInfos[0].pNext == nullptr && state.mSemaphoreInfos[0].flags == 0);
-    ensure("the submission fence starts signaled",
-           state.mFenceInfos.size() == 1 && state.mFenceInfos[0].sType == VK_STRUCTURE_TYPE_FENCE_CREATE_INFO &&
-               state.mFenceInfos[0].pNext == nullptr && state.mFenceInfos[0].flags == VK_FENCE_CREATE_SIGNALED_BIT);
+    ensure("both binary semaphores are zero-linked and zero-flagged",
+           state.mSemaphoreInfos.size() == 2 &&
+               std::all_of(state.mSemaphoreInfos.begin(), state.mSemaphoreInfos.end(), [](const VkSemaphoreCreateInfo& info)
+                           {
+                               return info.sType == VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO && info.pNext == nullptr && info.flags == 0;
+                           }));
+    ensure("both completion fences start signaled",
+           state.mFenceInfos.size() == 2 &&
+               std::all_of(state.mFenceInfos.begin(), state.mFenceInfos.end(), [](const VkFenceCreateInfo& info)
+                           {
+                               return info.sType == VK_STRUCTURE_TYPE_FENCE_CREATE_INFO && info.pNext == nullptr &&
+                                      info.flags == VK_FENCE_CREATE_SIGNALED_BIT;
+                           }));
     ensure("all create and destroy-capable calls use null allocation callbacks",
-           state.mAllocatorNull == std::vector<bool>{ true, true, true });
+           state.mAllocatorNull == std::vector<bool>{ true, true, true, true, true });
 
     generation.reset();
     ensure("reset destroys in reverse dependency order and pool destruction implicitly frees the buffer",
-           state.mEvents == std::vector<std::string>{ "create pool", "allocate buffer", "create semaphore", "create fence", "destroy fence",
-                                                      "destroy semaphore", "destroy pool" } &&
-               state.mDestroyedFences == std::vector<VkFence>{ state.mFenceOutput } &&
-               state.mDestroyedSemaphores == std::vector<VkSemaphore>{ state.mSemaphoreOutput } &&
+           state.mEvents == std::vector<std::string>{ "create pool", "allocate buffer", "create semaphore", "create semaphore",
+                                                      "create fence", "create fence", "destroy fence", "destroy fence",
+                                                      "destroy semaphore", "destroy semaphore", "destroy pool" } &&
+               state.mDestroyedFences == std::vector<VkFence>{ state.presentCompletionFence(), state.mFenceOutput } &&
+               state.mDestroyedSemaphores ==
+                   std::vector<VkSemaphore>{ state.presentationReadySemaphore(), state.mSemaphoreOutput } &&
                state.mDestroyedCommandPools == std::vector<VkCommandPool>{ state.mCommandPoolOutput });
     ensureOnlyExactDevice(state);
     ensure("reset clears ownership and provenance",
            generation.commandPool() == VK_NULL_HANDLE && generation.commandBuffer() == VK_NULL_HANDLE &&
-               generation.imageAvailableSemaphore() == VK_NULL_HANDLE && generation.submissionFence() == VK_NULL_HANDLE &&
+               generation.imageAvailableSemaphore() == VK_NULL_HANDLE && generation.presentationReadySemaphore() == VK_NULL_HANDLE &&
+               generation.submissionFence() == VK_NULL_HANDLE && generation.presentCompletionFence() == VK_NULL_HANDLE &&
                !generation.createdFor(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages));
     generation.reset();
-    ensure_equals("reset is idempotent", state.mEvents.size(), std::size_t{ 7 });
+    ensure_equals("reset is idempotent", state.mEvents.size(), std::size_t{ 11 });
 }
 
 template<>
@@ -1125,10 +1358,12 @@ void render_vulkan_swapchain_frame_slot_object::test<7>()
                    error.mCommand == VulkanSwapchainFrameSlotCommand::CreateFence &&
                    error.mResult == (success_null ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY));
         ensure("fence failure never destroys undefined output and rolls back semaphore then pool",
-               state.mEvents == std::vector<std::string>{ "create pool", "allocate buffer", "create semaphore", "create fence",
-                                                          "destroy semaphore", "destroy pool" } &&
+               state.mEvents == std::vector<std::string>{ "create pool", "allocate buffer", "create semaphore", "create semaphore",
+                                                          "create fence", "destroy semaphore", "destroy semaphore", "destroy pool" } &&
                    state.mDestroyedCommandPools == std::vector<VkCommandPool>{ state.mCommandPoolOutput } &&
-                   state.mDestroyedSemaphores == std::vector<VkSemaphore>{ state.mSemaphoreOutput } && state.mDestroyedFences.empty() &&
+                   state.mDestroyedSemaphores ==
+                       std::vector<VkSemaphore>{ state.presentationReadySemaphore(), state.mSemaphoreOutput } &&
+                   state.mDestroyedFences.empty() &&
                    (success_null || poisoned != VK_NULL_HANDLE));
     }
 }
@@ -1146,7 +1381,8 @@ void render_vulkan_swapchain_frame_slot_object::test<8>()
     ensure("move transfers all ownership and disarms the source",
            moved.createdFor(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages) &&
                generation.commandPool() == VK_NULL_HANDLE && generation.commandBuffer() == VK_NULL_HANDLE &&
-               generation.imageAvailableSemaphore() == VK_NULL_HANDLE && generation.submissionFence() == VK_NULL_HANDLE &&
+               generation.imageAvailableSemaphore() == VK_NULL_HANDLE && generation.presentationReadySemaphore() == VK_NULL_HANDLE &&
+               generation.submissionFence() == VK_NULL_HANDLE && generation.presentCompletionFence() == VK_NULL_HANDLE &&
                !generation.createdFor(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages));
 
     auto second_images_result = resolveVulkanSwapchainImagesGeneration(parents.mLogical, parents.mConfiguration, parents.mSwapchain);
@@ -1161,8 +1397,9 @@ void render_vulkan_swapchain_frame_slot_object::test<8>()
     moved.reset();
     generation.reset();
     ensure("only the moved owner destroys each resource once",
-           state.mEvents == std::vector<std::string>{ "destroy fence", "destroy semaphore", "destroy pool" } &&
-               state.mDestroyedFences.size() == 1 && state.mDestroyedSemaphores.size() == 1 && state.mDestroyedCommandPools.size() == 1);
+           state.mEvents == std::vector<std::string>{ "destroy fence", "destroy fence", "destroy semaphore", "destroy semaphore",
+                                                      "destroy pool" } &&
+               state.mDestroyedFences.size() == 2 && state.mDestroyedSemaphores.size() == 2 && state.mDestroyedCommandPools.size() == 1);
 }
 
 template<>
@@ -1535,7 +1772,7 @@ void render_vulkan_swapchain_frame_slot_object::test<13>()
         ensure_equals("device-lost rejects execution and retry without another Vulkan call", state.mEvents.size(), event_count);
         generation.reset();
         ensure("completed device-loss accounting permits exactly one child-first teardown",
-               state.mEvents.size() == event_count + 3 && state.mDestroyedFences.size() == 1 && state.mDestroyedSemaphores.size() == 1 &&
+               state.mEvents.size() == event_count + 5 && state.mDestroyedFences.size() == 2 && state.mDestroyedSemaphores.size() == 2 &&
                    state.mDestroyedCommandPools.size() == 1);
     }
 }
@@ -1578,8 +1815,8 @@ void render_vulkan_swapchain_frame_slot_object::test<14>()
 
     generation.reset();
     ensure("recovered pending ownership is destroyed exactly once in child-first order",
-           state.mEvents.size() == completed_event_count + 3 && state.mDestroyedFences.size() == 1 &&
-               state.mDestroyedSemaphores.size() == 1 && state.mDestroyedCommandPools.size() == 1);
+           state.mEvents.size() == completed_event_count + 5 && state.mDestroyedFences.size() == 2 &&
+               state.mDestroyedSemaphores.size() == 2 && state.mDestroyedCommandPools.size() == 1);
 }
 
 template<>
@@ -1607,7 +1844,7 @@ void render_vulkan_swapchain_frame_slot_object::test<15>()
         moved.reset();
         generation.reset();
         ensure("only the moved execution-capable owner destroys each resource once",
-               state.mDestroyedFences.size() == 1 && state.mDestroyedSemaphores.size() == 1 && state.mDestroyedCommandPools.size() == 1);
+               state.mDestroyedFences.size() == 2 && state.mDestroyedSemaphores.size() == 2 && state.mDestroyedCommandPools.size() == 1);
     }
     {
         FakeState       state;
@@ -1634,9 +1871,601 @@ void render_vulkan_swapchain_frame_slot_object::test<15>()
         moved.reset();
         moved.reset();
         ensure("the moved pending owner retires work before exactly one teardown",
-               state.mDestroyedFences.size() == 1 && state.mDestroyedSemaphores.size() == 1 && state.mDestroyedCommandPools.size() == 1 &&
+               state.mDestroyedFences.size() == 2 && state.mDestroyedSemaphores.size() == 2 && state.mDestroyedCommandPools.size() == 1 &&
                    moved.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable);
     }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<16>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents    = makeParents(state);
+    auto            generation = takeGeneration(resolveSlot(parents));
+    state.clearFrameRecords();
+
+    ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("presentation dispatch resolves all commands atomically and in exact order",
+           state.mInstanceLookups == std::vector<std::string>{ "vkGetDeviceProcAddr" } &&
+               state.mDeviceLookups == expectedPresentationLookups() && state.mEvents.empty());
+
+    state.clearFrameRecords();
+    state.mAcquireResults = { VK_SUCCESS, VK_SUBOPTIMAL_KHR };
+    state.mAcquireIndices = { 1, 2 };
+    const auto first       = requirePresentationSuccess(generation.executeAcquireToPresent());
+    const auto second      = requirePresentationSuccess(generation.executeAcquireToPresent());
+    ensure("success and suboptimal acquisition both complete and retain their typed outcome",
+           first == VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1 } &&
+               second == VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Suboptimal, 2 } &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
+
+    const std::vector<std::string> one_cycle{ "wait fence", "acquire image", "reset buffer", "begin buffer", "pipeline barrier",
+                                              "end buffer",  "reset fence",  "queue submit", "queue present", "wait fence" };
+    auto expected_events = one_cycle;
+    expected_events.insert(expected_events.end(), one_cycle.begin(), one_cycle.end());
+    ensure("each frame follows the exact acquire-record-submit-present-retire order", state.mEvents == expected_events);
+
+    ensure("acquisition uses the exact device, swapchain, binary semaphore, null fence, and named finite timeout",
+           state.mAcquires.size() == 2 &&
+               std::all_of(state.mAcquires.begin(), state.mAcquires.end(), [&](const AcquireRecord& record)
+                           {
+                               return record.mDevice == state.mDevice && record.mSwapchain == state.mSwapchain &&
+                                      record.mTimeout == VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS &&
+                                      record.mSemaphore == generation.imageAvailableSemaphore() && record.mFence == VK_NULL_HANDLE;
+                           }));
+    ensure("every prior/completion wait names both exact fences, wait-all, and an infinite completion timeout",
+           state.mFenceWaits.size() == 4 &&
+               std::all_of(state.mFenceWaits.begin(), state.mFenceWaits.end(), [&](const FenceWaitRecord& record)
+                           {
+                               return record.mDevice == state.mDevice && record.mFenceCount == 2 &&
+                                      record.mFence == generation.submissionFence() &&
+                                      record.mSecondFence == generation.presentCompletionFence() && record.mWaitAll == VK_TRUE &&
+                                      record.mTimeout == std::numeric_limits<std::uint64_t>::max();
+                           }));
+    ensure("the full color barrier discards contents and transitions to present at bottom-of-pipe with zero access",
+           state.mBarriers.size() == 2 &&
+               std::all_of(state.mBarriers.begin(), state.mBarriers.end(), [&](const BarrierRecord& record)
+                           {
+                               const auto& barrier = record.mImageBarrier;
+                               return record.mCommandBuffer == generation.commandBuffer() &&
+                                      record.mSourceStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+                                      record.mDestinationStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+                                      record.mDependencyFlags == 0 && record.mMemoryBarrierCount == 0 &&
+                                      record.mBufferBarrierCount == 0 && record.mImageBarrierCount == 1 &&
+                                      barrier.sType == VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER && barrier.pNext == nullptr &&
+                                      barrier.srcAccessMask == 0 && barrier.dstAccessMask == 0 &&
+                                      barrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+                                      barrier.newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
+                                      barrier.srcQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED &&
+                                      barrier.dstQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED &&
+                                      barrier.subresourceRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+                                      barrier.subresourceRange.baseMipLevel == 0 && barrier.subresourceRange.levelCount == 1 &&
+                                      barrier.subresourceRange.baseArrayLayer == 0 && barrier.subresourceRange.layerCount == 1;
+                           }) &&
+               state.mBarriers[0].mImageBarrier.image == parents.mImages.image(1) &&
+               state.mBarriers[1].mImageBarrier.image == parents.mImages.image(2));
+    ensure("both fences reset together only after recording",
+           state.mFenceResets.size() == 2 &&
+               std::all_of(state.mFenceResets.begin(), state.mFenceResets.end(), [&](const FenceResetRecord& record)
+                           {
+                               return record.mDevice == state.mDevice && record.mFenceCount == 2 &&
+                                      record.mFence == generation.submissionFence() &&
+                                      record.mSecondFence == generation.presentCompletionFence();
+                           }));
+    ensure("submission consumes image-available at bottom-of-pipe and signals presentation-ready with the owned buffer/fence",
+           state.mQueueSubmits.size() == 2 &&
+               std::all_of(state.mQueueSubmits.begin(), state.mQueueSubmits.end(), [&](const QueueSubmitRecord& record)
+                           {
+                               return record.mQueue == state.mQueue && record.mSubmitCount == 1 &&
+                                      record.mFence == generation.submissionFence() &&
+                                      record.mStructureType == VK_STRUCTURE_TYPE_SUBMIT_INFO && record.mNextNull &&
+                                      record.mWaitSemaphoreCount == 1 &&
+                                      record.mWaitSemaphore == generation.imageAvailableSemaphore() &&
+                                      record.mWaitStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+                                      record.mCommandBufferCount == 1 && record.mCommandBuffer == generation.commandBuffer() &&
+                                      record.mSignalSemaphoreCount == 1 &&
+                                      record.mSignalSemaphore == generation.presentationReadySemaphore();
+                           }));
+    ensure("present waits presentation-ready and chains the exact maintenance1 completion fence",
+           state.mPresents.size() == 2 &&
+               std::all_of(state.mPresents.begin(), state.mPresents.end(), [&](const PresentRecord& record)
+                           {
+                               return record.mQueue == state.mQueue && record.mInfo.sType == VK_STRUCTURE_TYPE_PRESENT_INFO_KHR &&
+                                      record.mInfo.pNext != nullptr && record.mInfo.waitSemaphoreCount == 1 &&
+                                      record.mWaitSemaphore == generation.presentationReadySemaphore() &&
+                                      record.mInfo.swapchainCount == 1 && record.mSwapchain == state.mSwapchain &&
+                                      record.mInfo.pResults == nullptr &&
+                                      record.mFenceInfo.sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR &&
+                                      record.mFenceInfo.pNext == nullptr && record.mFenceInfo.swapchainCount == 1 &&
+                                      record.mFence == generation.presentCompletionFence();
+                           }) &&
+               state.mPresents[0].mImageIndex == 1 && state.mPresents[1].mImageIndex == 2 && state.mReleases.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<17>()
+{
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents    = makeParents(state);
+        auto            generation = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices = { 1 };
+        state.mPresentResults = { VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS };
+
+        const auto operation = generation.executeAcquireToPresent();
+        const auto& error    = requirePresentationError(operation);
+        ensure("retryable present OOM preserves the exact ready-to-present transaction",
+               error.mCode == VulkanSwapchainFrameSlotOperationCode::CommandFailure &&
+                   error.mCommand == VulkanSwapchainFrameSlotCommand::QueuePresent &&
+                   error.mResult == VK_ERROR_OUT_OF_HOST_MEMORY &&
+                   error.mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady && error.mImageIndex == 1 &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+                   generation.acquiredImageIndex() == 1);
+        const auto guarded_event_count = state.mEvents.size();
+        generation.reset();
+        ensure("reset cannot destroy an OOM-retryable semaphore payload or acquired image",
+               state.mEvents.size() == guarded_event_count && state.mDestroyedFences.empty() && state.mDestroyedSemaphores.empty());
+
+        const auto retry = requirePresentationSuccess(generation.retryPresentation());
+        ensure("present retry consumes the unchanged payload and completes the original image",
+               retry == VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1 } &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && state.mQueueSubmits.size() == 1 &&
+                   state.mPresents.size() == 2 && state.mPresents[0].mImageIndex == 1 && state.mPresents[1].mImageIndex == 1);
+    }
+
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents    = makeParents(state);
+        auto            generation = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices        = { 2 };
+        state.mEndCommandBufferResult = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+        const auto operation = generation.executeAcquireToPresent();
+        const auto& error    = requirePresentationError(operation);
+        ensure("a recording failure after acquire retains the exact image and image-available payload",
+               error.mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
+                   error.mResult == VK_ERROR_OUT_OF_DEVICE_MEMORY &&
+                   error.mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired && error.mImageIndex == 2 &&
+                   generation.acquiredImageIndex() == 2);
+        ensureOperationSuccess(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("cancellation drains image-available with a fence-backed empty submit and releases only the exact image",
+               state.mQueueSubmits.size() == 1 && state.mQueueSubmits[0].mFence == generation.submissionFence() &&
+                   state.mQueueSubmits[0].mWaitSemaphoreCount == 1 &&
+                   state.mQueueSubmits[0].mWaitSemaphore == generation.imageAvailableSemaphore() &&
+                   state.mQueueSubmits[0].mWaitStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+                   state.mQueueSubmits[0].mCommandBufferCount == 0 && state.mQueueSubmits[0].mSignalSemaphoreCount == 0 &&
+                   state.mReleases.size() == 1 && state.mReleases[0].mDevice == state.mDevice &&
+                   state.mReleases[0].mInfo.sType == VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_KHR &&
+                   state.mReleases[0].mInfo.pNext == nullptr && state.mReleases[0].mInfo.swapchain == state.mSwapchain &&
+                   state.mReleases[0].mInfo.imageIndexCount == 1 && state.mReleases[0].mImageIndex == 2 &&
+                   !generation.acquiredImageIndex());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<18>()
+{
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents    = makeParents(state);
+        auto            generation = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices = { 0 };
+        state.mPresentResults = { VK_ERROR_OUT_OF_DATE_KHR };
+        state.mWaitResults    = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
+
+        const auto operation       = generation.executeAcquireToPresent();
+        const auto& wait_error     = requirePresentationError(operation);
+        ensure("an enqueued replacement result stays pending until both submit and present fences retire",
+               wait_error.mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences && wait_error.mResult == VK_TIMEOUT &&
+                   wait_error.mDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::PresentPending);
+        const auto event_count = state.mEvents.size();
+        generation.reset();
+        ensure_equals("pending present blocks teardown", state.mEvents.size(), event_count);
+        const auto completion = requirePresentationSuccess(generation.retryPresentationCompletion());
+        ensure("completion retry returns the deferred typed replacement outcome only after retirement",
+               completion == VulkanSwapchainFrameSlotPresentationSuccess{
+                                 VulkanSwapchainFrameSlotPresentationOutcome::SwapchainReplacementRequired, 0 } &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable);
+    }
+
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents    = makeParents(state);
+        auto            generation = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices    = { 1 };
+        state.mQueueSubmitResult = VK_ERROR_DEVICE_LOST;
+        state.mWaitResults       = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
+
+        const auto operation          = generation.executeAcquireToPresent();
+        const auto& submit_error      = requirePresentationError(operation);
+        ensure("queue-submit device loss is conservatively pending with exact acquired ownership",
+               submit_error.mCommand == VulkanSwapchainFrameSlotCommand::QueueSubmit &&
+                   submit_error.mResult == VK_ERROR_DEVICE_LOST &&
+                   submit_error.mDisposition == VulkanSwapchainFrameSlotDisposition::SubmissionPending &&
+                   generation.acquiredImageIndex() == 1);
+        const auto wait_operation = generation.retryPresentationCompletion();
+        const auto& wait_error    = requirePresentationError(wait_operation);
+        ensure("a failed accounting wait retains submission-pending teardown protection",
+               wait_error.mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences && wait_error.mResult == VK_TIMEOUT &&
+                   wait_error.mDisposition == VulkanSwapchainFrameSlotDisposition::SubmissionPending);
+        const auto retired_operation = generation.retryPresentationCompletion();
+        const auto& retired_error    = requirePresentationError(retired_operation);
+        ensure("successful accounting wait converts the reported submit loss to the terminal device-lost state",
+               retired_error.mCommand == VulkanSwapchainFrameSlotCommand::QueueSubmit &&
+                   retired_error.mResult == VK_ERROR_DEVICE_LOST &&
+                   retired_error.mDisposition == VulkanSwapchainFrameSlotDisposition::DeviceLost);
+    }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<19>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents    = makeParents(state);
+    auto            generation = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    state.mAcquireIndices = { 3 };
+
+    const auto operation = generation.executeAcquireToPresent();
+    const auto& error    = requirePresentationError(operation);
+    ensure("a successful acquire with an out-of-range index remains explicitly acquired and non-resettable",
+           error.mCode == VulkanSwapchainFrameSlotOperationCode::AcquiredImageIndexOutOfRange &&
+               error.mCommand == VulkanSwapchainFrameSlotCommand::AcquireNextImage && error.mResult == VK_SUCCESS &&
+               error.mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired && error.mImageIndex == 3 &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               generation.acquiredImageIndex() == 3);
+
+    const auto cancel_result = generation.cancelAcquireToPresent();
+    const auto& cancel_error = requireOperationError(cancel_result);
+    ensure("invalid acquired index cancellation refuses Vulkan submission and release",
+           cancel_error.mCode == VulkanSwapchainFrameSlotOperationCode::AcquiredImageIndexOutOfRange &&
+               cancel_error.mCommand == VulkanSwapchainFrameSlotCommand::AcquireNextImage &&
+               cancel_error.mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired && cancel_error.mImageIndex == 3 &&
+               state.mQueueSubmits.empty() && state.mReleases.empty() &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               generation.acquiredImageIndex() == 3);
+
+    const auto event_count = state.mEvents.size();
+    generation.reset();
+    ensure("invalid acquired ownership blocks teardown without destroying or changing its durable state",
+           state.mEvents.size() == event_count && state.mDestroyedFences.empty() && state.mDestroyedSemaphores.empty() &&
+               state.mDestroyedCommandPools.empty() && generation.disposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               generation.acquiredImageIndex() == 3);
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<20>()
+{
+    constexpr std::array unexpected_results{ VK_ERROR_UNKNOWN, VK_ERROR_VALIDATION_FAILED_EXT };
+    for (const VkResult unexpected_result : unexpected_results)
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents    = makeParents(state);
+        auto            generation = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices = { 1 };
+        state.mPresentResults = { unexpected_result };
+
+        const auto operation = generation.executeAcquireToPresent();
+        const auto& error    = requirePresentationError(operation);
+        ensure("an unexpected present error becomes terminal without assuming whether presentation was enqueued",
+               error.mCode == VulkanSwapchainFrameSlotOperationCode::CommandFailure &&
+                   error.mCommand == VulkanSwapchainFrameSlotCommand::QueuePresent && error.mResult == unexpected_result &&
+                   error.mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationIndeterminate && error.mImageIndex == 1 &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::PresentationIndeterminate &&
+                   generation.acquiredImageIndex() == 1 && state.mFenceWaits.size() == 1 && state.mQueueSubmits.size() == 1 &&
+                   state.mPresents.size() == 1 && state.mReleases.empty());
+
+        const auto retry_result = generation.retryPresentation();
+        const auto& retry_error = requirePresentationError(retry_result);
+        ensure("indeterminate presentation cannot be retried",
+               retry_error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition &&
+                   retry_error.mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationIndeterminate);
+        ensureOperationError(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotOperationCode::InvalidDisposition,
+                             VulkanSwapchainFrameSlotDisposition::PresentationIndeterminate);
+        const auto event_count = state.mEvents.size();
+        generation.reset();
+        ensure("indeterminate presentation cannot be cancelled, waited, released, or reset",
+               state.mEvents.size() == event_count && state.mFenceWaits.size() == 1 && state.mQueueSubmits.size() == 1 &&
+                   state.mPresents.size() == 1 && state.mReleases.empty() && state.mDestroyedFences.empty() &&
+                   state.mDestroyedSemaphores.empty() && state.mDestroyedCommandPools.empty() &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::PresentationIndeterminate &&
+                   generation.acquiredImageIndex() == 1);
+    }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<21>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents    = makeParents(state);
+    auto            generation = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    state.mAcquireIndices    = { 1, 2 };
+    state.mQueueSubmitResults = { VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS, VK_SUCCESS };
+
+    const auto failed_frame = generation.executeAcquireToPresent();
+    const auto& submit_error = requirePresentationError(failed_frame);
+    ensure("main submission OOM retains image-available after both fences were reset",
+           submit_error.mCommand == VulkanSwapchainFrameSlotCommand::QueueSubmit &&
+               submit_error.mResult == VK_ERROR_OUT_OF_HOST_MEMORY &&
+               submit_error.mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               submit_error.mImageIndex == 1 && generation.acquiredImageIndex() == 1);
+
+    ensureOperationSuccess(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("successful release follows both cancellation submissions and clears exact acquired ownership",
+           generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex() &&
+               state.mQueueSubmits.size() == 3 && state.mFenceWaits.size() == 3 && state.mReleases.size() == 1 &&
+               state.mReleases[0].mImageIndex == 1);
+    ensure("cancellation first drains image-available using the submission fence",
+           state.mQueueSubmits[1].mFence == generation.submissionFence() &&
+               state.mQueueSubmits[1].mWaitSemaphoreCount == 1 &&
+               state.mQueueSubmits[1].mWaitSemaphore == generation.imageAvailableSemaphore() &&
+               state.mQueueSubmits[1].mWaitStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+               state.mQueueSubmits[1].mCommandBufferCount == 0 && state.mQueueSubmits[1].mSignalSemaphoreCount == 0 &&
+               state.mFenceWaits[1].mFenceCount == 1 && state.mFenceWaits[1].mFence == generation.submissionFence());
+    ensure("cancellation then signals and retires the otherwise-unused present fence with a second empty submit",
+           state.mQueueSubmits[2].mFence == generation.presentCompletionFence() &&
+               state.mQueueSubmits[2].mWaitSemaphoreCount == 0 && state.mQueueSubmits[2].mCommandBufferCount == 0 &&
+               state.mQueueSubmits[2].mSignalSemaphoreCount == 0 && state.mFenceWaits[2].mFenceCount == 1 &&
+               state.mFenceWaits[2].mFence == generation.presentCompletionFence());
+
+    const auto next_frame = requirePresentationSuccess(generation.executeAcquireToPresent());
+    ensure("both repaired fences support a subsequent normal frame",
+           next_frame == VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2 } &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && state.mQueueSubmits.size() == 4 &&
+               state.mPresents.size() == 1 && state.mPresents[0].mImageIndex == 2);
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<22>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents    = makeParents(state);
+    auto            generation = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    state.mAcquireIndices         = { 2 };
+    state.mEndCommandBufferResult = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    state.mReleaseResults         = { VK_ERROR_SURFACE_LOST_KHR };
+
+    const auto failed_frame = generation.executeAcquireToPresent();
+    const auto& frame_error = requirePresentationError(failed_frame);
+    ensure("post-acquire recording failure remains cancelable before release is attempted",
+           frame_error.mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
+               frame_error.mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired && frame_error.mImageIndex == 2);
+
+    const auto cancellation = generation.cancelAcquireToPresent();
+    const auto& release_error = requireOperationError(cancellation);
+    ensure("release failure retains its exact result and index in a terminal indeterminate state",
+           release_error.mCode == VulkanSwapchainFrameSlotOperationCode::CommandFailure &&
+               release_error.mCommand == VulkanSwapchainFrameSlotCommand::ReleaseSwapchainImages &&
+               release_error.mResult == VK_ERROR_SURFACE_LOST_KHR &&
+               release_error.mDisposition == VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate &&
+               release_error.mImageIndex == 2 && generation.disposition() == VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate &&
+               generation.acquiredImageIndex() == 2 && state.mQueueSubmits.size() == 1 && state.mReleases.size() == 1 &&
+               state.mReleases[0].mImageIndex == 2);
+
+    const auto event_count = state.mEvents.size();
+    ensureOperationError(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotOperationCode::InvalidDisposition,
+                         VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate);
+    ensureOperationError(generation.retryCancellationCompletion(), VulkanSwapchainFrameSlotOperationCode::InvalidDisposition,
+                         VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate);
+    const auto present_retry = generation.retryPresentation();
+    const auto& present_retry_error = requirePresentationError(present_retry);
+    ensure("release-indeterminate blocks presentation retry",
+           present_retry_error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition &&
+               present_retry_error.mDisposition == VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate);
+    const auto completion_retry = generation.retryPresentationCompletion();
+    const auto& completion_retry_error = requirePresentationError(completion_retry);
+    ensure("release-indeterminate blocks completion retry",
+           completion_retry_error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition &&
+               completion_retry_error.mDisposition == VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate);
+    generation.reset();
+    ensure("release-indeterminate performs no second submit, release, wait, reset, or destruction",
+           state.mEvents.size() == event_count && state.mQueueSubmits.size() == 1 && state.mReleases.size() == 1 &&
+               state.mDestroyedFences.empty() && state.mDestroyedSemaphores.empty() && state.mDestroyedCommandPools.empty() &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate &&
+               generation.acquiredImageIndex() == 2);
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<23>()
+{
+    struct Case
+    {
+        VkResult                                                   mResult;
+        std::optional<VulkanSwapchainFrameSlotPresentationOutcome> mTypedOutcome;
+    };
+    constexpr std::array cases{
+        Case{ VK_ERROR_SURFACE_LOST_KHR, VulkanSwapchainFrameSlotPresentationOutcome::SurfaceLost },
+        Case{ VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT, std::nullopt },
+        Case{ VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT, std::nullopt },
+    };
+
+    for (const auto& test_case : cases)
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents    = makeParents(state);
+        auto            generation = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices = { 1 };
+        state.mPresentResults = { test_case.mResult };
+
+        const auto result = generation.executeAcquireToPresent();
+        if (test_case.mTypedOutcome)
+        {
+            const auto& success = requirePresentationSuccess(result);
+            ensure("surface loss returns its typed outcome only after presentation completion",
+                   success.mOutcome == *test_case.mTypedOutcome && success.mImageIndex == 1);
+        }
+        else
+        {
+            const auto& error = requirePresentationError(result);
+            ensure("untyped enqueued present failures return their exact command result only after completion",
+                   error.mCode == VulkanSwapchainFrameSlotOperationCode::CommandFailure &&
+                       error.mCommand == VulkanSwapchainFrameSlotCommand::QueuePresent && error.mResult == test_case.mResult &&
+                       error.mDisposition == VulkanSwapchainFrameSlotDisposition::Reusable && error.mImageIndex == 1);
+        }
+
+        ensure("every explicitly enqueued present result retires both exact fences and clears acquired ownership",
+               state.mPresents.size() == 1 && state.mPresents[0].mImageIndex == 1 && state.mQueueSubmits.size() == 1 &&
+                   state.mFenceWaits.size() == 2 &&
+                   std::all_of(state.mFenceWaits.begin(), state.mFenceWaits.end(), [&](const FenceWaitRecord& record)
+                               {
+                                   return record.mDevice == state.mDevice && record.mFenceCount == 2 &&
+                                          record.mFence == generation.submissionFence() &&
+                                          record.mSecondFence == generation.presentCompletionFence() && record.mWaitAll == VK_TRUE &&
+                                          record.mTimeout == std::numeric_limits<std::uint64_t>::max();
+                               }) &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+                   !generation.acquiredImageIndex());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<24>()
+{
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents    = makeParents(state);
+        auto            generation = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices     = { 1 };
+        state.mResetFencesResult  = VK_ERROR_UNKNOWN;
+
+        const auto operation = generation.executeAcquireToPresent();
+        const auto& error    = requirePresentationError(operation);
+        ensure("an ambiguous two-fence reset failure retains the exact image in a terminal state",
+               error.mCode == VulkanSwapchainFrameSlotOperationCode::CommandFailure &&
+                   error.mCommand == VulkanSwapchainFrameSlotCommand::ResetFences && error.mResult == VK_ERROR_UNKNOWN &&
+                   error.mDisposition == VulkanSwapchainFrameSlotDisposition::FenceResetIndeterminate && error.mImageIndex == 1 &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::FenceResetIndeterminate &&
+                   generation.acquiredImageIndex() == 1 && state.mFenceResets.size() == 1 &&
+                   state.mFenceResets[0].mFenceCount == 2 && state.mQueueSubmits.empty() && state.mPresents.empty() &&
+                   state.mReleases.empty());
+
+        const auto event_count = state.mEvents.size();
+        ensureOperationError(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotOperationCode::InvalidDisposition,
+                             VulkanSwapchainFrameSlotDisposition::FenceResetIndeterminate);
+        ensureOperationError(generation.retryCancellationCompletion(), VulkanSwapchainFrameSlotOperationCode::InvalidDisposition,
+                             VulkanSwapchainFrameSlotDisposition::FenceResetIndeterminate);
+        const auto present_retry = generation.retryPresentation();
+        const auto& present_retry_error = requirePresentationError(present_retry);
+        ensure("ambiguous fence reset blocks presentation retry",
+               present_retry_error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition &&
+                   present_retry_error.mDisposition == VulkanSwapchainFrameSlotDisposition::FenceResetIndeterminate);
+        const auto completion_retry = generation.retryPresentationCompletion();
+        const auto& completion_retry_error = requirePresentationError(completion_retry);
+        ensure("ambiguous fence reset blocks completion retry",
+               completion_retry_error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition &&
+                   completion_retry_error.mDisposition == VulkanSwapchainFrameSlotDisposition::FenceResetIndeterminate);
+        generation.reset();
+        ensure("ambiguous fence reset performs no cancellation, wait, release, reset, or destruction",
+               state.mEvents.size() == event_count && state.mQueueSubmits.empty() && state.mReleases.empty() &&
+                   state.mDestroyedFences.empty() && state.mDestroyedSemaphores.empty() && state.mDestroyedCommandPools.empty() &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::FenceResetIndeterminate &&
+                   generation.acquiredImageIndex() == 1);
+    }
+
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents    = makeParents(state);
+        auto            generation = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices    = { 2 };
+        state.mResetFencesResult = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+        const auto operation = generation.executeAcquireToPresent();
+        const auto& error    = requirePresentationError(operation);
+        ensure("two-fence reset OOM preserves the acquired state for safe cancellation",
+               error.mCommand == VulkanSwapchainFrameSlotCommand::ResetFences && error.mResult == VK_ERROR_OUT_OF_DEVICE_MEMORY &&
+                   error.mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired && error.mImageIndex == 2 &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired);
+
+        state.mResetFencesResult = VK_SUCCESS;
+        ensureOperationSuccess(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("OOM cancellation drains image-available once and releases the exact image without present-fence repair",
+               state.mQueueSubmits.size() == 1 && state.mQueueSubmits[0].mFence == generation.submissionFence() &&
+                   state.mQueueSubmits[0].mWaitSemaphore == generation.imageAvailableSemaphore() &&
+                   state.mQueueSubmits[0].mCommandBufferCount == 0 && state.mQueueSubmits[0].mSignalSemaphoreCount == 0 &&
+                   state.mReleases.size() == 1 && state.mReleases[0].mImageIndex == 2 &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<25>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents    = makeParents(state);
+    auto            generation = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    state.mAcquireIndices = { 1 };
+    state.mPresentResults = { VK_ERROR_OUT_OF_DEVICE_MEMORY };
+
+    const auto operation = generation.executeAcquireToPresent();
+    const auto& error    = requirePresentationError(operation);
+    ensure("present OOM retains the exact presentation-ready payload for cancellation",
+           error.mCommand == VulkanSwapchainFrameSlotCommand::QueuePresent && error.mResult == VK_ERROR_OUT_OF_DEVICE_MEMORY &&
+               error.mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady && error.mImageIndex == 1 &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+               generation.acquiredImageIndex() == 1 && state.mQueueSubmits.size() == 1 && state.mPresents.size() == 1 &&
+               state.mFenceWaits.size() == 1);
+
+    ensureOperationSuccess(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("presentation-ready cancellation drains the exact semaphore with an empty submit on the present fence",
+           state.mQueueSubmits.size() == 2 && state.mQueueSubmits[1].mFence == generation.presentCompletionFence() &&
+               state.mQueueSubmits[1].mWaitSemaphoreCount == 1 &&
+               state.mQueueSubmits[1].mWaitSemaphore == generation.presentationReadySemaphore() &&
+               state.mQueueSubmits[1].mWaitStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+               state.mQueueSubmits[1].mCommandBufferCount == 0 && state.mQueueSubmits[1].mSignalSemaphoreCount == 0);
+    ensure("presentation-ready cancellation retires both exact fences before releasing the exact image",
+           state.mFenceWaits.size() == 2 && state.mFenceWaits[1].mDevice == state.mDevice &&
+               state.mFenceWaits[1].mFenceCount == 2 && state.mFenceWaits[1].mFence == generation.submissionFence() &&
+               state.mFenceWaits[1].mSecondFence == generation.presentCompletionFence() && state.mFenceWaits[1].mWaitAll == VK_TRUE &&
+               state.mFenceWaits[1].mTimeout == std::numeric_limits<std::uint64_t>::max() && state.mReleases.size() == 1 &&
+               state.mReleases[0].mDevice == state.mDevice && state.mReleases[0].mImageIndex == 1 &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
 }
 
 } // namespace tut

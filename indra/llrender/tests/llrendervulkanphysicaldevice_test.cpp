@@ -54,7 +54,8 @@ enum class MissingCommand : std::uint8_t
     GetPhysicalDeviceProperties,
     GetPhysicalDeviceQueueFamilyProperties,
     GetPhysicalDeviceSurfaceSupport,
-    EnumerateDeviceExtensionProperties
+    EnumerateDeviceExtensionProperties,
+    GetPhysicalDeviceFeatures2
 };
 
 enum class MalformedExtension : std::uint8_t
@@ -71,6 +72,7 @@ struct DeviceRecord
     std::vector<VkQueueFamilyProperties> mQueueFamilies;
     std::vector<VkBool32>                mPresentSupport;
     std::vector<std::string>             mExtensions;
+    VkBool32                             mSwapchainMaintenance1 = VK_TRUE;
 };
 
 struct FakeState
@@ -87,6 +89,8 @@ struct FakeState
     std::vector<std::size_t>  mQueueListCalls;
     std::vector<std::size_t>  mExtensionCountCallsByDevice;
     std::vector<std::size_t>  mExtensionListCallsByDevice;
+    std::vector<std::size_t>  mFeatureCallsByDevice;
+    bool                      mExactFeatureChain = true;
 
     VkResult      mPhysicalCountResult          = VK_SUCCESS;
     VkResult      mPhysicalListResult           = VK_SUCCESS;
@@ -123,6 +127,7 @@ struct FakeState
         mQueueListCalls.assign(mDevices.size(), 0);
         mExtensionCountCallsByDevice.assign(mDevices.size(), 0);
         mExtensionListCallsByDevice.assign(mDevices.size(), 0);
+        mFeatureCallsByDevice.assign(mDevices.size(), 0);
     }
 };
 
@@ -151,7 +156,8 @@ VkQueueFamilyProperties queueFamily(VkQueueFlags flags, std::uint32_t count = 1)
 
 DeviceRecord deviceRecord(std::uintptr_t                       handle,
                           std::uint32_t                        api_version,
-                          std::vector<std::string>             extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME },
+                          std::vector<std::string>             extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                                                              VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME },
                           std::vector<VkQueueFamilyProperties> queues     = { queueFamily(VK_QUEUE_GRAPHICS_BIT) },
                           std::vector<VkBool32>                present    = { VK_TRUE })
 {
@@ -365,6 +371,26 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysical
     return gFakeState->mExtensionListResult;
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures2(VkPhysicalDevice device, VkPhysicalDeviceFeatures2* features) noexcept
+{
+    const std::optional<std::size_t> index = deviceIndex(device);
+    if (!gFakeState || !index || !features)
+    {
+        return;
+    }
+
+    ++gFakeState->mFeatureCallsByDevice[*index];
+    const auto* maintenance = static_cast<const VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(features->pNext);
+    gFakeState->mExactFeatureChain =
+        gFakeState->mExactFeatureChain && features->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 && maintenance &&
+        maintenance->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR && maintenance->pNext == nullptr;
+    if (maintenance)
+    {
+        auto* writable_maintenance                  = static_cast<VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(features->pNext);
+        writable_maintenance->swapchainMaintenance1 = gFakeState->mDevices[*index].mSwapchainMaintenance1;
+    }
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance instance, const char* name) noexcept
 {
     if (!gFakeState || instance != gFakeState->mInstance || !name)
@@ -400,6 +426,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return gFakeState->mMissingCommand == MissingCommand::EnumerateDeviceExtensionProperties
                    ? nullptr
                    : eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceFeatures2") == 0)
+    {
+        return gFakeState->mMissingCommand == MissingCommand::GetPhysicalDeviceFeatures2
+                   ? nullptr
+                   : eraseFunctionType(fakeGetPhysicalDeviceFeatures2);
     }
     return nullptr;
 }
@@ -491,14 +523,18 @@ template<>
 template<>
 void render_vulkan_physical_device_object::test<2>()
 {
-    constexpr std::array missing{ MissingCommand::EnumeratePhysicalDevices, MissingCommand::GetPhysicalDeviceProperties,
-                                  MissingCommand::GetPhysicalDeviceQueueFamilyProperties, MissingCommand::GetPhysicalDeviceSurfaceSupport,
-                                  MissingCommand::EnumerateDeviceExtensionProperties };
+    constexpr std::array missing{ MissingCommand::EnumeratePhysicalDevices,
+                                  MissingCommand::GetPhysicalDeviceProperties,
+                                  MissingCommand::GetPhysicalDeviceQueueFamilyProperties,
+                                  MissingCommand::GetPhysicalDeviceSurfaceSupport,
+                                  MissingCommand::EnumerateDeviceExtensionProperties,
+                                  MissingCommand::GetPhysicalDeviceFeatures2 };
     constexpr std::array commands{ VulkanPhysicalDeviceCommand::EnumeratePhysicalDevices,
                                    VulkanPhysicalDeviceCommand::GetPhysicalDeviceProperties,
                                    VulkanPhysicalDeviceCommand::GetPhysicalDeviceQueueFamilyProperties,
                                    VulkanPhysicalDeviceCommand::GetPhysicalDeviceSurfaceSupport,
-                                   VulkanPhysicalDeviceCommand::EnumerateDeviceExtensionProperties };
+                                   VulkanPhysicalDeviceCommand::EnumerateDeviceExtensionProperties,
+                                   VulkanPhysicalDeviceCommand::GetPhysicalDeviceFeatures2 };
 
     for (std::size_t index = 0; index < missing.size(); ++index)
     {
@@ -604,13 +640,16 @@ void render_vulkan_physical_device_object::test<4>()
                !generation.selectedFor(state.mInstance, fakeHandle<VkSurfaceKHR>(0x5eed)));
     ensure("the exact selected properties and API version are retained",
            generation.apiVersion() == VK_API_VERSION_1_1 && std::string_view(generation.properties().deviceName) == "fake-3300");
+    ensure("the exact maintenance feature chain is queried and retained",
+           state.mExactFeatureChain && state.mFeatureCallsByDevice[3] == 1 && generation.swapchainMaintenance1Supported());
     ensure("selection stops before querying the later eligible device",
            state.mPropertyCalls[4] == 0 && state.mExtensionCountCallsByDevice[4] == 0 && state.mQueueCountCalls[4] == 0);
 
     VulkanPhysicalDeviceGeneration moved(std::move(generation));
     ensure("move construction transfers the selected generation",
            moved.physicalDevice() == state.mDevices[3].mHandle && generation.physicalDevice() == VK_NULL_HANDLE &&
-               generation.instance() == VK_NULL_HANDLE && generation.surface() == VK_NULL_HANDLE);
+               generation.instance() == VK_NULL_HANDLE && generation.surface() == VK_NULL_HANDLE &&
+               moved.swapchainMaintenance1Supported() && !generation.swapchainMaintenance1Supported());
 }
 
 template<>
@@ -647,11 +686,11 @@ void render_vulkan_physical_device_object::test<5>()
     }
     {
         FakeState state                 = canonicalState();
-        state.mExtensionWrittenOverride = 2;
+        state.mExtensionWrittenOverride = 3;
         ScopedFakeState scope(state);
         const auto&     error = requireError(resolveVulkanPhysicalDeviceGeneration(request(state)));
         ensure("extension enumeration rejects output above capacity",
-               error.mCode == VulkanPhysicalDeviceResolutionCode::InvalidDeviceExtensionEnumerationOutput && error.mObservedCount == 2);
+               error.mCode == VulkanPhysicalDeviceResolutionCode::InvalidDeviceExtensionEnumerationOutput && error.mObservedCount == 3);
     }
     for (MalformedExtension malformed : { MalformedExtension::Empty, MalformedExtension::Unterminated })
     {
@@ -692,6 +731,28 @@ void render_vulkan_physical_device_object::test<5>()
                error.mCode == VulkanPhysicalDeviceResolutionCode::NoSuitablePhysicalDevice &&
                    error.mLastRejection == VulkanPhysicalDeviceRejection::MissingSwapchainExtension);
     }
+    {
+        FakeState state;
+        state.mDevices.push_back(
+            deviceRecord(0x3510, VK_API_VERSION_1_1, { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_swapchain_maintenance1_extra" }));
+        state.synchronizeCounters();
+        ScopedFakeState scope(state);
+        const auto&     error = requireError(resolveVulkanPhysicalDeviceGeneration(request(state)));
+        ensure("only the exact swapchain-maintenance extension admits a candidate",
+               error.mCode == VulkanPhysicalDeviceResolutionCode::NoSuitablePhysicalDevice &&
+                   error.mLastRejection == VulkanPhysicalDeviceRejection::MissingSwapchainMaintenance1Extension &&
+                   state.mFeatureCallsByDevice[0] == 0);
+    }
+    {
+        FakeState state                          = canonicalState();
+        state.mDevices[0].mSwapchainMaintenance1 = VK_FALSE;
+        ScopedFakeState scope(state);
+        const auto&     error = requireError(resolveVulkanPhysicalDeviceGeneration(request(state)));
+        ensure("a false swapchain-maintenance feature is a distinct candidate rejection",
+               error.mCode == VulkanPhysicalDeviceResolutionCode::NoSuitablePhysicalDevice &&
+                   error.mLastRejection == VulkanPhysicalDeviceRejection::SwapchainMaintenance1FeatureUnsupported &&
+                   state.mFeatureCallsByDevice[0] == 1 && state.mExactFeatureChain && state.mQueueCountCalls[0] == 0);
+    }
 }
 
 template<>
@@ -700,8 +761,10 @@ void render_vulkan_physical_device_object::test<6>()
 {
     {
         FakeState state;
-        state.mDevices.push_back(deviceRecord(0x3600, VK_API_VERSION_1_1, { VK_KHR_SWAPCHAIN_EXTENSION_NAME }, {}, {}));
-        state.mDevices.push_back(deviceRecord(0x3700, VK_API_VERSION_1_1, { VK_KHR_SWAPCHAIN_EXTENSION_NAME },
+        state.mDevices.push_back(deviceRecord(0x3600, VK_API_VERSION_1_1,
+                                              { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME }, {}, {}));
+        state.mDevices.push_back(deviceRecord(0x3700, VK_API_VERSION_1_1,
+                                              { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME },
                                               { queueFamily(VK_QUEUE_COMPUTE_BIT), queueFamily(VK_QUEUE_GRAPHICS_BIT),
                                                 queueFamily(VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT) },
                                               { VK_TRUE, VK_FALSE, VK_TRUE }));
@@ -751,9 +814,10 @@ template<>
 void render_vulkan_physical_device_object::test<7>()
 {
     FakeState state;
-    state.mDevices.push_back(deviceRecord(
-        0x3800, VK_API_VERSION_1_2, { "VK_KHR_portability_subset_extra", VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_portability_subset" },
-        { queueFamily(VK_QUEUE_GRAPHICS_BIT) }, { VK_TRUE }));
+    state.mDevices.push_back(deviceRecord(0x3800, VK_API_VERSION_1_2,
+                                          { "VK_KHR_portability_subset_extra", VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                            VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME, "VK_KHR_portability_subset" },
+                                          { queueFamily(VK_QUEUE_GRAPHICS_BIT) }, { VK_TRUE }));
     state.mDevices.push_back(deviceRecord(0x3900, VK_API_VERSION_1_3));
     state.synchronizeCounters();
     ScopedFakeState scope(state);
@@ -763,19 +827,22 @@ void render_vulkan_physical_device_object::test<7>()
     ensure("the first eligible device is selected without scoring later candidates",
            generation.physicalDeviceIndex() == 0 && state.mPropertyCalls[1] == 0);
     ensure("the exact portability-subset advertisement becomes a device-create obligation",
-           generation.portabilitySubsetAdvertised() && generation.portabilitySubsetRequired() && required.size() == 2 &&
-               required[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME && required[1] == "VK_KHR_portability_subset");
+           generation.swapchainMaintenance1Supported() && generation.portabilitySubsetAdvertised() &&
+               generation.portabilitySubsetRequired() && required.size() == 3 && required[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+               required[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME && required[2] == "VK_KHR_portability_subset");
 
     FakeState core_state;
-    core_state.mDevices.push_back(
-        deviceRecord(0x3a00, VK_API_VERSION_1_1, { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_portability_subset_extra" }));
+    core_state.mDevices.push_back(deviceRecord(
+        0x3a00, VK_API_VERSION_1_1,
+        { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME, "VK_KHR_portability_subset_extra" }));
     core_state.synchronizeCounters();
     ScopedFakeState                core_scope(core_state);
     VulkanPhysicalDeviceGeneration core_generation = takeGeneration(resolveVulkanPhysicalDeviceGeneration(request(core_state)));
     const auto                     core_required   = core_generation.requiredDeviceExtensions();
     ensure("a portability decoy adds no device-create obligation",
-           !core_generation.portabilitySubsetAdvertised() && !core_generation.portabilitySubsetRequired() && core_required.size() == 1 &&
-               core_required[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+           core_generation.swapchainMaintenance1Supported() && !core_generation.portabilitySubsetAdvertised() &&
+               !core_generation.portabilitySubsetRequired() && core_required.size() == 2 &&
+               core_required[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME && core_required[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
 }
 
 template<>
@@ -785,9 +852,9 @@ void render_vulkan_physical_device_object::test<8>()
     FakeState state;
     state.mDevices.push_back(deviceRecord(0x3b00, VK_API_VERSION_1_0));
     state.mDevices.push_back(deviceRecord(0x3c00, VK_API_VERSION_1_1, {}));
-    state.mDevices.push_back(deviceRecord(0x3d00, VK_API_VERSION_1_1, { VK_KHR_SWAPCHAIN_EXTENSION_NAME },
-                                          { queueFamily(VK_QUEUE_GRAPHICS_BIT, 0), queueFamily(VK_QUEUE_COMPUTE_BIT) },
-                                          { VK_TRUE, VK_TRUE }));
+    state.mDevices.push_back(
+        deviceRecord(0x3d00, VK_API_VERSION_1_1, { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME },
+                     { queueFamily(VK_QUEUE_GRAPHICS_BIT, 0), queueFamily(VK_QUEUE_COMPUTE_BIT) }, { VK_TRUE, VK_TRUE }));
     state.synchronizeCounters();
     ScopedFakeState scope(state);
 
@@ -798,7 +865,7 @@ void render_vulkan_physical_device_object::test<8>()
                error.mPhysicalDeviceIndex == 2 && error.mObservedCount == 3 && error.mEnumerationAttempt == 1);
     ensure("candidate filtering avoids irrelevant extension and queue queries",
            state.mExtensionCountCallsByDevice[0] == 0 && state.mQueueCountCalls[0] == 0 && state.mQueueCountCalls[1] == 0 &&
-               state.mSurfaceSupportCalls == 0);
+               state.mFeatureCallsByDevice[1] == 0 && state.mFeatureCallsByDevice[2] == 1 && state.mSurfaceSupportCalls == 0);
 }
 
 } // namespace tut

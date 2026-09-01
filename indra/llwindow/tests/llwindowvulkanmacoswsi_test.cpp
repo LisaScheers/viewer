@@ -84,10 +84,13 @@ VkCompositeAlphaFlagBitsKHR expectedCompositeAlpha(VkCompositeAlphaFlagsKHR supp
     return static_cast<VkCompositeAlphaFlagBitsKHR>(0);
 }
 
-bool operationIsReusable(const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult& result) noexcept
+bool presentationCompleted(const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result,
+                           std::uint32_t                                                           image_count) noexcept
 {
-    const auto* disposition = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(&result);
-    return disposition && *disposition == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable;
+    const auto* success = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>(&result);
+    return success && success->mImageIndex && *success->mImageIndex < image_count &&
+           (success->mOutcome == LLRenderVulkan::VulkanSwapchainFrameSlotPresentationOutcome::Presented ||
+            success->mOutcome == LLRenderVulkan::VulkanSwapchainFrameSlotPresentationOutcome::Suboptimal);
 }
 
 } // namespace
@@ -181,6 +184,10 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("the Vulkan instance retains both required window extensions", enabled_extensions.size() >= required_extensions.size());
     ensure_equals("the Vulkan instance keeps the base surface extension first", enabled_extensions[0], required_extensions[0]);
     ensure_equals("the Vulkan instance keeps the Metal surface extension second", enabled_extensions[1], required_extensions[1]);
+    ensure("the explicit diagnostic instance appends surface-capabilities2 before surface-maintenance1",
+           enabled_extensions.size() >= required_extensions.size() + 2 &&
+               enabled_extensions[required_extensions.size()] == VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME &&
+               enabled_extensions[required_extensions.size() + 1] == VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
 
     const auto surface_error = owner->acquireSurfaceGeneration();
     ensure("the current owner acquires a real Metal Vulkan surface", !surface_error.has_value());
@@ -203,9 +210,11 @@ void window_vulkan_macos_wsi_object::test<1>()
            instance_generation->presentationQueueFamilyIndex() != VK_QUEUE_FAMILY_IGNORED && queue_properties.queueCount != 0 &&
                (queue_properties.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0);
     const auto device_extensions = instance_generation->requiredDeviceExtensions();
-    ensure("MoltenVK requires exact swapchain and portability-subset device extensions",
-           instance_generation->portabilitySubsetRequired() && device_extensions.size() == 2 &&
-               device_extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME && device_extensions[1] == "VK_KHR_portability_subset");
+    ensure("MoltenVK requires exact swapchain-maintenance and portability-subset device extensions",
+           instance_generation->swapchainMaintenance1Supported() && instance_generation->portabilitySubsetRequired() &&
+               device_extensions.size() == 3 && device_extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+               device_extensions[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME &&
+               device_extensions[2] == "VK_KHR_portability_subset");
     ensure("presentation-device selection creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("presentation-device selection leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
@@ -219,11 +228,12 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->logicalDeviceQueueFamilyIndex() == instance_generation->presentationQueueFamilyIndex() &&
                instance_generation->logicalDeviceQueueIndex() == 0);
     const auto enabled_device_extensions = instance_generation->enabledDeviceExtensions();
-    ensure("the MoltenVK device enables exact swapchain and portability-subset policy",
+    ensure("the MoltenVK device enables exact swapchain-maintenance and portability-subset policy",
            instance_generation->logicalDeviceEnabledFeatures().independentBlend == VK_TRUE &&
-               instance_generation->portabilitySubsetEnabled() && enabled_device_extensions.size() == 2 &&
-               enabled_device_extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
-               enabled_device_extensions[1] == "VK_KHR_portability_subset");
+               instance_generation->swapchainMaintenance1Enabled() && instance_generation->portabilitySubsetEnabled() &&
+               enabled_device_extensions.size() == 3 && enabled_device_extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+               enabled_device_extensions[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME &&
+               enabled_device_extensions[2] == "VK_KHR_portability_subset");
     ensure("logical-device acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("logical-device acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
@@ -290,11 +300,13 @@ void window_vulkan_macos_wsi_object::test<1>()
     const auto frame_slot_error = owner->acquireSwapchainFrameSlotGeneration();
     ensure("the exact swapchain-image chain creates one idle frame slot", !frame_slot_error.has_value());
     ensure("the instance parent owns one frame-slot generation", instance_generation->hasSwapchainFrameSlotGeneration());
-    ensure("the real frame slot owns non-null command-pool, command-buffer, semaphore, and fence handles",
+    ensure("the real frame slot owns all six non-null command and synchronization handles",
            instance_generation->swapchainFrameCommandPool() != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameCommandBuffer() != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameImageAvailableSemaphore() != VK_NULL_HANDLE &&
-               instance_generation->swapchainFrameSubmissionFence() != VK_NULL_HANDLE);
+               instance_generation->swapchainFramePresentationReadySemaphore() != VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameSubmissionFence() != VK_NULL_HANDLE &&
+               instance_generation->swapchainFramePresentCompletionFence() != VK_NULL_HANDLE);
     ensure("the frame slot retains the exact live queue-family, device, configuration, swapchain, and image parents",
            instance_generation->presentationQueueFamilyIndex() != VK_QUEUE_FAMILY_IGNORED &&
                instance_generation->logicalDevice() != VK_NULL_HANDLE && instance_generation->hasSwapchainConfigurationGeneration() &&
@@ -304,29 +316,49 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("frame-slot acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("frame-slot acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
-    const VkSemaphore image_available  = instance_generation->swapchainFrameImageAvailableSemaphore();
-    const auto        first_round_trip = owner->roundTripEmptySwapchainFrameSlot();
-    ensure("the native Metal owner completes the first explicit empty frame-slot round trip", operationIsReusable(first_round_trip));
-    ensure("the first empty round trip leaves the exact non-null image-available semaphore untouched",
-           image_available != VK_NULL_HANDLE && instance_generation->swapchainFrameImageAvailableSemaphore() == image_available);
-    ensure("the first empty round trip creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the first empty round trip leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    const VkSemaphore image_available          = instance_generation->swapchainFrameImageAvailableSemaphore();
+    const VkSemaphore presentation_ready       = instance_generation->swapchainFramePresentationReadySemaphore();
+    const VkFence     submission_fence         = instance_generation->swapchainFrameSubmissionFence();
+    const VkFence     present_completion_fence = instance_generation->swapchainFramePresentCompletionFence();
+    const auto        first_presentation       = owner->acquireToPresentSwapchainFrameSlot();
+    ensure("the native Metal owner completes the first acquire-to-present cycle",
+           presentationCompleted(first_presentation, resolved_image_count) &&
+               instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance_generation->swapchainFrameAcquiredImageIndex());
+    ensure("the first presentation cycle retains all four synchronization handles",
+           image_available != VK_NULL_HANDLE && presentation_ready != VK_NULL_HANDLE && submission_fence != VK_NULL_HANDLE &&
+               present_completion_fence != VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
+               instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
+               instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
+               instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
+    ensure("the first presentation cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the first presentation cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
-    const auto second_round_trip = owner->roundTripEmptySwapchainFrameSlot();
-    ensure("the native Metal owner completes the second explicit empty frame-slot round trip", operationIsReusable(second_round_trip));
-    ensure("the second empty round trip leaves the exact image-available semaphore untouched",
-           instance_generation->swapchainFrameImageAvailableSemaphore() == image_available);
-    ensure_equals("two empty round trips emit no validation messages", instance_generation->validationSnapshot().mMessageCount,
+    const auto second_presentation = owner->acquireToPresentSwapchainFrameSlot();
+    ensure("the native Metal owner completes the second acquire-to-present cycle",
+           presentationCompleted(second_presentation, resolved_image_count) &&
+               instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance_generation->swapchainFrameAcquiredImageIndex());
+    ensure("the second presentation cycle retains all four synchronization handles",
+           instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
+               instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
+               instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
+               instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
+    ensure_equals("two presentation cycles emit no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
-    ensure("the second empty round trip creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the second empty round trip leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure("the second presentation cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the second presentation cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     ensure("the native smoke explicitly resets the frame slot before swapchain images", owner->resetSwapchainFrameSlotGeneration());
-    ensure("explicit frame-slot reset removes all four owned handles",
+    ensure("explicit frame-slot reset removes all six owned handles",
            !instance_generation->hasSwapchainFrameSlotGeneration() && instance_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE &&
                instance_generation->swapchainFrameCommandBuffer() == VK_NULL_HANDLE &&
                instance_generation->swapchainFrameImageAvailableSemaphore() == VK_NULL_HANDLE &&
-               instance_generation->swapchainFrameSubmissionFence() == VK_NULL_HANDLE);
+               instance_generation->swapchainFramePresentationReadySemaphore() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameSubmissionFence() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFramePresentCompletionFence() == VK_NULL_HANDLE &&
+               !instance_generation->swapchainFrameAcquiredImageIndex());
     ensure("frame-slot reset leaves its exact image, swapchain, configuration, device, and surface parents live",
            instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() != 0 &&
                instance_generation->hasSwapchainGeneration() && instance_generation->swapchain() != VK_NULL_HANDLE &&
@@ -385,7 +417,10 @@ void window_vulkan_macos_wsi_object::test<1>()
            !instance_generation->hasSwapchainFrameSlotGeneration() && instance_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE &&
                instance_generation->swapchainFrameCommandBuffer() == VK_NULL_HANDLE &&
                instance_generation->swapchainFrameImageAvailableSemaphore() == VK_NULL_HANDLE &&
-               instance_generation->swapchainFrameSubmissionFence() == VK_NULL_HANDLE);
+               instance_generation->swapchainFramePresentationReadySemaphore() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFrameSubmissionFence() == VK_NULL_HANDLE &&
+               instance_generation->swapchainFramePresentCompletionFence() == VK_NULL_HANDLE &&
+               !instance_generation->swapchainFrameAcquiredImageIndex());
     ensure("the exact instance parent remains live after surface reset",
            owner->instanceGeneration() == instance_generation && instance_generation->instance() != VK_NULL_HANDLE);
     ensure("required validation remains live during explicit surface destruction", instance_generation->validationEnabled());

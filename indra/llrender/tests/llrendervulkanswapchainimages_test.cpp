@@ -225,17 +225,33 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysical
     }
     if (!properties)
     {
-        *count = 1;
+        *count = 2;
         return VK_SUCCESS;
     }
-    if (*count == 0)
+    if (*count < 2)
     {
         return VK_INCOMPLETE;
     }
     properties[0] = {};
     std::strncpy(properties[0].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
-    *count = 1;
+    properties[1] = {};
+    std::strncpy(properties[1].extensionName, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
+    *count = 2;
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures2(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures2* features) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !features)
+    {
+        return;
+    }
+    auto* maintenance = static_cast<VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(features->pNext);
+    if (features->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 && maintenance &&
+        maintenance->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR && maintenance->pNext == nullptr)
+    {
+        maintenance->swapchainMaintenance1 = VK_TRUE;
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures* features) noexcept
@@ -247,12 +263,22 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures(VkPhysicalDevice physic
     }
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice physical_device,
-                                                const VkDeviceCreateInfo*,
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice          physical_device,
+                                                const VkDeviceCreateInfo* create_info,
                                                 const VkAllocationCallbacks*,
                                                 VkDevice* device) noexcept
 {
-    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !device)
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !create_info || !device ||
+        create_info->enabledExtensionCount != 2 || !create_info->ppEnabledExtensionNames || !create_info->ppEnabledExtensionNames[0] ||
+        !create_info->ppEnabledExtensionNames[1] ||
+        std::strcmp(create_info->ppEnabledExtensionNames[0], VK_KHR_SWAPCHAIN_EXTENSION_NAME) != 0 ||
+        std::strcmp(create_info->ppEnabledExtensionNames[1], VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) != 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    const auto* maintenance = static_cast<const VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(create_info->pNext);
+    if (!maintenance || maintenance->sType != VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR ||
+        maintenance->pNext != nullptr || maintenance->swapchainMaintenance1 != VK_TRUE)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -478,6 +504,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeGetPhysicalDeviceSurfaceSupport);
     if (std::strcmp(name, "vkEnumerateDeviceExtensionProperties") == 0)
         return eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
+    if (std::strcmp(name, "vkGetPhysicalDeviceFeatures2") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFeatures2);
     if (std::strcmp(name, "vkGetPhysicalDeviceFeatures") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceFeatures);
     if (std::strcmp(name, "vkCreateDevice") == 0)

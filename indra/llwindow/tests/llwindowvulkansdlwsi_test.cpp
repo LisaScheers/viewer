@@ -118,10 +118,13 @@ bool frameSlotWindowGenerationIsCurrent(void* userdata, std::uint64_t native_win
     return context.mWindow && context.mWindow->isVulkanWindowGenerationCurrent(native_window_generation);
 }
 
-bool operationIsReusable(const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult& result) noexcept
+bool presentationCompleted(const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result,
+                           std::uint32_t                                                           image_count) noexcept
 {
-    const auto* disposition = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(&result);
-    return disposition && *disposition == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable;
+    const auto* success = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>(&result);
+    return success && success->mImageIndex && *success->mImageIndex < image_count &&
+           (success->mOutcome == LLRenderVulkan::VulkanSwapchainFrameSlotPresentationOutcome::Presented ||
+            success->mOutcome == LLRenderVulkan::VulkanSwapchainFrameSlotPresentationOutcome::Suboptimal);
 }
 
 } // namespace
@@ -175,6 +178,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool instance_api_1_1                 = false;
     bool instance_generation_exact        = false;
     bool instance_extensions_ordered      = false;
+    bool instance_diagnostic_extensions    = false;
     bool instance_validation_enabled      = false;
     bool instance_validation_clean        = false;
     bool instance_window_owned            = false;
@@ -187,6 +191,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool presentation_device_api_1_1      = false;
     bool presentation_queue_usable        = false;
     bool presentation_extensions_exact    = false;
+    bool presentation_maintenance          = false;
     bool presentation_device_removed      = false;
     bool logical_device_acquired          = false;
     bool logical_device_nonnull           = false;
@@ -194,6 +199,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool logical_provenance_exact         = false;
     bool logical_feature_exact            = false;
     bool logical_extensions_exact         = false;
+    bool logical_maintenance               = false;
     bool logical_device_removed           = false;
     bool swapchain_configuration_acquired = false;
     bool swapchain_drawable_extent_exact  = false;
@@ -211,10 +217,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool frame_slot_acquired               = false;
     bool frame_slot_handles_nonnull        = false;
     bool frame_slot_provenance_exact       = false;
-    bool frame_slot_first_round_trip       = false;
-    bool frame_slot_second_round_trip      = false;
-    bool frame_slot_semaphore_untouched    = false;
-    bool frame_slot_round_trip_clean       = false;
+    bool frame_slot_first_presentation     = false;
+    bool frame_slot_second_presentation    = false;
+    bool frame_slot_handles_untouched      = false;
+    bool frame_slot_presentation_clean     = false;
     bool frame_slot_explicitly_reset       = false;
     bool frame_slot_removed                = false;
     bool swapchain_images_removed          = false;
@@ -278,12 +284,14 @@ void window_vulkan_sdl_wsi_object::test<1>()
                                             queue_properties.queueCount != 0 && (queue_properties.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
                 const auto device_extensions = instance_generation->requiredDeviceExtensions();
                 presentation_extensions_exact =
-                    !device_extensions.empty() && device_extensions.front() == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
-                    device_extensions.size() == (instance_generation->portabilitySubsetRequired() ? std::size_t{ 2 } : std::size_t{ 1 });
+                    device_extensions.size() == (instance_generation->portabilitySubsetRequired() ? std::size_t{ 3 } : std::size_t{ 2 }) &&
+                    device_extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
+                    device_extensions[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
                 if (presentation_extensions_exact && instance_generation->portabilitySubsetRequired())
                 {
-                    presentation_extensions_exact = device_extensions[1] == "VK_KHR_portability_subset";
+                    presentation_extensions_exact = device_extensions[2] == "VK_KHR_portability_subset";
                 }
+                presentation_maintenance = instance_generation->swapchainMaintenance1Supported();
                 logical_device_acquired = instance_generation->hasLogicalDeviceGeneration();
                 logical_device_nonnull  = instance_generation->logicalDevice() != VK_NULL_HANDLE;
                 logical_queue_nonnull   = instance_generation->presentationQueue() != VK_NULL_HANDLE;
@@ -298,6 +306,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 {
                     logical_extensions_exact = enabled_device_extensions[index] == device_extensions[index];
                 }
+                logical_maintenance = instance_generation->swapchainMaintenance1Enabled();
 
                 swapchain_configuration_acquired = instance_generation->hasSwapchainConfigurationGeneration();
                 LLCoordWindow current_drawable;
@@ -346,15 +355,20 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 frame_slot_handles_nonnull = instance_generation->swapchainFrameCommandPool() != VK_NULL_HANDLE &&
                                              instance_generation->swapchainFrameCommandBuffer() != VK_NULL_HANDLE &&
                                              instance_generation->swapchainFrameImageAvailableSemaphore() != VK_NULL_HANDLE &&
-                                             instance_generation->swapchainFrameSubmissionFence() != VK_NULL_HANDLE;
+                                             instance_generation->swapchainFramePresentationReadySemaphore() != VK_NULL_HANDLE &&
+                                             instance_generation->swapchainFrameSubmissionFence() != VK_NULL_HANDLE &&
+                                             instance_generation->swapchainFramePresentCompletionFence() != VK_NULL_HANDLE;
                 frame_slot_provenance_exact = frame_slot_acquired && frame_slot_handles_nonnull && swapchain_images_provenance_exact &&
                                               instance_generation->logicalDevice() != VK_NULL_HANDLE &&
                                               instance_generation->presentationQueueFamilyIndex() != VK_QUEUE_FAMILY_IGNORED;
 
                 if (frame_slot_provenance_exact && drawable_queried)
                 {
-                    auto*             mutable_generation = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
-                    const VkSemaphore image_available    = instance_generation->swapchainFrameImageAvailableSemaphore();
+                    auto*             mutable_generation       = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
+                    const VkSemaphore image_available          = instance_generation->swapchainFrameImageAvailableSemaphore();
+                    const VkSemaphore presentation_ready       = instance_generation->swapchainFramePresentationReadySemaphore();
+                    const VkFence     submission_fence         = instance_generation->swapchainFrameSubmissionFence();
+                    const VkFence     present_completion_fence = instance_generation->swapchainFramePresentCompletionFence();
                     FrameSlotOperationContext operation_context{ static_cast<const LLWindowSDL*>(window), instance_generation };
                     LLRenderVulkan::VulkanSwapchainFrameSlotOperationRequest operation_request;
                     operation_request.mNativeWindowGeneration = requirements->nativeWindowGeneration();
@@ -363,16 +377,23 @@ void window_vulkan_sdl_wsi_object::test<1>()
                     operation_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
                     operation_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
 
-                    const auto first_result     = mutable_generation->roundTripEmptySwapchainFrameSlot(operation_request);
-                    frame_slot_first_round_trip = operationIsReusable(first_result);
-                    const bool semaphore_untouched_after_first =
-                        image_available != VK_NULL_HANDLE &&
-                        instance_generation->swapchainFrameImageAvailableSemaphore() == image_available;
-                    const auto second_result     = mutable_generation->roundTripEmptySwapchainFrameSlot(operation_request);
-                    frame_slot_second_round_trip = operationIsReusable(second_result);
-                    frame_slot_semaphore_untouched =
-                        semaphore_untouched_after_first && instance_generation->swapchainFrameImageAvailableSemaphore() == image_available;
-                    frame_slot_round_trip_clean = instance_generation->validationSnapshot().mMessageCount == 0;
+                    const auto first_result       = mutable_generation->acquireToPresentSwapchainFrameSlot(operation_request);
+                    frame_slot_first_presentation = presentationCompleted(first_result, image_count) &&
+                                                    instance_generation->swapchainFrameSlotDisposition() ==
+                                                        LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                    !instance_generation->swapchainFrameAcquiredImageIndex();
+                    const auto second_result       = mutable_generation->acquireToPresentSwapchainFrameSlot(operation_request);
+                    frame_slot_second_presentation = presentationCompleted(second_result, image_count) &&
+                                                     instance_generation->swapchainFrameSlotDisposition() ==
+                                                         LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                     !instance_generation->swapchainFrameAcquiredImageIndex();
+                    frame_slot_handles_untouched = image_available != VK_NULL_HANDLE && presentation_ready != VK_NULL_HANDLE &&
+                                                   submission_fence != VK_NULL_HANDLE && present_completion_fence != VK_NULL_HANDLE &&
+                                                   instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
+                                                   instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
+                                                   instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
+                                                   instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence;
+                    frame_slot_presentation_clean = instance_generation->validationSnapshot().mMessageCount == 0;
                 }
 
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
@@ -382,6 +403,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 {
                     instance_extensions_ordered = enabled_extensions[index] == required_extensions[index];
                 }
+                instance_diagnostic_extensions =
+                    enabled_extensions.size() >= required_extensions.size() + 2 &&
+                    enabled_extensions[required_extensions.size()] == VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME &&
+                    enabled_extensions[required_extensions.size() + 1] == VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
             }
         }
 
@@ -419,7 +444,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
                              owned_instance_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE &&
                              owned_instance_generation->swapchainFrameCommandBuffer() == VK_NULL_HANDLE &&
                              owned_instance_generation->swapchainFrameImageAvailableSemaphore() == VK_NULL_HANDLE &&
-                             owned_instance_generation->swapchainFrameSubmissionFence() == VK_NULL_HANDLE;
+                             owned_instance_generation->swapchainFramePresentationReadySemaphore() == VK_NULL_HANDLE &&
+                             owned_instance_generation->swapchainFrameSubmissionFence() == VK_NULL_HANDLE &&
+                             owned_instance_generation->swapchainFramePresentCompletionFence() == VK_NULL_HANDLE &&
+                             !owned_instance_generation->swapchainFrameAcquiredImageIndex();
         swapchain_images_removed = !owned_instance_generation->hasSwapchainImagesGeneration() &&
                                    owned_instance_generation->resolvedSwapchainImageCount() == 0 &&
                                    owned_instance_generation->swapchainImage(0) == VK_NULL_HANDLE &&
@@ -454,6 +482,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the acquired Vulkan instance requests API 1.1", instance_api_1_1);
     ensure("the Vulkan instance retains the exact current native-window generation", instance_generation_exact);
     ensure("the Vulkan instance enables SDL's required extensions in order", instance_extensions_ordered);
+    ensure("the explicit diagnostic instance appends surface-capabilities2 before surface-maintenance1", instance_diagnostic_extensions);
     ensure("the Vulkan instance enables required validation", instance_validation_enabled);
     ensure("the current instance owns one SDL-created Vulkan surface", surface_acquired);
     ensure("the SDL-created Vulkan surface handle is non-null", surface_nonnull);
@@ -463,13 +492,15 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the selected physical-device handle is non-null", presentation_device_nonnull);
     ensure("the selected physical device supports standard Vulkan 1.1 or newer", presentation_device_api_1_1);
     ensure("the selected queue family is nonempty and graphics-capable", presentation_queue_usable);
-    ensure("the selected device retains exact swapchain and portability requirements", presentation_extensions_exact);
+    ensure("the selected device retains exact swapchain-maintenance and portability requirements", presentation_extensions_exact);
+    ensure("the selected device supports VK_KHR_swapchain_maintenance1", presentation_maintenance);
     ensure("the SDL Vulkan branch automatically owns one logical device", logical_device_acquired);
     ensure("the automatically created logical device is non-null", logical_device_nonnull);
     ensure("the automatically retrieved presentation queue is non-null", logical_queue_nonnull);
     ensure("the logical device retains exact physical-device, family, and queue provenance", logical_provenance_exact);
     ensure("the logical device enables the required independent-blend capability", logical_feature_exact);
     ensure("the logical device enables the selected extensions in exact order", logical_extensions_exact);
+    ensure("the logical device enables the swapchain-maintenance feature", logical_maintenance);
     ensure("the SDL Vulkan branch automatically owns one swapchain configuration", swapchain_configuration_acquired);
     ensure("the configuration retains the exact SDL drawable pixel extent", swapchain_drawable_extent_exact);
     ensure("the selected surface format follows the bounded UNORM nonlinear-sRGB policy", swapchain_format_supported);
@@ -485,16 +516,16 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the image collection retains its exact swapchain, device, configuration, and format parents",
            swapchain_images_provenance_exact);
     ensure("the SDL Vulkan branch automatically owns one frame-slot generation", frame_slot_acquired);
-    ensure("the automatic frame slot owns non-null command-pool, command-buffer, semaphore, and fence handles", frame_slot_handles_nonnull);
+    ensure("the automatic frame slot owns all six non-null command and synchronization handles", frame_slot_handles_nonnull);
     ensure("the frame slot retains the exact live queue-family, device, configuration, swapchain, and image parents",
            frame_slot_provenance_exact);
-    ensure("the native SDL owner completes the first explicit empty frame-slot round trip", frame_slot_first_round_trip);
-    ensure("the native SDL owner completes the second explicit empty frame-slot round trip", frame_slot_second_round_trip);
-    ensure("both empty round trips leave the exact non-null image-available semaphore untouched", frame_slot_semaphore_untouched);
-    ensure("both empty round trips emit no validation messages", frame_slot_round_trip_clean);
+    ensure("the native SDL owner completes the first acquire-to-present cycle", frame_slot_first_presentation);
+    ensure("the native SDL owner completes the second acquire-to-present cycle", frame_slot_second_presentation);
+    ensure("both presentation cycles retain all four synchronization handles", frame_slot_handles_untouched);
+    ensure("both presentation cycles emit no validation messages", frame_slot_presentation_clean);
     ensure("the native smoke explicitly resets the frame-slot child before its parents", frame_slot_explicitly_reset);
     ensure("the native smoke explicitly resets the Vulkan surface", surface_explicitly_reset);
-    ensure("explicit frame-slot reset removes the generation and all four owned handles", frame_slot_removed);
+    ensure("explicit frame-slot reset removes the generation and all six owned handles", frame_slot_removed);
     ensure("surface reset first removes every swapchain image and view", swapchain_images_removed);
     ensure("surface reset first removes the swapchain generation", swapchain_removed);
     ensure("explicit reset removes only the Vulkan surface child", surface_removed);

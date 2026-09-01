@@ -49,6 +49,7 @@ enum class MissingCommand : std::uint8_t
     CreateDebugMessenger,
     DestroyDebugMessenger,
     DestroySurface,
+    GetPhysicalDeviceFeatures2,
     GetPhysicalDeviceFeatures,
     CreateDevice,
     DestroyDevice,
@@ -74,7 +75,11 @@ enum class MissingCommand : std::uint8_t
     BeginCommandBuffer,
     EndCommandBuffer,
     ResetFences,
-    QueueSubmit
+    QueueSubmit,
+    AcquireNextImage,
+    CmdPipelineBarrier,
+    QueuePresent,
+    ReleaseSwapchainImages
 };
 
 enum class Event : std::uint8_t
@@ -157,9 +162,10 @@ struct FakeState
     VkPhysicalDevice                mPhysicalDevice            = fakeHandle<VkPhysicalDevice>(0x4444);
     VkPhysicalDeviceProperties      mPhysicalDeviceProperties{};
     VkQueueFamilyProperties         mQueueFamilyProperties{};
-    std::vector<std::string>        mDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    std::vector<std::string>        mDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME };
     VkBool32                        mPresentationSupported = VK_TRUE;
     VkPhysicalDeviceFeatures        mSupportedFeatures{};
+    VkBool32                        mSwapchainMaintenance1Supported = VK_TRUE;
     VkResult                        mSwapchainCapabilitiesResult = VK_SUCCESS;
     VkSurfaceCapabilitiesKHR        mSwapchainCapabilities{};
     std::vector<VkSurfaceFormatKHR> mSwapchainFormats{ { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR } };
@@ -175,6 +181,8 @@ struct FakeState
     VkCommandBuffer          mCommandBuffer           = fakeHandle<VkCommandBuffer>(0xa002);
     VkSemaphore              mImageAvailableSemaphore = fakeHandle<VkSemaphore>(0xa003);
     VkFence                  mSubmissionFence         = fakeHandle<VkFence>(0xa004);
+    VkSemaphore              mPresentationReadySemaphore = fakeHandle<VkSemaphore>(0xa005);
+    VkFence                  mPresentCompletionFence     = fakeHandle<VkFence>(0xa006);
     std::vector<VkImage>     mSwapchainImages{ fakeHandle<VkImage>(0x8001), fakeHandle<VkImage>(0x8002), fakeHandle<VkImage>(0x8003) };
     std::vector<VkImageView> mSwapchainImageViews{ fakeHandle<VkImageView>(0x9001), fakeHandle<VkImageView>(0x9002),
                                                    fakeHandle<VkImageView>(0x9003) };
@@ -335,12 +343,20 @@ struct FakeState
     VkResult              mEndCommandBufferResult   = VK_SUCCESS;
     VkResult              mResetFencesResult        = VK_SUCCESS;
     VkResult              mQueueSubmitResult        = VK_SUCCESS;
+    VkResult              mAcquireNextImageResult       = VK_SUCCESS;
+    std::uint32_t         mAcquiredImageIndex           = 0;
+    VkResult              mQueuePresentResult           = VK_SUCCESS;
+    VkResult              mReleaseSwapchainImagesResult = VK_SUCCESS;
     std::size_t           mWaitForFencesCalls       = 0;
     std::size_t           mResetCommandBufferCalls  = 0;
     std::size_t           mBeginCommandBufferCalls  = 0;
     std::size_t           mEndCommandBufferCalls    = 0;
     std::size_t           mResetFencesCalls         = 0;
     std::size_t           mQueueSubmitCalls         = 0;
+    std::size_t           mAcquireNextImageCalls        = 0;
+    std::size_t           mPipelineBarrierCalls         = 0;
+    std::size_t           mQueuePresentCalls            = 0;
+    std::size_t           mReleaseSwapchainImagesCalls  = 0;
     VkDevice              mOperationDevice          = VK_NULL_HANDLE;
     VkQueue               mSubmittedQueue           = VK_NULL_HANDLE;
     VkFence               mOperationFence           = VK_NULL_HANDLE;
@@ -692,6 +708,22 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures(VkPhysicalDevice physic
     *features                           = gFakeState->mSupportedFeatures;
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures2(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures2* features) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !features)
+    {
+        return;
+    }
+    for (VkBaseOutStructure* extension = static_cast<VkBaseOutStructure*>(features->pNext); extension; extension = extension->pNext)
+    {
+        if (extension->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR)
+        {
+            auto* maintenance                  = reinterpret_cast<VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(extension);
+            maintenance->swapchainMaintenance1 = gFakeState->mSwapchainMaintenance1Supported;
+        }
+    }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice physical_device,
                                                 const VkDeviceCreateInfo*,
                                                 const VkAllocationCallbacks*,
@@ -1002,14 +1034,16 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSemaphore(VkDevice                     
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    ++gFakeState->mCreateSemaphoreCalls;
+    const std::size_t create_index                  = gFakeState->mCreateSemaphoreCalls++;
     gFakeState->mFrameSlotDevice                    = device;
     gFakeState->mSemaphoreCreateInfo                = *create_info;
     gFakeState->mCreateSemaphoreAllocationCallbacks = allocation_callbacks;
     gFakeState->mEvents.push_back(Event::CreateSemaphore);
     if (gFakeState->mSemaphoreCreateResult == VK_SUCCESS)
     {
-        *semaphore = gFakeState->mNullSemaphore ? VK_NULL_HANDLE : gFakeState->mImageAvailableSemaphore;
+        *semaphore = gFakeState->mNullSemaphore
+                         ? VK_NULL_HANDLE
+                         : (create_index % 2 == 0 ? gFakeState->mImageAvailableSemaphore : gFakeState->mPresentationReadySemaphore);
     }
     return gFakeState->mSemaphoreCreateResult;
 }
@@ -1018,7 +1052,8 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroySemaphore(VkDevice                     dev
                                                 VkSemaphore                  semaphore,
                                                 const VkAllocationCallbacks* allocation_callbacks) noexcept
 {
-    if (!gFakeState || device != gFakeState->mDevice || semaphore != gFakeState->mImageAvailableSemaphore)
+    if (!gFakeState || device != gFakeState->mDevice ||
+        (semaphore != gFakeState->mImageAvailableSemaphore && semaphore != gFakeState->mPresentationReadySemaphore))
     {
         return;
     }
@@ -1036,21 +1071,23 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateFence(VkDevice                     devi
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    ++gFakeState->mCreateFenceCalls;
+    const std::size_t create_index              = gFakeState->mCreateFenceCalls++;
     gFakeState->mFrameSlotDevice                = device;
     gFakeState->mFenceCreateInfo                = *create_info;
     gFakeState->mCreateFenceAllocationCallbacks = allocation_callbacks;
     gFakeState->mEvents.push_back(Event::CreateFence);
     if (gFakeState->mFenceCreateResult == VK_SUCCESS)
     {
-        *fence = gFakeState->mNullFence ? VK_NULL_HANDLE : gFakeState->mSubmissionFence;
+        *fence = gFakeState->mNullFence ? VK_NULL_HANDLE
+                                        : (create_index % 2 == 0 ? gFakeState->mSubmissionFence : gFakeState->mPresentCompletionFence);
     }
     return gFakeState->mFenceCreateResult;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeDestroyFence(VkDevice device, VkFence fence, const VkAllocationCallbacks* allocation_callbacks) noexcept
 {
-    if (!gFakeState || device != gFakeState->mDevice || fence != gFakeState->mSubmissionFence)
+    if (!gFakeState || device != gFakeState->mDevice ||
+        (fence != gFakeState->mSubmissionFence && fence != gFakeState->mPresentCompletionFence))
     {
         return;
     }
@@ -1062,9 +1099,16 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyFence(VkDevice device, VkFence fence, cons
 VKAPI_ATTR VkResult VKAPI_CALL fakeWaitForFences(VkDevice device, std::uint32_t fence_count, const VkFence* fences, VkBool32 wait_all,
                                                  std::uint64_t timeout) noexcept
 {
-    if (!gFakeState || device != gFakeState->mDevice || fence_count != 1 || !fences || fences[0] != gFakeState->mSubmissionFence)
+    if (!gFakeState || device != gFakeState->mDevice || fence_count == 0 || fence_count > 2 || !fences)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (std::uint32_t index = 0; index < fence_count; ++index)
+    {
+        if (fences[index] != gFakeState->mSubmissionFence && fences[index] != gFakeState->mPresentCompletionFence)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
     }
     ++gFakeState->mWaitForFencesCalls;
     gFakeState->mOperationDevice = device;
@@ -1116,9 +1160,16 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEndCommandBuffer(VkCommandBuffer command_buff
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeResetFences(VkDevice device, std::uint32_t fence_count, const VkFence* fences) noexcept
 {
-    if (!gFakeState || device != gFakeState->mDevice || fence_count != 1 || !fences || fences[0] != gFakeState->mSubmissionFence)
+    if (!gFakeState || device != gFakeState->mDevice || fence_count == 0 || fence_count > 2 || !fences)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (std::uint32_t index = 0; index < fence_count; ++index)
+    {
+        if (fences[index] != gFakeState->mSubmissionFence && fences[index] != gFakeState->mPresentCompletionFence)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
     }
     ++gFakeState->mResetFencesCalls;
     gFakeState->mOperationDevice = device;
@@ -1133,18 +1184,84 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeQueueSubmit(VkQueue             queue,
                                                VkFence             fence) noexcept
 {
     if (!gFakeState || queue != gFakeState->mQueue || submit_count != 1 || !submits || submits[0].sType != VK_STRUCTURE_TYPE_SUBMIT_INFO ||
-        submits[0].pNext || submits[0].waitSemaphoreCount != 0 || submits[0].commandBufferCount != 1 || !submits[0].pCommandBuffers ||
-        submits[0].pCommandBuffers[0] != gFakeState->mCommandBuffer || submits[0].signalSemaphoreCount != 0 ||
-        fence != gFakeState->mSubmissionFence)
+        submits[0].pNext || (fence != gFakeState->mSubmissionFence && fence != gFakeState->mPresentCompletionFence))
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (submits[0].commandBufferCount > 1 || (submits[0].commandBufferCount == 1 &&
+                                              (!submits[0].pCommandBuffers || submits[0].pCommandBuffers[0] != gFakeState->mCommandBuffer)))
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gFakeState->mQueueSubmitCalls;
     gFakeState->mSubmittedQueue         = queue;
     gFakeState->mOperationFence         = fence;
-    gFakeState->mOperationCommandBuffer = submits[0].pCommandBuffers[0];
+    gFakeState->mOperationCommandBuffer = submits[0].commandBufferCount == 1 ? submits[0].pCommandBuffers[0] : VK_NULL_HANDLE;
     gFakeState->mEvents.push_back(Event::QueueSubmit);
     return gFakeState->mQueueSubmitResult;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice       device,
+                                                    VkSwapchainKHR swapchain,
+                                                    std::uint64_t  timeout,
+                                                    VkSemaphore    semaphore,
+                                                    VkFence        fence,
+                                                    std::uint32_t* image_index) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || swapchain != gFakeState->mSwapchain ||
+        timeout != VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS || semaphore != gFakeState->mImageAvailableSemaphore ||
+        fence != VK_NULL_HANDLE || !image_index)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gFakeState->mAcquireNextImageCalls;
+    *image_index = gFakeState->mAcquiredImageIndex;
+    return gFakeState->mAcquireNextImageResult;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_buffer,
+                                                  VkPipelineStageFlags source_stage,
+                                                  VkPipelineStageFlags destination_stage,
+                                                  VkDependencyFlags,
+                                                  std::uint32_t,
+                                                  const VkMemoryBarrier*,
+                                                  std::uint32_t,
+                                                  const VkBufferMemoryBarrier*,
+                                                  std::uint32_t               image_barrier_count,
+                                                  const VkImageMemoryBarrier* image_barriers) noexcept
+{
+    if (gFakeState && command_buffer == gFakeState->mCommandBuffer && source_stage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+        destination_stage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT && image_barrier_count == 1 && image_barriers)
+    {
+        ++gFakeState->mPipelineBarrierCalls;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
+{
+    if (!gFakeState || queue != gFakeState->mQueue || !present_info || present_info->sType != VK_STRUCTURE_TYPE_PRESENT_INFO_KHR ||
+        present_info->waitSemaphoreCount != 1 || !present_info->pWaitSemaphores ||
+        present_info->pWaitSemaphores[0] != gFakeState->mPresentationReadySemaphore || present_info->swapchainCount != 1 ||
+        !present_info->pSwapchains || present_info->pSwapchains[0] != gFakeState->mSwapchain || !present_info->pImageIndices ||
+        present_info->pImageIndices[0] != gFakeState->mAcquiredImageIndex)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gFakeState->mQueuePresentCalls;
+    return gFakeState->mQueuePresentResult;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device, const VkReleaseSwapchainImagesInfoKHR* release_info) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !release_info ||
+        release_info->sType != VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_KHR || release_info->swapchain != gFakeState->mSwapchain ||
+        release_info->imageIndexCount != 1 || !release_info->pImageIndices ||
+        release_info->pImageIndices[0] != gFakeState->mAcquiredImageIndex)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gFakeState->mReleaseSwapchainImagesCalls;
+    return gFakeState->mReleaseSwapchainImagesResult;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
@@ -1229,6 +1346,22 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     {
         return gFakeState->mMissing == MissingCommand::QueueSubmit ? nullptr : eraseFunctionType(fakeQueueSubmit);
     }
+    if (std::strcmp(name, "vkAcquireNextImageKHR") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::AcquireNextImage ? nullptr : eraseFunctionType(fakeAcquireNextImage);
+    }
+    if (std::strcmp(name, "vkCmdPipelineBarrier") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CmdPipelineBarrier ? nullptr : eraseFunctionType(fakeCmdPipelineBarrier);
+    }
+    if (std::strcmp(name, "vkQueuePresentKHR") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::QueuePresent ? nullptr : eraseFunctionType(fakeQueuePresent);
+    }
+    if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::ReleaseSwapchainImages ? nullptr : eraseFunctionType(fakeReleaseSwapchainImages);
+    }
     return nullptr;
 }
 
@@ -1296,6 +1429,11 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
     if (std::strcmp(name, "vkEnumerateDeviceExtensionProperties") == 0)
     {
         return eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceFeatures2") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::GetPhysicalDeviceFeatures2 ? nullptr
+                                                                                  : eraseFunctionType(fakeGetPhysicalDeviceFeatures2);
     }
     if (std::strcmp(name, "vkGetPhysicalDeviceFeatures") == 0)
     {
@@ -1580,6 +1718,22 @@ void ensureSwapchainFrameSlotOperationSuccess(const VulkanSwapchainFrameSlotPare
     tut::ensure("the parent frame-slot operation returns a disposition", actual != nullptr && *actual == disposition);
 }
 
+const VulkanSwapchainFrameSlotParentOperationError& requireSwapchainFrameSlotPresentationError(
+    const VulkanSwapchainFrameSlotParentPresentationResult& result)
+{
+    const auto* error = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&result);
+    tut::ensure("the parent frame-slot presentation returns an error", error != nullptr);
+    return *error;
+}
+
+const VulkanSwapchainFrameSlotPresentationSuccess& requireSwapchainFrameSlotPresentationSuccess(
+    const VulkanSwapchainFrameSlotParentPresentationResult& result)
+{
+    const auto* success = std::get_if<VulkanSwapchainFrameSlotPresentationSuccess>(&result);
+    tut::ensure("the parent frame-slot presentation succeeds", success != nullptr);
+    return *success;
+}
+
 void acquireSelectionChain(FakeState& state, VulkanInstanceGeneration& owner)
 {
     tut::ensure("the surface fixture succeeds", !owner.acquireSurfaceGeneration(makeSurfaceRequest(state, owner)));
@@ -1644,7 +1798,7 @@ struct render_vulkan_instance_test
 {
 };
 
-using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 58>;
+using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 59>;
 using render_vulkan_instance_test_object = render_vulkan_instance_test_group::object;
 render_vulkan_instance_test_group render_vulkan_instance_tests("render Vulkan instance");
 
@@ -2538,7 +2692,8 @@ template<>
 void render_vulkan_instance_test_object::test<24>()
 {
     FakeState state;
-    state.mDeviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_portability_subset" };
+    state.mDeviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+                                "VK_KHR_portability_subset" };
     ScopedFakeState          scope(state);
     VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
     ensure("surface acquisition succeeds before the canonical selection",
@@ -2554,8 +2709,9 @@ void render_vulkan_instance_test_object::test<24>()
                owner.presentationQueueFamilyIndex() == 0 && owner.presentationQueueFamilyProperties().queueCount == 1 &&
                (owner.presentationQueueFamilyProperties().queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0);
     ensure("the exact device-create obligations are retained in deterministic order",
-           owner.portabilitySubsetRequired() && required.size() == 2 && required[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME &&
-               required[1] == "VK_KHR_portability_subset");
+           owner.portabilitySubsetRequired() && owner.swapchainMaintenance1Supported() && required.size() == 3 &&
+               required[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME && required[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME &&
+               required[2] == "VK_KHR_portability_subset");
     ensure("selection uses the exact owned surface",
            state.mLastSurfaceSupportDevice == state.mPhysicalDevice && state.mLastSurfaceSupportQueue == 0 &&
                state.mLastSurfaceSupportSurface == state.mSurface);
@@ -2740,13 +2896,15 @@ void render_vulkan_instance_test_object::test<29>()
     const VulkanLogicalDeviceRequest request  = makeLogicalDeviceRequest(state, owner);
     ensure("the exact selection creates one logical-device generation", !owner.acquireLogicalDeviceGeneration(request));
     const std::span<const std::string_view> extensions = owner.enabledDeviceExtensions();
-    ensure(
-        "the parent exposes the authenticated logical device, queue, feature, and extension policy",
-        owner.hasLogicalDeviceGeneration() && owner.logicalDevice() == state.mDevice && owner.presentationQueue() == state.mQueue &&
-            owner.logicalDevicePhysicalDevice() == owner.physicalDevice() && owner.logicalDevicePhysicalDevice() == state.mPhysicalDevice &&
-            owner.logicalDeviceQueueFamilyIndex() == owner.presentationQueueFamilyIndex() && owner.logicalDeviceQueueFamilyIndex() == 0 &&
-            owner.logicalDeviceQueueIndex() == 0 && owner.logicalDeviceEnabledFeatures().independentBlend == VK_TRUE &&
-            extensions.size() == 1 && extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME && !owner.portabilitySubsetEnabled());
+    ensure("the parent exposes the authenticated logical device, queue, feature, and extension policy",
+           owner.hasLogicalDeviceGeneration() && owner.logicalDevice() == state.mDevice && owner.presentationQueue() == state.mQueue &&
+               owner.logicalDevicePhysicalDevice() == owner.physicalDevice() &&
+               owner.logicalDevicePhysicalDevice() == state.mPhysicalDevice &&
+               owner.logicalDeviceQueueFamilyIndex() == owner.presentationQueueFamilyIndex() &&
+               owner.logicalDeviceQueueFamilyIndex() == 0 && owner.logicalDeviceQueueIndex() == 0 &&
+               owner.logicalDeviceEnabledFeatures().independentBlend == VK_TRUE && extensions.size() == 2 &&
+               extensions[0] == VK_KHR_SWAPCHAIN_EXTENSION_NAME && extensions[1] == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME &&
+               owner.swapchainMaintenance1Enabled() && !owner.portabilitySubsetEnabled());
     ensure("queue retrieval uses the exact created device, selected family, and queue zero",
            state.mGetDeviceQueueCalls == 1 && state.mGetDeviceQueueDevice == state.mDevice && state.mGetDeviceQueueFamily == 0 &&
                state.mGetDeviceQueueIndex == 0);
@@ -3785,18 +3943,20 @@ void render_vulkan_instance_test_object::test<48>()
     state.mDeviceProcAddrCalls              = 0;
     state.mDeviceCommandLookups.clear();
     ensure("the exact live chain publishes one frame slot", !owner.acquireSwapchainFrameSlotGeneration(request));
-    ensure("the parent exposes all four frame-slot handles",
+    ensure("the parent exposes all six frame-slot handles",
            owner.hasSwapchainFrameSlotGeneration() && owner.swapchainFrameCommandPool() == state.mCommandPool &&
                owner.swapchainFrameCommandBuffer() == state.mCommandBuffer &&
                owner.swapchainFrameImageAvailableSemaphore() == state.mImageAvailableSemaphore &&
-               owner.swapchainFrameSubmissionFence() == state.mSubmissionFence);
+               owner.swapchainFramePresentationReadySemaphore() == state.mPresentationReadySemaphore &&
+               owner.swapchainFrameSubmissionFence() == state.mSubmissionFence &&
+               owner.swapchainFramePresentCompletionFence() == state.mPresentCompletionFence && !owner.swapchainFrameAcquiredImageIndex());
     ensure("frame-slot dispatch resolves through the exact instance and device",
            state.mGetDeviceProcAddrResolutionCalls == 1 && state.mGetDeviceProcAddrResolutionInstance == state.mInstance &&
                state.mDeviceProcAddrCalls == 7 && state.mDeviceProcAddrDevice == state.mDevice &&
                state.mDeviceCommandLookups == std::vector<std::string>{ "vkCreateCommandPool", "vkDestroyCommandPool",
                                                                         "vkAllocateCommandBuffers", "vkCreateSemaphore",
                                                                         "vkDestroySemaphore", "vkCreateFence", "vkDestroyFence" });
-    ensure("the frame slot uses one resettable primary buffer, one binary semaphore, and a signaled fence",
+    ensure("the frame slot uses one resettable primary buffer, two binary semaphores, and two signaled fences",
            state.mCreateCommandPoolCalls == 1 && state.mFrameSlotDevice == state.mDevice &&
                state.mCommandPoolCreateInfo.sType == VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO &&
                state.mCommandPoolCreateInfo.pNext == nullptr &&
@@ -3805,9 +3965,9 @@ void render_vulkan_instance_test_object::test<48>()
                state.mCommandBufferAllocateInfo.sType == VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO &&
                state.mCommandBufferAllocateInfo.pNext == nullptr && state.mCommandBufferAllocateInfo.commandPool == state.mCommandPool &&
                state.mCommandBufferAllocateInfo.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY &&
-               state.mCommandBufferAllocateInfo.commandBufferCount == 1 && state.mCreateSemaphoreCalls == 1 &&
+               state.mCommandBufferAllocateInfo.commandBufferCount == 1 && state.mCreateSemaphoreCalls == 2 &&
                state.mSemaphoreCreateInfo.sType == VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO && state.mSemaphoreCreateInfo.pNext == nullptr &&
-               state.mSemaphoreCreateInfo.flags == 0 && state.mCreateFenceCalls == 1 &&
+               state.mSemaphoreCreateInfo.flags == 0 && state.mCreateFenceCalls == 2 &&
                state.mFenceCreateInfo.sType == VK_STRUCTURE_TYPE_FENCE_CREATE_INFO && state.mFenceCreateInfo.pNext == nullptr &&
                state.mFenceCreateInfo.flags == VK_FENCE_CREATE_SIGNALED_BIT && state.mCreateCommandPoolAllocationCallbacks == nullptr &&
                state.mCreateSemaphoreAllocationCallbacks == nullptr && state.mCreateFenceAllocationCallbacks == nullptr);
@@ -3823,14 +3983,17 @@ void render_vulkan_instance_test_object::test<48>()
     ensure("explicit reset destroys the slot in reverse order while every parent remains live",
            !owner.hasSwapchainFrameSlotGeneration() && owner.swapchainFrameCommandPool() == VK_NULL_HANDLE &&
                owner.swapchainFrameCommandBuffer() == VK_NULL_HANDLE && owner.swapchainFrameImageAvailableSemaphore() == VK_NULL_HANDLE &&
-               owner.swapchainFrameSubmissionFence() == VK_NULL_HANDLE && owner.hasSwapchainImagesGeneration() &&
-               owner.hasSwapchainGeneration() && owner.hasSwapchainConfigurationGeneration() && owner.hasLogicalDeviceGeneration() &&
-               owner.hasSurfaceGeneration() && state.mDestroyFenceCalls == 1 && state.mDestroySemaphoreCalls == 1 &&
-               state.mDestroyCommandPoolCalls == 1 && state.mFrameSlotDestroyObservationMade && state.mObservedImagesAtFrameSlotDestroy &&
+               owner.swapchainFramePresentationReadySemaphore() == VK_NULL_HANDLE &&
+               owner.swapchainFrameSubmissionFence() == VK_NULL_HANDLE && owner.swapchainFramePresentCompletionFence() == VK_NULL_HANDLE &&
+               !owner.swapchainFrameAcquiredImageIndex() && owner.hasSwapchainImagesGeneration() && owner.hasSwapchainGeneration() &&
+               owner.hasSwapchainConfigurationGeneration() && owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration() &&
+               state.mDestroyFenceCalls == 2 && state.mDestroySemaphoreCalls == 2 && state.mDestroyCommandPoolCalls == 1 &&
+               state.mFrameSlotDestroyObservationMade && state.mObservedImagesAtFrameSlotDestroy &&
                state.mObservedSwapchainAtFrameSlotDestroy && state.mObservedConfigurationAtFrameSlotDestroy &&
                state.mObservedLogicalAtFrameSlotDestroy && state.mObservedSurfaceAtFrameSlotDestroy &&
                std::vector<Event>(state.mEvents.begin() + static_cast<std::ptrdiff_t>(reset_event), state.mEvents.end()) ==
-                   std::vector<Event>{ Event::DestroyFence, Event::DestroySemaphore, Event::DestroyCommandPool } &&
+                   std::vector<Event>{ Event::DestroyFence, Event::DestroyFence, Event::DestroySemaphore, Event::DestroySemaphore,
+                                       Event::DestroyCommandPool } &&
                state.mDestroyCommandPoolAllocationCallbacks == nullptr && state.mDestroySemaphoreAllocationCallbacks == nullptr &&
                state.mDestroyFenceAllocationCallbacks == nullptr);
     owner.resetSwapchainFrameSlotGeneration();
@@ -3867,8 +4030,8 @@ void render_vulkan_instance_test_object::test<49>()
         ensureSwapchainFrameSlotCode(result, fail_instance_owner ? VulkanSwapchainFrameSlotAcquireCode::StaleInstanceOwner
                                                                  : VulkanSwapchainFrameSlotAcquireCode::StaleWindowGeneration);
         ensure("frame-slot freshness is reauthenticated after all native children exist",
-               state.mCreateCommandPoolCalls == 1 && state.mAllocateCommandBufferCalls == 1 && state.mCreateSemaphoreCalls == 1 &&
-                   state.mCreateFenceCalls == 1 && state.mDestroyFenceCalls == 1 && state.mDestroySemaphoreCalls == 1 &&
+               state.mCreateCommandPoolCalls == 1 && state.mAllocateCommandBufferCalls == 1 && state.mCreateSemaphoreCalls == 2 &&
+                   state.mCreateFenceCalls == 2 && state.mDestroyFenceCalls == 2 && state.mDestroySemaphoreCalls == 2 &&
                    state.mDestroyCommandPoolCalls == 1 && state.mInstanceOwnerChecks == 2 &&
                    state.mSurfaceWindowChecks == (fail_instance_owner ? 1 : 2));
         ensure("stale publication rolls back the pending slot and preserves every parent",
@@ -3893,8 +4056,8 @@ void render_vulkan_instance_test_object::test<49>()
     const VulkanSwapchainFrameSlotAcquireResult result  = VulkanInstanceDetail::acquireSwapchainFrameSlot(owner, request, failAllocation);
     ensureSwapchainFrameSlotCode(result, VulkanSwapchainFrameSlotAcquireCode::AllocationFailure);
     ensure("parent allocation failure rolls back the fully resolved pending slot and preserves its parents",
-           state.mCreateCommandPoolCalls == 1 && state.mAllocateCommandBufferCalls == 1 && state.mCreateSemaphoreCalls == 1 &&
-               state.mCreateFenceCalls == 1 && state.mDestroyFenceCalls == 1 && state.mDestroySemaphoreCalls == 1 &&
+           state.mCreateCommandPoolCalls == 1 && state.mAllocateCommandBufferCalls == 1 && state.mCreateSemaphoreCalls == 2 &&
+               state.mCreateFenceCalls == 2 && state.mDestroyFenceCalls == 2 && state.mDestroySemaphoreCalls == 2 &&
                state.mDestroyCommandPoolCalls == 1 && !owner.hasSwapchainFrameSlotGeneration() && owner.hasSwapchainImagesGeneration() &&
                owner.hasSwapchainGeneration() && owner.hasLogicalDeviceGeneration() && state.mDestroyImageViewCalls == 0 &&
                state.mDestroySwapchainCalls == 0 && state.mDestroyDeviceCalls == 0);
@@ -3918,11 +4081,16 @@ void render_vulkan_instance_test_object::test<50>()
     ensure("the parent move transfers the complete frame-slot chain",
            !first.hasSwapchainFrameSlotGeneration() && first.swapchainFrameCommandPool() == VK_NULL_HANDLE &&
                first.swapchainFrameCommandBuffer() == VK_NULL_HANDLE && first.swapchainFrameImageAvailableSemaphore() == VK_NULL_HANDLE &&
-               first.swapchainFrameSubmissionFence() == VK_NULL_HANDLE && !first.hasSwapchainImagesGeneration() &&
+               first.swapchainFramePresentationReadySemaphore() == VK_NULL_HANDLE &&
+               first.swapchainFrameSubmissionFence() == VK_NULL_HANDLE && first.swapchainFramePresentCompletionFence() == VK_NULL_HANDLE &&
+               !first.swapchainFrameAcquiredImageIndex() && !first.hasSwapchainImagesGeneration() &&
                moved.hasSwapchainFrameSlotGeneration() && moved.swapchainFrameCommandPool() == state.mCommandPool &&
                moved.swapchainFrameCommandBuffer() == state.mCommandBuffer &&
                moved.swapchainFrameImageAvailableSemaphore() == state.mImageAvailableSemaphore &&
-               moved.swapchainFrameSubmissionFence() == state.mSubmissionFence && moved.hasSwapchainImagesGeneration());
+               moved.swapchainFramePresentationReadySemaphore() == state.mPresentationReadySemaphore &&
+               moved.swapchainFrameSubmissionFence() == state.mSubmissionFence &&
+               moved.swapchainFramePresentCompletionFence() == state.mPresentCompletionFence && !moved.swapchainFrameAcquiredImageIndex() &&
+               moved.hasSwapchainImagesGeneration());
     first.reset();
     ensure("resetting the moved-from parent destroys no frame-slot or older object",
            state.mDestroyFenceCalls == 0 && state.mDestroySemaphoreCalls == 0 && state.mDestroyCommandPoolCalls == 0 &&
@@ -3948,12 +4116,13 @@ void render_vulkan_instance_test_object::test<50>()
            state.mEvents == std::vector<Event>{ Event::CreateInstance,        Event::CreateSurface,    Event::CreateDevice,
                                                 Event::GetDeviceQueue,        Event::CreateSwapchain,  Event::CreateImageView,
                                                 Event::CreateImageView,       Event::CreateImageView,  Event::CreateCommandPool,
-                                                Event::AllocateCommandBuffer, Event::CreateSemaphore,  Event::CreateFence,
-                                                Event::DestroyFence,          Event::DestroySemaphore, Event::DestroyCommandPool,
-                                                Event::DestroyImageView,      Event::DestroyImageView, Event::DestroyImageView,
-                                                Event::DestroySwapchain,      Event::DestroyDevice,    Event::DestroySurface,
-                                                Event::DestroyInstance } &&
-               state.mDestroyFenceCalls == 1 && state.mDestroySemaphoreCalls == 1 && state.mDestroyCommandPoolCalls == 1 &&
+                                                Event::AllocateCommandBuffer, Event::CreateSemaphore,  Event::CreateSemaphore,
+                                                Event::CreateFence,           Event::CreateFence,      Event::DestroyFence,
+                                                Event::DestroyFence,          Event::DestroySemaphore, Event::DestroySemaphore,
+                                                Event::DestroyCommandPool,    Event::DestroyImageView, Event::DestroyImageView,
+                                                Event::DestroyImageView,      Event::DestroySwapchain, Event::DestroyDevice,
+                                                Event::DestroySurface,        Event::DestroyInstance } &&
+               state.mDestroyFenceCalls == 2 && state.mDestroySemaphoreCalls == 2 && state.mDestroyCommandPoolCalls == 1 &&
                state.mDestroyImageViewCalls == state.mSwapchainImageViews.size() && state.mDestroySwapchainCalls == 1 &&
                state.mDestroyDeviceCalls == 1 && state.mDestroySurfaceCalls == 1 && state.mDestroyInstanceCalls == 1);
 }
@@ -3970,6 +4139,21 @@ void render_vulkan_instance_test_object::test<51>()
     static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().roundTripEmptySwapchainFrameSlot(
         std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
     static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().retryEmptySwapchainFrameSlotCompletion(
+        std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
+    static_assert(std::variant_size_v<VulkanSwapchainFrameSlotParentPresentationResult> == 2);
+    static_assert(std::is_same_v<std::variant_alternative_t<0, VulkanSwapchainFrameSlotParentPresentationResult>,
+                                 VulkanSwapchainFrameSlotParentOperationError>);
+    static_assert(std::is_same_v<std::variant_alternative_t<1, VulkanSwapchainFrameSlotParentPresentationResult>,
+                                 VulkanSwapchainFrameSlotPresentationSuccess>);
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().acquireToPresentSwapchainFrameSlot(
+        std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().retrySwapchainFrameSlotPresentation(
+        std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().retrySwapchainFrameSlotPresentationCompletion(
+        std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().cancelSwapchainFrameSlotPresentation(
+        std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().retrySwapchainFrameSlotCancellationCompletion(
         std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
     static_assert(std::is_same_v<decltype(std::declval<const VulkanInstanceGeneration&>().swapchainFrameSlotDisposition()),
                                  std::optional<VulkanSwapchainFrameSlotDisposition>>);
@@ -4152,8 +4336,8 @@ void render_vulkan_instance_test_object::test<53>()
                state.mOperationDevice == state.mDevice && state.mSubmittedQueue == state.mQueue &&
                state.mOperationCommandBuffer == state.mCommandBuffer && state.mOperationFence == state.mSubmissionFence &&
                state.mWaitAll == VK_TRUE && state.mWaitTimeout == std::numeric_limits<std::uint64_t>::max() &&
-               state.mCreateCommandPoolCalls == 1 && state.mAllocateCommandBufferCalls == 1 && state.mCreateSemaphoreCalls == 1 &&
-               state.mCreateFenceCalls == 1);
+               state.mCreateCommandPoolCalls == 1 && state.mAllocateCommandBufferCalls == 1 && state.mCreateSemaphoreCalls == 2 &&
+               state.mCreateFenceCalls == 2);
     const std::vector<Event> expected_cycle{ Event::WaitForFences,    Event::ResetCommandBuffer, Event::BeginCommandBuffer,
                                              Event::EndCommandBuffer, Event::ResetFences,        Event::QueueSubmit,
                                              Event::WaitForFences };
@@ -4202,8 +4386,8 @@ void render_vulkan_instance_test_object::test<54>()
     ensureSwapchainFrameSlotOperationCode(owner.roundTripEmptySwapchainFrameSlot(request),
                                           VulkanSwapchainFrameSlotParentOperationCode::SwapchainFrameSlotNotLive);
     ensure("a callback-side post-resolution owner mutation is caught before the retired slot can execute",
-           !owner.hasSwapchainFrameSlotGeneration() && !owner.swapchainFrameSlotDisposition() && state.mDestroyFenceCalls == 1 &&
-               state.mDestroySemaphoreCalls == 1 && state.mDestroyCommandPoolCalls == 1 && state.mWaitForFencesCalls == 0 &&
+           !owner.hasSwapchainFrameSlotGeneration() && !owner.swapchainFrameSlotDisposition() && state.mDestroyFenceCalls == 2 &&
+               state.mDestroySemaphoreCalls == 2 && state.mDestroyCommandPoolCalls == 1 && state.mWaitForFencesCalls == 0 &&
                state.mQueueSubmitCalls == 0);
 }
 
@@ -4257,7 +4441,7 @@ void render_vulkan_instance_test_object::test<55>()
                                              VulkanSwapchainFrameSlotDisposition::Reusable);
     ensure("successful retry unlocks child-first full teardown", owner.reset());
     ensure("unlocked teardown destroys every generation exactly once",
-           state.mDestroyFenceCalls == 1 && state.mDestroySemaphoreCalls == 1 && state.mDestroyCommandPoolCalls == 1 &&
+           state.mDestroyFenceCalls == 2 && state.mDestroySemaphoreCalls == 2 && state.mDestroyCommandPoolCalls == 1 &&
                state.mDestroyImageViewCalls == state.mSwapchainImageViews.size() && state.mDestroySwapchainCalls == 1 &&
                state.mDestroyDeviceCalls == 1 && state.mDestroySurfaceCalls == 1 && state.mDestroyInstanceCalls == 1);
 }
@@ -4288,7 +4472,7 @@ void render_vulkan_instance_test_object::test<56>()
     ensure("retiring queue loss unlocks explicit slot teardown without dropping older parents",
            owner.resetSwapchainFrameSlotGeneration() && !owner.hasSwapchainFrameSlotGeneration() && owner.hasSwapchainImagesGeneration() &&
                owner.hasSwapchainGeneration() && owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration() &&
-               state.mDestroyFenceCalls == 1 && state.mDestroySemaphoreCalls == 1 && state.mDestroyCommandPoolCalls == 1);
+               state.mDestroyFenceCalls == 2 && state.mDestroySemaphoreCalls == 2 && state.mDestroyCommandPoolCalls == 1);
 }
 
 template<>
@@ -4317,10 +4501,6 @@ void render_vulkan_instance_test_object::test<57>()
     request.mNativeWindowGeneration = 41;
     ensureSwapchainFrameSlotOperationCode(owner.retryEmptySwapchainFrameSlotCompletion(request),
                                           VulkanSwapchainFrameSlotParentOperationCode::NativeWindowGenerationMismatch);
-    request                 = makeSwapchainFrameSlotOperationRequest(state, owner);
-    request.mDrawableExtent = { 801, 600 };
-    ensureSwapchainFrameSlotOperationCode(owner.retryEmptySwapchainFrameSlotCompletion(request),
-                                          VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch);
     request                     = makeSwapchainFrameSlotOperationRequest(state, owner);
     state.mInstanceOwnerCurrent = false;
     ensureSwapchainFrameSlotOperationCode(owner.retryEmptySwapchainFrameSlotCompletion(request),
@@ -4330,7 +4510,7 @@ void render_vulkan_instance_test_object::test<57>()
     ensureSwapchainFrameSlotOperationCode(owner.retryEmptySwapchainFrameSlotCompletion(request),
                                           VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration);
     state.mSurfaceWindowCurrent = true;
-    ensure("every rejected retry leaves Pending intact and invokes no retained completion wait",
+    ensure("every rejected retry authentication leaves Pending intact and invokes no retained completion wait",
            owner.swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Pending &&
                state.mWaitForFencesCalls == wait_calls);
 
@@ -4343,8 +4523,11 @@ void render_vulkan_instance_test_object::test<57>()
                pending_round_trip.mOperationError->mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition &&
                pending_round_trip.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::Pending &&
                state.mWaitForFencesCalls == wait_calls);
+    request.mDrawableExtent = { 0, 0 };
     ensureSwapchainFrameSlotOperationSuccess(owner.retryEmptySwapchainFrameSlotCompletion(request),
                                              VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("completion retry ignores current drawable geometry and consumes only retained state",
+           state.mWaitForFencesCalls == wait_calls + 1);
 }
 
 template<>
@@ -4369,8 +4552,59 @@ void render_vulkan_instance_test_object::test<58>()
                                              VulkanSwapchainFrameSlotDisposition::Reusable);
     ensure("the moved owner preserves retained dispatch without reallocating its frame slot",
            state.mDeviceProcAddrCalls == retained_lookup_count && state.mCreateCommandPoolCalls == 1 &&
-               state.mAllocateCommandBufferCalls == 1 && state.mCreateSemaphoreCalls == 1 && state.mCreateFenceCalls == 1 &&
+               state.mAllocateCommandBufferCalls == 1 && state.mCreateSemaphoreCalls == 2 && state.mCreateFenceCalls == 2 &&
                state.mQueueSubmitCalls == 2);
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<59>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSwapchainFrameSlotChain(state, owner, { 1280, 720 });
+    VulkanSwapchainFrameSlotOperationRequest request = makeSwapchainFrameSlotOperationRequest(state, owner, { 1280, 720 });
+
+    state.mAcquiredImageIndex                                             = 1;
+    state.mQueuePresentResult                                             = VK_ERROR_OUT_OF_HOST_MEMORY;
+    const VulkanSwapchainFrameSlotParentPresentationResult present_result = owner.acquireToPresentSwapchainFrameSlot(request);
+    const VulkanSwapchainFrameSlotParentOperationError&    present_error  = requireSwapchainFrameSlotPresentationError(present_result);
+    ensure("the parent retains exact presentation ownership after a retryable present failure",
+           present_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::OperationFailure && present_error.mOperationError &&
+               present_error.mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::QueuePresent &&
+               present_error.mOperationError->mResult == VK_ERROR_OUT_OF_HOST_MEMORY &&
+               present_error.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+               present_error.mOperationError->mImageIndex == 1 &&
+               owner.swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+               owner.swapchainFrameAcquiredImageIndex() == 1 && !owner.resetSwapchainFrameSlotGeneration());
+
+    state.mQueuePresentResult                                            = VK_SUCCESS;
+    request.mDrawableExtent                                              = { 0, 0 };
+    const VulkanSwapchainFrameSlotParentPresentationResult retry_result  = owner.retrySwapchainFrameSlotPresentation(request);
+    const VulkanSwapchainFrameSlotPresentationSuccess&     retry_success = requireSwapchainFrameSlotPresentationSuccess(retry_result);
+    ensure("presentation retry ignores changed drawable geometry and completes retained work",
+           retry_success.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented && retry_success.mImageIndex == 1 &&
+               owner.swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !owner.swapchainFrameAcquiredImageIndex());
+
+    request                       = makeSwapchainFrameSlotOperationRequest(state, owner, { 1280, 720 });
+    state.mAcquiredImageIndex     = 2;
+    state.mEndCommandBufferResult = VK_ERROR_UNKNOWN;
+    const VulkanSwapchainFrameSlotParentPresentationResult acquired_result = owner.acquireToPresentSwapchainFrameSlot(request);
+    const VulkanSwapchainFrameSlotParentOperationError&    acquired_error  = requireSwapchainFrameSlotPresentationError(acquired_result);
+    ensure("a post-acquire failure retains the exact image until cancellation",
+           acquired_error.mOperationError &&
+               acquired_error.mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
+               acquired_error.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               acquired_error.mOperationError->mImageIndex == 2 && owner.swapchainFrameAcquiredImageIndex() == 2 && !owner.reset());
+
+    state.mEndCommandBufferResult = VK_SUCCESS;
+    request.mDrawableExtent       = { 17, 19 };
+    ensureSwapchainFrameSlotOperationSuccess(owner.cancelSwapchainFrameSlotPresentation(request),
+                                             VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("cancellation ignores changed drawable geometry and releases the retained image",
+           state.mReleaseSwapchainImagesCalls == 1 && !owner.swapchainFrameAcquiredImageIndex() && owner.reset());
 }
 
 } // namespace tut

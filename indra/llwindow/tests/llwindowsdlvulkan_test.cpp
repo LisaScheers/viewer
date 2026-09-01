@@ -25,11 +25,24 @@
 #include <initializer_list>
 #include <limits>
 #include <new>
+#include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace
 {
+
+#if defined(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)
+constexpr std::string_view SURFACE_CAPABILITIES_2_EXTENSION = VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME;
+#else
+constexpr std::string_view SURFACE_CAPABILITIES_2_EXTENSION = "VK_KHR_get_surface_capabilities2";
+#endif
+#if defined(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
+constexpr std::string_view SURFACE_MAINTENANCE_EXTENSION = VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
+#else
+constexpr std::string_view SURFACE_MAINTENANCE_EXTENSION = "VK_KHR_surface_maintenance1";
+#endif
 
 enum class Event
 {
@@ -96,6 +109,8 @@ struct FakeState
     bool                               mLoaderLiveDuringInstanceDestroy       = false;
     bool                               mSurfaceAbsentDuringInstanceDestroy    = false;
     bool                               mFailInstanceCreation                  = false;
+    bool                               mSurfaceCapabilities2Enabled           = false;
+    bool                               mSurfaceMaintenanceEnabled             = false;
     bool                               mFailSurfaceCreation                   = false;
     bool                               mNullSurfaceOnSuccess                  = false;
     bool                               mPoisonSurfaceOnFailure                = false;
@@ -129,12 +144,25 @@ struct FakeState
     VkCommandBuffer            mCommandBuffer           = reinterpret_cast<VkCommandBuffer>(static_cast<std::uintptr_t>(0x72000));
     VkSemaphore                mImageAvailableSemaphore = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x73000));
     VkFence                    mSubmissionFence         = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x74000));
+    VkSemaphore                mPresentationReadySemaphore = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x75000));
+    VkFence                    mPresentCompletionFence     = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x76000));
     bool                       mExposeWaitForFences     = true;
     std::array<VkResult, 8>    mWaitResults{};
     std::size_t                mWaitResultCount  = 0;
     std::size_t                mWaitResultIndex  = 0;
     std::size_t                mWaitCalls        = 0;
     std::size_t                mQueueSubmitCalls = 0;
+    std::size_t                mCreateSemaphoreCalls         = 0;
+    std::size_t                mCreateFenceCalls             = 0;
+    std::size_t                mAcquireNextImageCalls        = 0;
+    std::size_t                mPipelineBarrierCalls         = 0;
+    std::size_t                mQueuePresentCalls            = 0;
+    std::size_t                mReleaseSwapchainImagesCalls  = 0;
+    VkResult                   mEndCommandBufferResult       = VK_SUCCESS;
+    VkResult                   mAcquireNextImageResult       = VK_SUCCESS;
+    std::uint32_t              mAcquiredImageIndex           = 0;
+    VkResult                   mQueuePresentResult           = VK_SUCCESS;
+    VkResult                   mReleaseSwapchainImagesResult = VK_SUCCESS;
 
     void record(Event event) noexcept { mEvents[mEventCount++] = event; }
 };
@@ -187,7 +215,8 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateInstanceExtensionProperties(const ch
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    constexpr std::array<const char*, 2> extensions{ "VK_KHR_surface", "VK_KHR_xlib_surface" };
+    constexpr std::array<const char*, 4> extensions{ "VK_KHR_surface", "VK_KHR_xlib_surface", "VK_KHR_get_surface_capabilities2",
+                                                     "VK_KHR_surface_maintenance1" };
     if (!properties)
     {
         *count = static_cast<std::uint32_t>(extensions.size());
@@ -213,13 +242,28 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateInstanceLayerProperties(std::uint32_
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL fakeCreateInstance(const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance* instance) noexcept
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateInstance(const VkInstanceCreateInfo* create_info,
+                                                  const VkAllocationCallbacks*,
+                                                  VkInstance* instance) noexcept
 {
-    if (!gVulkanState || !instance)
+    if (!gVulkanState || !create_info || !instance)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     gVulkanState->record(Event::CreateInstance);
+    gVulkanState->mSurfaceCapabilities2Enabled = false;
+    gVulkanState->mSurfaceMaintenanceEnabled   = false;
+    for (std::uint32_t index = 0; index < create_info->enabledExtensionCount; ++index)
+    {
+        if (create_info->ppEnabledExtensionNames[index] == SURFACE_CAPABILITIES_2_EXTENSION)
+        {
+            gVulkanState->mSurfaceCapabilities2Enabled = true;
+        }
+        if (create_info->ppEnabledExtensionNames[index] == SURFACE_MAINTENANCE_EXTENSION)
+        {
+            gVulkanState->mSurfaceMaintenanceEnabled = true;
+        }
+    }
     if (gVulkanState->mFailInstanceCreation)
     {
         *instance = VK_NULL_HANDLE;
@@ -343,17 +387,35 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysical
     }
     if (!properties)
     {
-        *count = 1;
+        *count = 2;
         return VK_SUCCESS;
     }
-    if (*count == 0)
+    if (*count < 2)
     {
         return VK_INCOMPLETE;
     }
     properties[0] = {};
     std::memcpy(properties[0].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME, sizeof(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
-    *count = 1;
+    properties[1] = {};
+    std::memcpy(properties[1].extensionName, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+                sizeof(VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME));
+    *count = 2;
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures2(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures2* features) noexcept
+{
+    if (!gVulkanState || physical_device != gVulkanState->mPhysicalDevice || !features)
+    {
+        return;
+    }
+    for (VkBaseOutStructure* extension = static_cast<VkBaseOutStructure*>(features->pNext); extension; extension = extension->pNext)
+    {
+        if (extension->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR)
+        {
+            reinterpret_cast<VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(extension)->swapchainMaintenance1 = VK_TRUE;
+        }
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures(VkPhysicalDevice device, VkPhysicalDeviceFeatures* features) noexcept
@@ -543,7 +605,8 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSemaphore(VkDevice device,
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    *semaphore = gVulkanState->mImageAvailableSemaphore;
+    const std::size_t create_index = gVulkanState->mCreateSemaphoreCalls++;
+    *semaphore = create_index % 2 == 0 ? gVulkanState->mImageAvailableSemaphore : gVulkanState->mPresentationReadySemaphore;
     return VK_SUCCESS;
 }
 
@@ -560,7 +623,8 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateFence(VkDevice device,
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    *fence = gVulkanState->mSubmissionFence;
+    const std::size_t create_index = gVulkanState->mCreateFenceCalls++;
+    *fence                         = create_index % 2 == 0 ? gVulkanState->mSubmissionFence : gVulkanState->mPresentCompletionFence;
     return VK_SUCCESS;
 }
 
@@ -571,9 +635,16 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyFence(VkDevice, VkFence, const VkAllocatio
 VKAPI_ATTR VkResult VKAPI_CALL fakeWaitForFences(VkDevice device, std::uint32_t fence_count, const VkFence* fences, VkBool32,
                                                  std::uint64_t) noexcept
 {
-    if (!gVulkanState || device != gVulkanState->mDevice || fence_count != 1 || !fences || fences[0] != gVulkanState->mSubmissionFence)
+    if (!gVulkanState || device != gVulkanState->mDevice || fence_count == 0 || fence_count > 2 || !fences)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (std::uint32_t index = 0; index < fence_count; ++index)
+    {
+        if (fences[index] != gVulkanState->mSubmissionFence && fences[index] != gVulkanState->mPresentCompletionFence)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
     }
     ++gVulkanState->mWaitCalls;
     const std::size_t index = gVulkanState->mWaitResultIndex++;
@@ -592,14 +663,24 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeBeginCommandBuffer(VkCommandBuffer command_bu
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeEndCommandBuffer(VkCommandBuffer command_buffer) noexcept
 {
-    return gVulkanState && command_buffer == gVulkanState->mCommandBuffer ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+    return gVulkanState && command_buffer == gVulkanState->mCommandBuffer ? gVulkanState->mEndCommandBufferResult
+                                                                          : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeResetFences(VkDevice device, std::uint32_t fence_count, const VkFence* fences) noexcept
 {
-    return gVulkanState && device == gVulkanState->mDevice && fence_count == 1 && fences && fences[0] == gVulkanState->mSubmissionFence
-               ? VK_SUCCESS
-               : VK_ERROR_INITIALIZATION_FAILED;
+    if (!gVulkanState || device != gVulkanState->mDevice || fence_count == 0 || fence_count > 2 || !fences)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (std::uint32_t index = 0; index < fence_count; ++index)
+    {
+        if (fences[index] != gVulkanState->mSubmissionFence && fences[index] != gVulkanState->mPresentCompletionFence)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeQueueSubmit(VkQueue             queue,
@@ -607,12 +688,77 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeQueueSubmit(VkQueue             queue,
                                                const VkSubmitInfo* submits,
                                                VkFence             fence) noexcept
 {
-    if (!gVulkanState || queue != gVulkanState->mQueue || submit_count != 1 || !submits || fence != gVulkanState->mSubmissionFence)
+    if (!gVulkanState || queue != gVulkanState->mQueue || submit_count != 1 || !submits ||
+        (fence != gVulkanState->mSubmissionFence && fence != gVulkanState->mPresentCompletionFence))
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gVulkanState->mQueueSubmitCalls;
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice       device,
+                                                    VkSwapchainKHR swapchain,
+                                                    std::uint64_t  timeout,
+                                                    VkSemaphore    semaphore,
+                                                    VkFence        fence,
+                                                    std::uint32_t* image_index) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || swapchain != gVulkanState->mSwapchain ||
+        timeout != LLRenderVulkan::VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS || semaphore != gVulkanState->mImageAvailableSemaphore ||
+        fence != VK_NULL_HANDLE || !image_index)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mAcquireNextImageCalls;
+    *image_index = gVulkanState->mAcquiredImageIndex;
+    return gVulkanState->mAcquireNextImageResult;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_buffer,
+                                                  VkPipelineStageFlags source_stage,
+                                                  VkPipelineStageFlags destination_stage,
+                                                  VkDependencyFlags,
+                                                  std::uint32_t,
+                                                  const VkMemoryBarrier*,
+                                                  std::uint32_t,
+                                                  const VkBufferMemoryBarrier*,
+                                                  std::uint32_t               image_barrier_count,
+                                                  const VkImageMemoryBarrier* image_barriers) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && source_stage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+        destination_stage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT && image_barrier_count == 1 && image_barriers)
+    {
+        ++gVulkanState->mPipelineBarrierCalls;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
+{
+    const auto* fence_info = present_info ? static_cast<const VkSwapchainPresentFenceInfoKHR*>(present_info->pNext) : nullptr;
+    if (!gVulkanState || queue != gVulkanState->mQueue || !present_info || present_info->waitSemaphoreCount != 1 ||
+        !present_info->pWaitSemaphores || present_info->pWaitSemaphores[0] != gVulkanState->mPresentationReadySemaphore ||
+        present_info->swapchainCount != 1 || !present_info->pSwapchains || present_info->pSwapchains[0] != gVulkanState->mSwapchain ||
+        !present_info->pImageIndices || present_info->pImageIndices[0] != gVulkanState->mAcquiredImageIndex || !fence_info ||
+        fence_info->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR || fence_info->swapchainCount != 1 ||
+        !fence_info->pFences || fence_info->pFences[0] != gVulkanState->mPresentCompletionFence)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mQueuePresentCalls;
+    return gVulkanState->mQueuePresentResult;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device, const VkReleaseSwapchainImagesInfoKHR* release_info) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !release_info || release_info->swapchain != gVulkanState->mSwapchain ||
+        release_info->imageIndexCount != 1 || !release_info->pImageIndices ||
+        release_info->pImageIndices[0] != gVulkanState->mAcquiredImageIndex)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mReleaseSwapchainImagesCalls;
+    return gVulkanState->mReleaseSwapchainImagesResult;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
@@ -646,6 +792,13 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     LL_SDL_VULKAN_DEVICE_COMMAND(EndCommandBuffer);
     LL_SDL_VULKAN_DEVICE_COMMAND(ResetFences);
     LL_SDL_VULKAN_DEVICE_COMMAND(QueueSubmit);
+    if (std::strcmp(name, "vkAcquireNextImageKHR") == 0)
+        return eraseFunctionType(fakeAcquireNextImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdPipelineBarrier);
+    if (std::strcmp(name, "vkQueuePresentKHR") == 0)
+        return eraseFunctionType(fakeQueuePresent);
+    if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
+        return eraseFunctionType(fakeReleaseSwapchainImages);
 #undef LL_SDL_VULKAN_DEVICE_COMMAND
     return nullptr;
 }
@@ -690,6 +843,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeGetPhysicalDeviceSurfaceSupport);
     if (instance == fakeInstance() && std::strcmp(name, "vkEnumerateDeviceExtensionProperties") == 0)
         return eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceFeatures2") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFeatures2);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceFeatures") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceFeatures);
     if (instance == fakeInstance() && std::strcmp(name, "vkCreateDevice") == 0)
@@ -891,6 +1046,20 @@ bool operationSucceeded(const LLRenderVulkan::VulkanSwapchainFrameSlotParentOper
     return value && *value == disposition;
 }
 
+const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError* presentationError(
+    const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result) noexcept
+{
+    return std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result);
+}
+
+bool presentationSucceeded(const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result,
+                           LLRenderVulkan::VulkanSwapchainFrameSlotPresentationOutcome             outcome,
+                           std::uint32_t                                                           image_index) noexcept
+{
+    const auto* success = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>(&result);
+    return success && success->mOutcome == outcome && success->mImageIndex == image_index;
+}
+
 bool acquireCompleteFrameSlot(LLWindowSDLVulkan& owner) noexcept
 {
     using namespace LLRenderVulkan;
@@ -943,6 +1112,13 @@ void window_sdl_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().retryEmptySwapchainFrameSlotCompletion()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retryEmptySwapchainFrameSlotCompletion()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireToPresentSwapchainFrameSlot()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireToPresentSwapchainFrameSlot()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentation()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentationCompletion()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().cancelSwapchainFrameSlotPresentation()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotCancellationCompletion()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainFrameSlotGeneration()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainImagesGeneration()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainGeneration()));
@@ -1176,6 +1352,12 @@ void window_sdl_vulkan_object::test<7>()
            owner->instanceGeneration() && owner->instanceGeneration()->instance() == fakeInstance() &&
                owner->instanceGeneration()->apiVersion() == VK_API_VERSION_1_1 &&
                owner->instanceGeneration()->nativeWindowGeneration() == 31 && !owner->instanceGeneration()->validationEnabled());
+    const auto& enabled_extensions = owner->instanceGeneration()->enabledExtensions();
+    ensure("explicit diagnostic instance acquisition adds surface maintenance dependencies in exact order",
+           state.mSurfaceCapabilities2Enabled && state.mSurfaceMaintenanceEnabled && enabled_extensions.size() == 4 &&
+               enabled_extensions[0] == "VK_KHR_surface" && enabled_extensions[1] == "VK_KHR_xlib_surface" &&
+               enabled_extensions[2] == SURFACE_CAPABILITIES_2_EXTENSION && enabled_extensions[3] == SURFACE_MAINTENANCE_EXTENSION &&
+               owner->requirements()->requiredInstanceExtensions() == std::vector<std::string>{ "VK_KHR_surface", "VK_KHR_xlib_surface" });
 
     const auto surface_error = owner->acquireSurfaceGeneration();
     ensure("the fake SDL surface is acquired", !surface_error);
@@ -1688,7 +1870,7 @@ void window_sdl_vulkan_object::test<16>()
     const auto* missing_selection_retry  = operationError(missing_selection_result);
     ensure("completion retry does not query current pixels when no configuration has retained an extent",
            missing_selection_retry &&
-               missing_selection_retry->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               missing_selection_retry->mCode == VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive &&
                state.mDrawableSizeCalls == 6);
     ensure("an unowned frame-slot generation reports no explicit reset", !owner->resetSwapchainFrameSlotGeneration());
 
@@ -1766,6 +1948,90 @@ void window_sdl_vulkan_object::test<17>()
                instance->swapchainFrameImageAvailableSemaphore() == image_available);
     ensure("child-first reset succeeds after completion retry", owner->resetSwapchainFrameSlotGeneration());
     ensure("the recovered adapter owner completes full teardown", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<18>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 151, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("presentation adapter fixture acquires the complete frame-slot chain", owner && acquireCompleteFrameSlot(*owner));
+    const auto* instance = owner->instanceGeneration();
+    ensure("the adapter exposes all presentation synchronization handles",
+           instance && instance->swapchainFrameImageAvailableSemaphore() == state.mImageAvailableSemaphore &&
+               instance->swapchainFramePresentationReadySemaphore() == state.mPresentationReadySemaphore &&
+               instance->swapchainFrameSubmissionFence() == state.mSubmissionFence &&
+               instance->swapchainFramePresentCompletionFence() == state.mPresentCompletionFence);
+
+    const std::size_t drawable_queries_before_cycles = state.mDrawableSizeCalls;
+    state.mAcquiredImageIndex                        = 0;
+    ensure("the first acquire-to-present adapter cycle succeeds",
+           presentationSucceeded(owner->acquireToPresentSwapchainFrameSlot(), VulkanSwapchainFrameSlotPresentationOutcome::Presented, 0));
+    state.mAcquiredImageIndex = 1;
+    ensure("the second acquire-to-present adapter cycle proves reuse",
+           presentationSucceeded(owner->acquireToPresentSwapchainFrameSlot(), VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1));
+    ensure("each new cycle samples current geometry and reuses one frame slot",
+           state.mDrawableSizeCalls == drawable_queries_before_cycles + 2 && state.mAcquireNextImageCalls == 2 &&
+               state.mPipelineBarrierCalls == 2 && state.mQueuePresentCalls == 2 && state.mQueueSubmitCalls == 2 &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+
+    state.mAcquiredImageIndex   = 2;
+    state.mQueuePresentResult   = VK_ERROR_OUT_OF_HOST_MEMORY;
+    const auto  present_failure = owner->acquireToPresentSwapchainFrameSlot();
+    const auto* present_error   = presentationError(present_failure);
+    ensure("a retryable present failure retains exact image ownership",
+           present_error && present_error->mOperationError &&
+               present_error->mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::QueuePresent &&
+               present_error->mOperationError->mResult == VK_ERROR_OUT_OF_HOST_MEMORY &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+               instance->swapchainFrameAcquiredImageIndex() == 2 && !owner->resetSwapchainFrameSlotGeneration());
+    const std::size_t drawable_queries_before_retry = state.mDrawableSizeCalls;
+    state.mDrawableWidth                            = 0;
+    state.mDrawableHeight                           = 0;
+    state.mQueuePresentResult                       = VK_SUCCESS;
+    ensure("presentation retry uses the retained identity and extent",
+           presentationSucceeded(owner->retrySwapchainFrameSlotPresentation(), VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2) &&
+               state.mDrawableSizeCalls == drawable_queries_before_retry &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable);
+
+    state.mDrawableWidth          = 1280;
+    state.mDrawableHeight         = 720;
+    state.mAcquiredImageIndex     = 1;
+    state.mEndCommandBufferResult = VK_ERROR_UNKNOWN;
+    state.mWaitResultIndex        = 0;
+    state.mWaitResultCount        = 2;
+    state.mWaitResults[0]         = VK_SUCCESS;
+    state.mWaitResults[1]         = VK_TIMEOUT;
+    const auto  acquired_failure  = owner->acquireToPresentSwapchainFrameSlot();
+    const auto* acquired_error    = presentationError(acquired_failure);
+    ensure("a post-acquire recording failure retains the acquired image",
+           acquired_error && acquired_error->mOperationError &&
+               acquired_error->mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               instance->swapchainFrameAcquiredImageIndex() == 1);
+    const std::size_t drawable_queries_before_cancel = state.mDrawableSizeCalls;
+    state.mDrawableWidth                             = 0;
+    state.mDrawableHeight                            = 0;
+    state.mEndCommandBufferResult                    = VK_SUCCESS;
+    const auto  cancel_failure                       = owner->cancelSwapchainFrameSlotPresentation();
+    const auto* cancel_error                         = operationError(cancel_failure);
+    ensure("a cancellation wait timeout retains the exact pending obligation",
+           cancel_error && cancel_error->mOperationError &&
+               cancel_error->mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+               cancel_error->mOperationError->mResult == VK_TIMEOUT &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::CancellationPending &&
+               state.mDrawableSizeCalls == drawable_queries_before_cancel && !owner->reset());
+    ensure("cancellation completion retries without querying changed geometry",
+           operationSucceeded(owner->retrySwapchainFrameSlotCancellationCompletion(), VulkanSwapchainFrameSlotDisposition::Reusable) &&
+               state.mDrawableSizeCalls == drawable_queries_before_cancel && state.mReleaseSwapchainImagesCalls == 1 &&
+               !instance->swapchainFrameAcquiredImageIndex());
+    ensure("the recovered presentation owner tears down child-first", owner->resetSwapchainFrameSlotGeneration() && owner->reset());
 }
 
 } // namespace tut

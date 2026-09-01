@@ -119,6 +119,11 @@ public:
     LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult     acquireSwapchainFrameSlotGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult retryEmptySwapchainFrameSlotCompletion() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult acquireToPresentSwapchainFrameSlot() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentationCompletion() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult    cancelSwapchainFrameSlotPresentation() noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult    retrySwapchainFrameSlotCancellationCompletion() noexcept;
     const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
     bool                                                      resetSwapchainFrameSlotGeneration() noexcept;
     bool                                                      resetSwapchainImagesGeneration() noexcept;
@@ -126,8 +131,8 @@ public:
     bool                                                      resetSurfaceGeneration() noexcept;
 
     // Full reset returns false without releasing ownership while an explicit
-    // frame-slot operation remains Pending. Destroying or move-assigning over
-    // such an owner violates the caller contract.
+    // frame-slot operation retains acquired or pending work. Destroying or
+    // move-assigning over such an owner violates the caller contract.
     bool reset() noexcept;
 
 private:
@@ -147,7 +152,20 @@ private:
                       LLWindowVulkanRequirements&&       requirements) noexcept;
     LLRenderVulkan::VulkanSurfaceAcquireResult acquireSurfaceGeneration(
         LLRenderVulkan::VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
-    LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult operateEmptySwapchainFrameSlot(bool retry_completion) noexcept;
+    enum class FrameSlotOperation : U8
+    {
+        ExecuteEmptySubmission,
+        RetryEmptySubmissionCompletion,
+        ExecuteAcquireToPresent,
+        RetryPresentation,
+        RetryPresentationCompletion,
+        CancelAcquireToPresent,
+        RetryCancellationCompletion
+    };
+    using FrameSlotResult = std::variant<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError,
+                                         LLRenderVulkan::VulkanSwapchainFrameSlotDisposition,
+                                         LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>;
+    FrameSlotResult operateSwapchainFrameSlot(FrameSlotOperation operation) noexcept;
 
     LLWindowSDLVulkanOperations                               mOperations;
     SDL_Window*                                               mWindow = nullptr;

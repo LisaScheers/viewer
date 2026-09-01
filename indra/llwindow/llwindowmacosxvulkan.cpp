@@ -19,6 +19,7 @@
 
 #include "llwindowmacosxvulkan-objc.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -33,6 +34,16 @@ namespace
 
 constexpr char DEFAULT_VULKAN_LOADER[] = "libvulkan.1.dylib";
 constexpr std::array<const char*, 2> REQUIRED_EXTENSIONS{ VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_METAL_SURFACE_EXTENSION_NAME };
+#if defined(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)
+constexpr std::string_view SURFACE_CAPABILITIES_2_EXTENSION = VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME;
+#else
+constexpr std::string_view SURFACE_CAPABILITIES_2_EXTENSION = "VK_KHR_get_surface_capabilities2";
+#endif
+#if defined(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
+constexpr std::string_view SURFACE_MAINTENANCE_EXTENSION = VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
+#else
+constexpr std::string_view SURFACE_MAINTENANCE_EXTENSION = "VK_KHR_surface_maintenance1";
+#endif
 
 bool validOperations(const LLWindowMacOSXVulkanOperations& operations) noexcept
 {
@@ -382,9 +393,30 @@ std::optional<LLRenderVulkan::VulkanInstanceAcquireError> LLWindowMacOSXVulkan::
         return error;
     }
 
+    std::vector<std::string> required_extensions;
+    try
+    {
+        required_extensions = mRequirements->requiredInstanceExtensions();
+        if (std::find(required_extensions.begin(), required_extensions.end(), SURFACE_CAPABILITIES_2_EXTENSION) ==
+            required_extensions.end())
+        {
+            required_extensions.emplace_back(SURFACE_CAPABILITIES_2_EXTENSION);
+        }
+        if (std::find(required_extensions.begin(), required_extensions.end(), SURFACE_MAINTENANCE_EXTENSION) == required_extensions.end())
+        {
+            required_extensions.emplace_back(SURFACE_MAINTENANCE_EXTENSION);
+        }
+    }
+    catch (const std::bad_alloc&)
+    {
+        LLRenderVulkan::VulkanInstanceAcquireError error;
+        error.mCode = LLRenderVulkan::VulkanInstanceAcquireCode::AllocationFailure;
+        return error;
+    }
+
     LLRenderVulkan::VulkanInstanceRequest request;
     request.mGetInstanceProcAddr      = reinterpret_cast<PFN_vkGetInstanceProcAddr>(mRequirements->resolver());
-    request.mRequiredWindowExtensions = std::span<const std::string>(mRequirements->requiredInstanceExtensions());
+    request.mRequiredWindowExtensions = std::span<const std::string>(required_extensions);
     request.mNativeWindowGeneration   = mRequirements->nativeWindowGeneration();
     request.mGenerationCheck          = { this, isInstanceWindowGenerationCurrent };
     request.mValidationMode           = validation_mode;
@@ -570,32 +602,95 @@ LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult LLWindowMacOSXVulkan::acqu
 
 LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulkan::roundTripEmptySwapchainFrameSlot() noexcept
 {
-    return operateEmptySwapchainFrameSlot(false);
+    const FrameSlotResult result = operateSwapchainFrameSlot(FrameSlotOperation::ExecuteEmptySubmission);
+    if (const auto* error = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(result);
 }
 
 LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulkan::retryEmptySwapchainFrameSlotCompletion() noexcept
 {
-    return operateEmptySwapchainFrameSlot(true);
+    const FrameSlotResult result = operateSwapchainFrameSlot(FrameSlotOperation::RetryEmptySubmissionCompletion);
+    if (const auto* error = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(result);
 }
 
-LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulkan::operateEmptySwapchainFrameSlot(
-    bool retry_completion) noexcept
+LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult LLWindowMacOSXVulkan::acquireToPresentSwapchainFrameSlot() noexcept
+{
+    const FrameSlotResult result = operateSwapchainFrameSlot(FrameSlotOperation::ExecuteAcquireToPresent);
+    if (const auto* error = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>(result);
+}
+
+LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult LLWindowMacOSXVulkan::retrySwapchainFrameSlotPresentation() noexcept
+{
+    const FrameSlotResult result = operateSwapchainFrameSlot(FrameSlotOperation::RetryPresentation);
+    if (const auto* error = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>(result);
+}
+
+LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult LLWindowMacOSXVulkan::
+    retrySwapchainFrameSlotPresentationCompletion() noexcept
+{
+    const FrameSlotResult result = operateSwapchainFrameSlot(FrameSlotOperation::RetryPresentationCompletion);
+    if (const auto* error = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>(result);
+}
+
+LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulkan::cancelSwapchainFrameSlotPresentation() noexcept
+{
+    const FrameSlotResult result = operateSwapchainFrameSlot(FrameSlotOperation::CancelAcquireToPresent);
+    if (const auto* error = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(result);
+}
+
+LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulkan::retrySwapchainFrameSlotCancellationCompletion() noexcept
+{
+    const FrameSlotResult result = operateSwapchainFrameSlot(FrameSlotOperation::RetryCancellationCompletion);
+    if (const auto* error = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(result);
+}
+
+LLWindowMacOSXVulkan::FrameSlotResult LLWindowMacOSXVulkan::operateSwapchainFrameSlot(FrameSlotOperation operation) noexcept
 {
     using namespace LLRenderVulkan;
+
+    const bool starts_new_work =
+        operation == FrameSlotOperation::ExecuteEmptySubmission || operation == FrameSlotOperation::ExecuteAcquireToPresent;
 
     if (!mInstanceGeneration)
     {
         return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive, std::nullopt };
     }
     if (!mRequirements || !mLoader || !validIdentity(mNativeWindow) || !mOperations.mIsMainThread ||
-        !mOperations.mIsMainThread(mOperations.mUserdata) || (!retry_completion && !mOperations.mRefreshNativeWindow))
+        !mOperations.mIsMainThread(mOperations.mUserdata) || (starts_new_work && !mOperations.mRefreshNativeWindow))
     {
         return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration,
                                                              std::nullopt };
     }
 
     VkExtent2D drawable_extent = mInstanceGeneration->swapchainDrawableExtent();
-    if (!retry_completion)
+    if (starts_new_work)
     {
         LLWindowMacOSXVulkanNativeWindow refreshed = mNativeWindow;
         if (!mOperations.mRefreshNativeWindow(mOperations.mUserdata, refreshed) || !sameIdentity(mNativeWindow, refreshed))
@@ -621,8 +716,54 @@ LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult LLWindowMacOSXVulk
     request.mDrawableExtent         = drawable_extent;
     request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
     request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
-    return retry_completion ? mInstanceGeneration->retryEmptySwapchainFrameSlotCompletion(request)
-                            : mInstanceGeneration->roundTripEmptySwapchainFrameSlot(request);
+    if (operation == FrameSlotOperation::ExecuteAcquireToPresent || operation == FrameSlotOperation::RetryPresentation ||
+        operation == FrameSlotOperation::RetryPresentationCompletion)
+    {
+        VulkanSwapchainFrameSlotParentPresentationResult result;
+        switch (operation)
+        {
+            case FrameSlotOperation::ExecuteAcquireToPresent:
+                result = mInstanceGeneration->acquireToPresentSwapchainFrameSlot(request);
+                break;
+            case FrameSlotOperation::RetryPresentation:
+                result = mInstanceGeneration->retrySwapchainFrameSlotPresentation(request);
+                break;
+            case FrameSlotOperation::RetryPresentationCompletion:
+                result = mInstanceGeneration->retrySwapchainFrameSlotPresentationCompletion(request);
+                break;
+            default:
+                std::terminate();
+        }
+        if (const auto* error = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&result))
+        {
+            return *error;
+        }
+        return std::get<VulkanSwapchainFrameSlotPresentationSuccess>(result);
+    }
+
+    VulkanSwapchainFrameSlotParentOperationResult result;
+    switch (operation)
+    {
+        case FrameSlotOperation::ExecuteEmptySubmission:
+            result = mInstanceGeneration->roundTripEmptySwapchainFrameSlot(request);
+            break;
+        case FrameSlotOperation::RetryEmptySubmissionCompletion:
+            result = mInstanceGeneration->retryEmptySwapchainFrameSlotCompletion(request);
+            break;
+        case FrameSlotOperation::CancelAcquireToPresent:
+            result = mInstanceGeneration->cancelSwapchainFrameSlotPresentation(request);
+            break;
+        case FrameSlotOperation::RetryCancellationCompletion:
+            result = mInstanceGeneration->retrySwapchainFrameSlotCancellationCompletion(request);
+            break;
+        default:
+            std::terminate();
+    }
+    if (const auto* error = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<VulkanSwapchainFrameSlotDisposition>(result);
 }
 
 bool LLWindowMacOSXVulkan::resetSwapchainFrameSlotGeneration() noexcept

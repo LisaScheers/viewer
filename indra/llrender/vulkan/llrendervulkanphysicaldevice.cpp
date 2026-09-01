@@ -35,10 +35,12 @@ struct VulkanPhysicalDeviceGenerationFactory
                                                  const VkPhysicalDeviceProperties& properties,
                                                  std::uint32_t                     queue_family_index,
                                                  const VkQueueFamilyProperties&    queue_family_properties,
+                                                 bool                              swapchain_maintenance_1_supported,
                                                  bool                              portability_subset_advertised) noexcept
     {
         return VulkanPhysicalDeviceGeneration(get_instance_proc_addr, instance, surface, physical_device, physical_device_index, properties,
-                                              queue_family_index, queue_family_properties, portability_subset_advertised);
+                                              queue_family_index, queue_family_properties, swapchain_maintenance_1_supported,
+                                              portability_subset_advertised);
     }
 };
 
@@ -50,6 +52,7 @@ VulkanPhysicalDeviceGeneration::VulkanPhysicalDeviceGeneration(PFN_vkGetInstance
                                                                const VkPhysicalDeviceProperties& properties,
                                                                std::uint32_t                     queue_family_index,
                                                                const VkQueueFamilyProperties&    queue_family_properties,
+                                                               bool                              swapchain_maintenance_1_supported,
                                                                bool                              portability_subset_advertised) noexcept :
     mGetInstanceProcAddr(get_instance_proc_addr),
     mInstance(instance),
@@ -59,10 +62,11 @@ VulkanPhysicalDeviceGeneration::VulkanPhysicalDeviceGeneration(PFN_vkGetInstance
     mProperties(properties),
     mQueueFamilyIndex(queue_family_index),
     mQueueFamilyProperties(queue_family_properties),
+    mSwapchainMaintenance1Supported(swapchain_maintenance_1_supported),
     mPortabilitySubsetAdvertised(portability_subset_advertised),
-    mRequiredDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    mRequiredDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
                                portability_subset_advertised ? std::string_view("VK_KHR_portability_subset") : std::string_view{} },
-    mRequiredDeviceExtensionCount(portability_subset_advertised ? 2 : 1)
+    mRequiredDeviceExtensionCount(portability_subset_advertised ? 3 : 2)
 {
 }
 
@@ -75,6 +79,7 @@ VulkanPhysicalDeviceGeneration::VulkanPhysicalDeviceGeneration(VulkanPhysicalDev
     mProperties(std::exchange(other.mProperties, {})),
     mQueueFamilyIndex(std::exchange(other.mQueueFamilyIndex, VK_QUEUE_FAMILY_IGNORED)),
     mQueueFamilyProperties(std::exchange(other.mQueueFamilyProperties, {})),
+    mSwapchainMaintenance1Supported(std::exchange(other.mSwapchainMaintenance1Supported, false)),
     mPortabilitySubsetAdvertised(std::exchange(other.mPortabilitySubsetAdvertised, false)),
     mRequiredDeviceExtensions(std::exchange(other.mRequiredDeviceExtensions, {})),
     mRequiredDeviceExtensionCount(std::exchange(other.mRequiredDeviceExtensionCount, 0))
@@ -94,6 +99,7 @@ namespace
         PFN_vkGetPhysicalDeviceQueueFamilyProperties mGetPhysicalDeviceQueueFamilyProperties = nullptr;
         PFN_vkGetPhysicalDeviceSurfaceSupportKHR     mGetPhysicalDeviceSurfaceSupport        = nullptr;
         PFN_vkEnumerateDeviceExtensionProperties     mEnumerateDeviceExtensionProperties     = nullptr;
+        PFN_vkGetPhysicalDeviceFeatures2             mGetPhysicalDeviceFeatures2             = nullptr;
     };
 
     VulkanPhysicalDeviceResolutionError failure(VulkanPhysicalDeviceResolutionCode         code,
@@ -166,6 +172,14 @@ namespace
                            VulkanPhysicalDeviceCommand::EnumerateDeviceExtensionProperties);
         }
 
+        dispatch.mGetPhysicalDeviceFeatures2 =
+            resolve<PFN_vkGetPhysicalDeviceFeatures2>(request.mGetInstanceProcAddr, request.mInstance, "vkGetPhysicalDeviceFeatures2");
+        if (!dispatch.mGetPhysicalDeviceFeatures2)
+        {
+            return failure(VulkanPhysicalDeviceResolutionCode::MissingRequiredCommand,
+                           VulkanPhysicalDeviceCommand::GetPhysicalDeviceFeatures2);
+        }
+
         return std::nullopt;
     }
 
@@ -184,6 +198,7 @@ namespace
     enum class ExtensionResolution : std::uint8_t
     {
         MissingSwapchain,
+        MissingSwapchainMaintenance1,
         Available,
         Failed
     };
@@ -259,8 +274,9 @@ namespace
                 return ExtensionResolution::Failed;
             }
 
-            bool swapchain_advertised     = false;
-            portability_subset_advertised = false;
+            bool swapchain_advertised             = false;
+            bool swapchain_maintenance_advertised = false;
+            portability_subset_advertised         = false;
             for (std::uint32_t index = 0; index < count; ++index)
             {
                 const std::optional<std::string_view> name = boundedName(properties[index].extensionName);
@@ -274,9 +290,14 @@ namespace
                     return ExtensionResolution::Failed;
                 }
                 swapchain_advertised |= *name == VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+                swapchain_maintenance_advertised |= *name == VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
                 portability_subset_advertised |= *name == PORTABILITY_SUBSET_EXTENSION;
             }
-            return swapchain_advertised ? ExtensionResolution::Available : ExtensionResolution::MissingSwapchain;
+            if (!swapchain_advertised)
+            {
+                return ExtensionResolution::MissingSwapchain;
+            }
+            return swapchain_maintenance_advertised ? ExtensionResolution::Available : ExtensionResolution::MissingSwapchainMaintenance1;
         }
 
         error                     = candidateFailure(VulkanPhysicalDeviceResolutionCode::DeviceExtensionEnumerationRetryLimitExceeded,
@@ -487,6 +508,24 @@ VulkanPhysicalDeviceResolutionResult resolveVulkanPhysicalDeviceGeneration(const
                 last_rejection = VulkanPhysicalDeviceRejection::MissingSwapchainExtension;
                 continue;
             }
+            if (extension_resolution == ExtensionResolution::MissingSwapchainMaintenance1)
+            {
+                last_rejection = VulkanPhysicalDeviceRejection::MissingSwapchainMaintenance1Extension;
+                continue;
+            }
+
+            VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR swapchain_maintenance_features{};
+            swapchain_maintenance_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR;
+
+            VkPhysicalDeviceFeatures2 features{};
+            features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features.pNext = &swapchain_maintenance_features;
+            dispatch.mGetPhysicalDeviceFeatures2(physical_device, &features);
+            if (swapchain_maintenance_features.swapchainMaintenance1 != VK_TRUE)
+            {
+                last_rejection = VulkanPhysicalDeviceRejection::SwapchainMaintenance1FeatureUnsupported;
+                continue;
+            }
 
             std::uint32_t           queue_family_index = VK_QUEUE_FAMILY_IGNORED;
             VkQueueFamilyProperties queue_family_properties{};
@@ -504,7 +543,7 @@ VulkanPhysicalDeviceResolutionResult resolveVulkanPhysicalDeviceGeneration(const
 
             return VulkanPhysicalDeviceGenerationFactory::create(request.mGetInstanceProcAddr, request.mInstance, request.mSurface,
                                                                  physical_device, index, properties, queue_family_index,
-                                                                 queue_family_properties, portability_subset_advertised);
+                                                                 queue_family_properties, true, portability_subset_advertised);
         }
 
         auto error =

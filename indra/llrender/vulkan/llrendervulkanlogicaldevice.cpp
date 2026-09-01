@@ -53,16 +53,17 @@ namespace
     bool hasExactExtensionPolicy(const VulkanPhysicalDeviceGeneration& generation) noexcept
     {
         const std::span<const std::string_view> extensions = generation.requiredDeviceExtensions();
-        if (extensions.empty() || extensions.size() > 2 || extensions[0] != VK_KHR_SWAPCHAIN_EXTENSION_NAME)
+        if (extensions.size() < 2 || extensions.size() > 3 || extensions[0] != VK_KHR_SWAPCHAIN_EXTENSION_NAME ||
+            extensions[1] != VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)
         {
             return false;
         }
 
         if (generation.portabilitySubsetRequired())
         {
-            return extensions.size() == 2 && extensions[1] == PORTABILITY_SUBSET_EXTENSION;
+            return extensions.size() == 3 && extensions[2] == PORTABILITY_SUBSET_EXTENSION;
         }
-        return extensions.size() == 1;
+        return extensions.size() == 2;
     }
 
     bool valid(const VulkanPhysicalDeviceGeneration& generation) noexcept
@@ -71,7 +72,8 @@ namespace
         return generation.getInstanceProcAddr() != nullptr && generation.instance() != VK_NULL_HANDLE &&
                generation.surface() != VK_NULL_HANDLE && generation.physicalDevice() != VK_NULL_HANDLE &&
                generation.queueFamilyIndex() != VK_QUEUE_FAMILY_IGNORED && queue_family.queueCount > 0 &&
-               (queue_family.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 && hasExactExtensionPolicy(generation);
+               (queue_family.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 && generation.swapchainMaintenance1Supported() &&
+               hasExactExtensionPolicy(generation);
     }
 
     std::optional<VulkanLogicalDeviceResolutionError> resolveDispatch(const VulkanPhysicalDeviceGeneration& generation,
@@ -133,13 +135,15 @@ VulkanLogicalDeviceGeneration::VulkanLogicalDeviceGeneration(const VulkanPhysica
     mDevice(device),
     mQueue(queue),
     mQueueFamilyIndex(physical_device_generation.queueFamilyIndex()),
-    mEnabledDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, physical_device_generation.portabilitySubsetRequired()
-                                                                   ? std::string_view(PORTABILITY_SUBSET_EXTENSION)
-                                                                   : std::string_view{} },
-    mEnabledDeviceExtensionCount(physical_device_generation.portabilitySubsetRequired() ? 2 : 1),
+    mEnabledDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+                              physical_device_generation.portabilitySubsetRequired() ? std::string_view(PORTABILITY_SUBSET_EXTENSION)
+                                                                                     : std::string_view{} },
+    mEnabledDeviceExtensionCount(physical_device_generation.portabilitySubsetRequired() ? 3 : 2),
     mDestroyDevice(destroy_device)
 {
-    mEnabledFeatures.independentBlend = VK_TRUE;
+    mEnabledFeatures.independentBlend                           = VK_TRUE;
+    mEnabledSwapchainMaintenance1Features.sType                 = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR;
+    mEnabledSwapchainMaintenance1Features.swapchainMaintenance1 = VK_TRUE;
 }
 
 VulkanLogicalDeviceGeneration::~VulkanLogicalDeviceGeneration() noexcept
@@ -158,6 +162,7 @@ VulkanLogicalDeviceGeneration::VulkanLogicalDeviceGeneration(VulkanLogicalDevice
     mQueueFamilyIndex(std::exchange(other.mQueueFamilyIndex, VK_QUEUE_FAMILY_IGNORED)),
     mQueueIndex(std::exchange(other.mQueueIndex, 0)),
     mEnabledFeatures(std::exchange(other.mEnabledFeatures, {})),
+    mEnabledSwapchainMaintenance1Features(std::exchange(other.mEnabledSwapchainMaintenance1Features, {})),
     mEnabledDeviceExtensions(std::exchange(other.mEnabledDeviceExtensions, {})),
     mEnabledDeviceExtensionCount(std::exchange(other.mEnabledDeviceExtensionCount, 0)),
     mDestroyDevice(std::exchange(other.mDestroyDevice, nullptr))
@@ -170,7 +175,10 @@ bool VulkanLogicalDeviceGeneration::createdFor(const VulkanPhysicalDeviceGenerat
         mInstance != physical_device_generation.instance() || mSurface != physical_device_generation.surface() ||
         mPhysicalDevice != physical_device_generation.physicalDevice() ||
         mPhysicalDeviceIndex != physical_device_generation.physicalDeviceIndex() ||
-        mQueueFamilyIndex != physical_device_generation.queueFamilyIndex())
+        mQueueFamilyIndex != physical_device_generation.queueFamilyIndex() ||
+        !physical_device_generation.swapchainMaintenance1Supported() || !swapchainMaintenance1Enabled() ||
+        mEnabledSwapchainMaintenance1Features.sType != VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR ||
+        mEnabledSwapchainMaintenance1Features.pNext != nullptr)
     {
         return false;
     }
@@ -223,11 +231,17 @@ VulkanLogicalDeviceResolutionResult resolveVulkanLogicalDeviceGeneration(
     VkPhysicalDeviceFeatures enabled_features{};
     enabled_features.independentBlend = VK_TRUE;
 
-    const std::uint32_t              extension_count = physical_device_generation.portabilitySubsetRequired() ? 2 : 1;
-    const std::array<const char*, 2> extension_names{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, PORTABILITY_SUBSET_EXTENSION };
+    const std::uint32_t              extension_count = physical_device_generation.portabilitySubsetRequired() ? 3 : 2;
+    const std::array<const char*, 3> extension_names{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+                                                      PORTABILITY_SUBSET_EXTENSION };
+
+    VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR swapchain_maintenance_features{};
+    swapchain_maintenance_features.sType                 = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR;
+    swapchain_maintenance_features.swapchainMaintenance1 = VK_TRUE;
 
     VkDeviceCreateInfo create_info{};
     create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    create_info.pNext                   = &swapchain_maintenance_features;
     create_info.queueCreateInfoCount    = 1;
     create_info.pQueueCreateInfos       = &queue_info;
     create_info.enabledExtensionCount   = extension_count;
