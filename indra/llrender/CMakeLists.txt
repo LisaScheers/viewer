@@ -359,6 +359,30 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       INTEGRATION_TEST_llrendervulkanswapchainimages
       PRIVATE VK_NO_PROTOTYPES)
 
+  add_library(llrendervulkanswapchainreadback STATIC
+      vulkan/llrendervulkanswapchainreadback.cpp
+      vulkan/llrendervulkanswapchainreadback.h)
+  target_include_directories(llrendervulkanswapchainreadback
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanswapchainreadback SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanswapchainreadback
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanswapchainreadback
+      PUBLIC llrendervulkanswapchainimages)
+  set_target_properties(llrendervulkanswapchainreadback PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanswapchainreadback_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanswapchainreadback
+      ""
+      "llrendervulkanswapchainreadback;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanswapchainreadback
+      PRIVATE VK_NO_PROTOTYPES)
+
   add_library(llrendervulkanswapchainpresentationtarget STATIC
       vulkan/llrendervulkanswapchainpresentationtarget.cpp
       vulkan/llrendervulkanswapchainpresentationtarget.h)
@@ -453,6 +477,7 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
           llrendervulkanphysicaldevice
           llrendervulkanswapchain
           llrendervulkanswapchainimages
+          llrendervulkanswapchainreadback
           llrendervulkanswapchainpresentationtarget
           llrendervulkanswapchainpresentationpipeline
           llrendervulkanswapchainframeslot

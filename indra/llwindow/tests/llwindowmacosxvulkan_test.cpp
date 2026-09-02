@@ -93,8 +93,7 @@ struct FakeState
         std::memcpy(mPhysicalProperties.deviceName, "macOS adapter fake", sizeof("macOS adapter fake"));
         mSurfaceCapabilities.minImageCount       = 2;
         mSurfaceCapabilities.maxImageCount       = 3;
-        mSurfaceCapabilities.currentExtent       = { std::numeric_limits<std::uint32_t>::max(),
-                                                      std::numeric_limits<std::uint32_t>::max() };
+        mSurfaceCapabilities.currentExtent       = { std::numeric_limits<std::uint32_t>::max(), std::numeric_limits<std::uint32_t>::max() };
         mSurfaceCapabilities.minImageExtent      = { 64, 64 };
         mSurfaceCapabilities.maxImageExtent      = { 4096, 2160 };
         mSurfaceCapabilities.maxImageArrayLayers = 1;
@@ -102,9 +101,14 @@ struct FakeState
         mSurfaceCapabilities.currentTransform    = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         mSurfaceCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         mSurfaceCapabilities.supportedUsageFlags =
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         mFormatProperties.optimalTilingFeatures =
-            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+        mMemoryProperties.memoryHeapCount              = 1;
+        mMemoryProperties.memoryHeaps[0].size          = 64 * 1024 * 1024;
+        mMemoryProperties.memoryTypeCount              = 1;
+        mMemoryProperties.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        mMemoryProperties.memoryTypes[0].heapIndex     = 0;
     }
 
     std::array<Event, 96> mEvents{};
@@ -216,12 +220,23 @@ struct FakeState
     std::size_t                mCreatePipelineLayoutCount  = 0;
     std::size_t                mDestroyPipelineLayoutCount = 0;
     std::size_t                mCreatePipelineCount        = 0;
-    std::size_t                mDestroyPipelineCount       = 0;
-    VkPipelineLayout           mLastPipelineLayout         = VK_NULL_HANDLE;
-    VkPipeline                 mLastPipeline               = VK_NULL_HANDLE;
-    std::size_t                mCreateCommandPoolCount     = 0;
-    std::size_t                mDestroyCommandPoolCount    = 0;
-    std::size_t                mCreateSemaphoreCount       = 0;
+    std::size_t                      mDestroyPipelineCount       = 0;
+    VkPipelineLayout                 mLastPipelineLayout         = VK_NULL_HANDLE;
+    VkPipeline                       mLastPipeline               = VK_NULL_HANDLE;
+    VkPhysicalDeviceMemoryProperties mMemoryProperties{};
+    VkBuffer                         mReadbackBuffer          = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x81000));
+    VkDeviceMemory                   mReadbackMemory          = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x82000));
+    std::uint8_t                     mReadbackMappedByte      = 0;
+    VkDeviceSize                     mReadbackBufferSize      = 0;
+    std::size_t                      mCreateBufferCount       = 0;
+    std::size_t                      mAllocateMemoryCount     = 0;
+    std::size_t                      mMapMemoryCount          = 0;
+    std::size_t                      mUnmapMemoryCount        = 0;
+    std::size_t                      mDestroyBufferCount      = 0;
+    std::size_t                      mFreeMemoryCount         = 0;
+    std::size_t                      mCreateCommandPoolCount  = 0;
+    std::size_t                      mDestroyCommandPoolCount = 0;
+    std::size_t                      mCreateSemaphoreCount    = 0;
     std::size_t                mDestroySemaphoreCount      = 0;
     std::size_t                mCreateFenceCount           = 0;
     std::size_t                mDestroyFenceCount          = 0;
@@ -1191,6 +1206,95 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device,
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceMemoryProperties(VkPhysicalDevice                  physical_device,
+                                                                 VkPhysicalDeviceMemoryProperties* properties) noexcept
+{
+    if (gState && physical_device == gState->mPhysicalDevice && properties)
+    {
+        *properties = gState->mMemoryProperties;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice,
+                                                const VkBufferCreateInfo* create_info,
+                                                const VkAllocationCallbacks*,
+                                                VkBuffer* buffer) noexcept
+{
+    if (!gState || !create_info || !buffer)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mCreateBufferCount;
+    gState->mReadbackBufferSize = create_info->size;
+    *buffer                     = gState->mReadbackBuffer;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice, VkBuffer buffer, const VkAllocationCallbacks*) noexcept
+{
+    if (gState && buffer == gState->mReadbackBuffer)
+    {
+        ++gState->mDestroyBufferCount;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice, VkBuffer buffer, VkMemoryRequirements* requirements) noexcept
+{
+    if (gState && buffer == gState->mReadbackBuffer && requirements)
+    {
+        *requirements = { gState->mReadbackBufferSize, 256, 1 };
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice,
+                                                  const VkMemoryAllocateInfo* allocate_info,
+                                                  const VkAllocationCallbacks*,
+                                                  VkDeviceMemory* memory) noexcept
+{
+    if (!gState || !allocate_info || !memory || allocate_info->allocationSize < gState->mReadbackBufferSize ||
+        allocate_info->memoryTypeIndex != 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mAllocateMemoryCount;
+    *memory = gState->mReadbackMemory;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks*) noexcept
+{
+    if (gState && memory == gState->mReadbackMemory)
+    {
+        ++gState->mFreeMemoryCount;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset) noexcept
+{
+    return gState && buffer == gState->mReadbackBuffer && memory == gState->mReadbackMemory && offset == 0 ? VK_SUCCESS
+                                                                                                           : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+    fakeMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** data) noexcept
+{
+    if (!gState || memory != gState->mReadbackMemory || offset != 0 || size != VK_WHOLE_SIZE || flags != 0 || !data)
+    {
+        return VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    ++gState->mMapMemoryCount;
+    *data = &gState->mReadbackMappedByte;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice, VkDeviceMemory memory) noexcept
+{
+    if (gState && memory == gState->mReadbackMemory)
+    {
+        ++gState->mUnmapMemoryCount;
+    }
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
 {
     if (!gState || device != gState->mDevice || !name)
@@ -1245,6 +1349,14 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
         return eraseFunctionType(fakeReleaseSwapchainImages);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CreateBuffer);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(DestroyBuffer);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(GetBufferMemoryRequirements);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(AllocateMemory);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(FreeMemory);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(BindBufferMemory);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(MapMemory);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(UnmapMemory);
 #undef LL_MACOS_VULKAN_DEVICE_COMMAND
     return nullptr;
 }
@@ -1297,6 +1409,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeGetPhysicalDeviceProperties);
     if (std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceFormatProperties);
+    if (std::strcmp(name, "vkGetPhysicalDeviceMemoryProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceMemoryProperties);
     if (std::strcmp(name, "vkGetPhysicalDeviceQueueFamilyProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceQueueFamilyProperties);
     if (std::strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0)
@@ -1614,10 +1728,10 @@ bool acquireCompleteSwapchainChain(LLWindowMacOSXVulkan& owner) noexcept
 {
     using namespace LLRenderVulkan;
     return !owner.acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
-           !owner.acquireSurfaceGeneration() && !owner.acquirePresentationDeviceGeneration() &&
-           !owner.acquireLogicalDeviceGeneration() && !owner.acquireSwapchainConfigurationGeneration() &&
-           !owner.acquireSwapchainGeneration() && !owner.acquireSwapchainImagesGeneration() &&
-           !owner.acquireSwapchainPresentationTargetGeneration() && !owner.acquireSwapchainPresentationPipelineGeneration() &&
+           !owner.acquireSurfaceGeneration() && !owner.acquirePresentationDeviceGeneration() && !owner.acquireLogicalDeviceGeneration() &&
+           !owner.acquireSwapchainConfigurationGeneration() && !owner.acquireSwapchainGeneration() &&
+           !owner.acquireSwapchainImagesGeneration() && !owner.acquireSwapchainPresentationTargetGeneration() &&
+           !owner.acquireSwapchainPresentationPipelineGeneration() && !owner.acquireSwapchainReadbackGeneration() &&
            !owner.acquireSwapchainFrameSlotGeneration();
 }
 
@@ -1668,6 +1782,11 @@ void window_macosx_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainPresentationTargetGeneration()),
                                  LLRenderVulkan::VulkanSwapchainPresentationTargetAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainPresentationTargetGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainReadbackGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainReadbackAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainReadbackGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainReadbackGeneration()), bool>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainReadbackGeneration()));
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()));
@@ -2851,10 +2970,11 @@ void window_macosx_vulkan_object::test<18>()
 
     ensure("clear-present adapter fixture acquired a complete authenticated swapchain chain", acquireCompleteSwapchainChain(*owner));
     ensure("the clear-present fixture creates a transfer-destination-capable swapchain",
-           state.mLastSwapchainUsage == (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+           state.mLastSwapchainUsage ==
+               (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     const std::size_t refreshes_after_chain = state.mRefreshCount;
 
-    state.mMainThread = false;
+    state.mMainThread           = false;
     const auto  off_main_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
     const auto* off_main        = presentationError(off_main_result);
     ensure("off-main clear-present is rejected without observing or dispatching native work",
@@ -2883,20 +3003,20 @@ void window_macosx_vulkan_object::test<18>()
     const auto* zero_extent        = presentationError(zero_extent_result);
     ensure("zero Cocoa backing pixels are a typed clear-present extent failure",
            zero_extent && zero_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
-               state.mRefreshCount == refreshes_after_chain + 3 && owner->drawableWidth() == 1280 &&
-               owner->drawableHeight() == 720 && state.mClearColorImageCount == 0);
+               state.mRefreshCount == refreshes_after_chain + 3 && owner->drawableWidth() == 1280 && owner->drawableHeight() == 720 &&
+               state.mClearColorImageCount == 0);
 
-    state.mRefreshWidth  = 1600;
-    state.mRefreshHeight = 900;
+    state.mRefreshWidth                  = 1600;
+    state.mRefreshHeight                 = 900;
     const auto  mismatched_extent_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
     const auto* mismatched_extent        = presentationError(mismatched_extent_result);
     ensure("clear-present forwards changed positive pixels for exact parent-level extent authentication",
            mismatched_extent && mismatched_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch &&
-               state.mRefreshCount == refreshes_after_chain + 4 && owner->drawableWidth() == 1600 &&
-               owner->drawableHeight() == 900 && state.mClearColorImageCount == 0);
+               state.mRefreshCount == refreshes_after_chain + 4 && owner->drawableWidth() == 1600 && owner->drawableHeight() == 900 &&
+               state.mClearColorImageCount == 0);
 
-    state.mRefreshWidth  = 1280;
-    state.mRefreshHeight = 720;
+    state.mRefreshWidth           = 1280;
+    state.mRefreshHeight          = 720;
     const auto successful_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
     const auto* success          = std::get_if<VulkanSwapchainFrameSlotPresentationSuccess>(&successful_result);
     ensure("current Cocoa identity and exact backing pixels complete one clear-present cycle",
@@ -3501,6 +3621,68 @@ void window_macosx_vulkan_object::test<22>()
 
     state.mOwnerDuringDestroy = owner;
     ensure("the diagnostic draw fixture tears down child-first", owner->reset());
+}
+
+template<>
+template<>
+void window_macosx_vulkan_object::test<23>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState   state;
+    ScopedState active(state);
+    auto        result = acquireLLWindowMacOSXVulkan(createInfo(), 223, fakeOperations(state));
+    auto*       owner  = acquiredWindow(result);
+    ensure("readback adapter fixture acquires its private Cocoa owner", owner != nullptr);
+
+    const VulkanSwapchainReadbackAcquireResult missing_instance = owner->acquireSwapchainReadbackGeneration();
+    ensure("readback requires a live instance before refreshing Cocoa geometry",
+           missing_instance && missing_instance->mCode == VulkanSwapchainReadbackAcquireCode::InstanceNotLive && state.mRefreshCount == 0);
+
+    ensure("readback fixture acquires the exact chain through swapchain images",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
+               !owner->acquireSurfaceGeneration() && !owner->acquirePresentationDeviceGeneration() &&
+               !owner->acquireLogicalDeviceGeneration() && !owner->acquireSwapchainConfigurationGeneration() &&
+               !owner->acquireSwapchainGeneration() && !owner->acquireSwapchainImagesGeneration());
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("the readback owner is absent before explicit acquisition",
+           instance && !instance->hasSwapchainReadbackGeneration() && !owner->resetSwapchainReadbackGeneration());
+
+    const std::size_t refreshes                         = state.mRefreshCount;
+    state.mMainThread                                   = false;
+    const VulkanSwapchainReadbackAcquireResult off_main = owner->acquireSwapchainReadbackGeneration();
+    ensure("off-main readback fails before refreshing or mutating native state",
+           off_main && off_main->mCode == VulkanSwapchainReadbackAcquireCode::StaleWindowGeneration && state.mRefreshCount == refreshes &&
+               state.mCreateBufferCount == 0);
+    state.mMainThread = true;
+
+    ensure("readback acquisition depends on images but not presentation target or pipeline",
+           !owner->acquireSwapchainReadbackGeneration() && instance->hasSwapchainReadbackGeneration() &&
+               !instance->hasSwapchainPresentationTargetGeneration() && !instance->hasSwapchainPresentationPipelineGeneration());
+    ensure("the Cocoa adapter publishes exact Retina readback metadata",
+           instance->swapchainReadbackBuffer() == state.mReadbackBuffer && instance->swapchainReadbackMemory() == state.mReadbackMemory &&
+               instance->swapchainReadbackIsMapped() &&
+               instance->swapchainReadbackImageFormat() == VK_FORMAT_B8G8R8A8_UNORM &&
+               instance->swapchainReadbackImageExtent().width == 1280 && instance->swapchainReadbackImageExtent().height == 720 &&
+               instance->swapchainReadbackImageCount() == 3 && instance->swapchainReadbackRowBytes() == 1280 * 4 &&
+               instance->swapchainReadbackByteCount() == 1280 * 720 * 4 &&
+               instance->swapchainReadbackAllocationSize() >= instance->swapchainReadbackByteCount() &&
+               (instance->swapchainReadbackMemoryPropertyFlags() &
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                   (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+
+    const VulkanSwapchainReadbackAcquireResult duplicate = owner->acquireSwapchainReadbackGeneration();
+    ensure("duplicate readback acquisition is typed and performs no second mutation",
+           duplicate && duplicate->mCode == VulkanSwapchainReadbackAcquireCode::SwapchainReadbackAlreadyOwned &&
+               state.mCreateBufferCount == 1 && state.mAllocateMemoryCount == 1 && state.mMapMemoryCount == 1);
+    ensure("explicit readback reset unmaps, destroys, and frees without disturbing images",
+           owner->resetSwapchainReadbackGeneration() && !instance->hasSwapchainReadbackGeneration() &&
+               instance->hasSwapchainImagesGeneration() && state.mUnmapMemoryCount == 1 && state.mDestroyBufferCount == 1 &&
+               state.mFreeMemoryCount == 1 && !owner->resetSwapchainReadbackGeneration());
+    ensure("the independent frame-slot sibling remains legal without readback",
+           !owner->acquireSwapchainFrameSlotGeneration() && instance->hasSwapchainFrameSlotGeneration());
+    state.mOwnerDuringDestroy = owner;
+    ensure("readback adapter fixture tears down its retained chain", owner->reset());
 }
 
 } // namespace tut

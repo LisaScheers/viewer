@@ -95,13 +95,13 @@ struct FakeState
     std::vector<VkPresentModeKHR>   mPresentModes{ VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_KHR };
     EnumerationBehavior             mFormatBehavior;
     EnumerationBehavior             mPresentBehavior;
-    VkFormatProperties mFormatProperties{ 0,
-                                          VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
-                                          0 };
-    std::uint32_t                   mMaxFramebufferWidth  = 4096;
-    std::uint32_t                   mMaxFramebufferHeight = 2160;
-    std::array<std::uint32_t, 2>    mMaxViewportDimensions{ 4096, 4096 };
-    std::array<float, 2>            mViewportBoundsRange{ -8192.0f, 8192.0f };
+    VkFormatProperties              mFormatProperties{
+        0, VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT, 0
+    };
+    std::uint32_t                mMaxFramebufferWidth  = 4096;
+    std::uint32_t                mMaxFramebufferHeight = 2160;
+    std::array<std::uint32_t, 2> mMaxViewportDimensions{ 4096, 4096 };
+    std::array<float, 2>         mViewportBoundsRange{ -8192.0f, 8192.0f };
 
     std::vector<std::string> mConfigurationLookups;
     std::size_t              mCapabilitiesCalls      = 0;
@@ -537,15 +537,14 @@ void render_vulkan_swapchain_configuration_object::test<1>()
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfacePresentModes) == 2);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties) == 3);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::ScratchAllocationFailure) == 22);
-    static_assert(static_cast<std::uint8_t>(
-                      VulkanSwapchainConfigurationResolutionCode::SurfaceTransferDestinationUsageUnsupported) == 23);
-    static_assert(static_cast<std::uint8_t>(
-                      VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferDestinationUnsupported) == 24);
-    static_assert(static_cast<std::uint8_t>(
-                      VulkanSwapchainConfigurationResolutionCode::SelectedFormatColorAttachmentUnsupported) == 25);
-    static_assert(static_cast<std::uint8_t>(
-                      VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsFramebufferLimits) == 26);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::SurfaceTransferDestinationUsageUnsupported) == 23);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferDestinationUnsupported) ==
+                  24);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::SelectedFormatColorAttachmentUnsupported) == 25);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsFramebufferLimits) == 26);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsViewportLimits) == 27);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::SurfaceTransferSourceUsageUnsupported) == 28);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferSourceUnsupported) == 29);
 
     FakeState       state;
     ScopedFakeState scope(state);
@@ -618,7 +617,8 @@ void render_vulkan_swapchain_configuration_object::test<3>()
                                         VulkanSwapchainConfigurationResolutionCode::InvalidCurrentTransform,
                                         VulkanSwapchainConfigurationResolutionCode::MissingCompositeAlpha,
                                         VulkanSwapchainConfigurationResolutionCode::ColorAttachmentUsageUnsupported,
-                                        VulkanSwapchainConfigurationResolutionCode::SurfaceTransferDestinationUsageUnsupported };
+                                        VulkanSwapchainConfigurationResolutionCode::SurfaceTransferDestinationUsageUnsupported,
+                                        VulkanSwapchainConfigurationResolutionCode::SurfaceTransferSourceUsageUnsupported };
     for (std::size_t index = 0; index < invalid_codes.size(); ++index)
     {
         FakeState       state;
@@ -639,6 +639,8 @@ void render_vulkan_swapchain_configuration_object::test<3>()
             state.mCapabilities.supportedUsageFlags = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         if (index == 7)
             state.mCapabilities.supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (index == 8)
+            state.mCapabilities.supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         auto parents = makeParents(state);
         ensureCode(resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 800, 600 }), invalid_codes[index]);
         ensure("invalid capabilities stop before enumeration", state.mFormatCountCalls == 0 && state.mPresentCountCalls == 0);
@@ -712,31 +714,43 @@ void render_vulkan_swapchain_configuration_object::test<4>()
         FakeState       state;
         ScopedFakeState scope(state);
         state.mFormatProperties.optimalTilingFeatures = 0;
-        auto        parents = makeParents(state);
+        auto        parents                           = makeParents(state);
         const auto  result = resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 800, 600 });
         const auto& error  = requireError(result);
         ensure("selected-format transfer-destination rejection is exact",
                error.mCode == VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferDestinationUnsupported &&
-                   error.mCommand == VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties &&
-                   error.mResult == VK_SUCCESS);
+                   error.mCommand == VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties && error.mResult == VK_SUCCESS);
         ensure("selected-format rejection queries the chosen BGRA format before present modes",
-               state.mFormatPropertiesCalls == 1 && state.mQueriedFormat == VK_FORMAT_B8G8R8A8_UNORM &&
-                   state.mPresentCountCalls == 0 && state.mPresentListCalls == 0);
+               state.mFormatPropertiesCalls == 1 && state.mQueriedFormat == VK_FORMAT_B8G8R8A8_UNORM && state.mPresentCountCalls == 0 &&
+                   state.mPresentListCalls == 0);
     }
     {
         FakeState       state;
         ScopedFakeState scope(state);
         state.mFormatProperties.optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
-        auto        parents = makeParents(state);
+        auto        parents                           = makeParents(state);
         const auto  result = resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 800, 600 });
         const auto& error  = requireError(result);
         ensure("selected-format color-attachment rejection is exact",
                error.mCode == VulkanSwapchainConfigurationResolutionCode::SelectedFormatColorAttachmentUnsupported &&
-                   error.mCommand == VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties &&
-                   error.mResult == VK_SUCCESS);
+                   error.mCommand == VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties && error.mResult == VK_SUCCESS);
         ensure("color-attachment rejection follows the successful transfer gate and precedes present modes",
-               state.mFormatPropertiesCalls == 1 && state.mQueriedFormat == VK_FORMAT_B8G8R8A8_UNORM &&
-                   state.mPresentCountCalls == 0 && state.mPresentListCalls == 0);
+               state.mFormatPropertiesCalls == 1 && state.mQueriedFormat == VK_FORMAT_B8G8R8A8_UNORM && state.mPresentCountCalls == 0 &&
+                   state.mPresentListCalls == 0);
+    }
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        state.mFormatProperties.optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        auto        parents                           = makeParents(state);
+        const auto  result = resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 800, 600 });
+        const auto& error  = requireError(result);
+        ensure("selected-format transfer-source rejection is exact",
+               error.mCode == VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferSourceUnsupported &&
+                   error.mCommand == VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties && error.mResult == VK_SUCCESS);
+        ensure("transfer-source rejection follows the successful destination and color gates and precedes present modes",
+               state.mFormatPropertiesCalls == 1 && state.mQueriedFormat == VK_FORMAT_B8G8R8A8_UNORM && state.mPresentCountCalls == 0 &&
+                   state.mPresentListCalls == 0);
     }
 }
 
@@ -814,15 +828,16 @@ void render_vulkan_swapchain_configuration_object::test<6>()
                generation.imageExtent().width == 1920 && generation.imageExtent().height == 240);
     ensure("the conservative create policy is exact",
            generation.presentMode() == VK_PRESENT_MODE_FIFO_KHR && generation.imageCount() == 3 && generation.imageArrayLayers() == 1 &&
-               generation.imageUsage() == (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
+               generation.imageUsage() ==
+                   (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
                generation.imageSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
                generation.preTransform() == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR &&
-               generation.compositeAlpha() == VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR && generation.clipped() == VK_TRUE);
+               generation.compositeAlpha() == VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR && generation.clipped() == VK_FALSE);
     ensure("the configuration authenticates the exact parent chain and extent",
            generation.createdFor(parents.mPhysical, parents.mLogical, { 2560, 200 }) &&
                !generation.createdFor(parents.mPhysical, parents.mLogical, { 1920, 240 }) && generation.device() == state.mDevice &&
                generation.queueFamilyIndex() == state.mQueueFamily);
-    ensure("the selected BGRA format is authenticated for optimal transfer destination and color attachment",
+    ensure("the selected BGRA format is authenticated for optimal transfer source, destination, and color attachment",
            state.mFormatPropertiesCalls == 1 && state.mQueriedFormat == VK_FORMAT_B8G8R8A8_UNORM);
 
     auto moved = std::move(generation);

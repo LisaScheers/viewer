@@ -164,6 +164,11 @@ namespace
             return failure(VulkanSwapchainConfigurationResolutionCode::SurfaceTransferDestinationUsageUnsupported,
                            VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfaceCapabilities);
         }
+        if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0)
+        {
+            return failure(VulkanSwapchainConfigurationResolutionCode::SurfaceTransferSourceUsageUnsupported,
+                           VulkanSwapchainConfigurationCommand::GetPhysicalDeviceSurfaceCapabilities);
+        }
         return std::nullopt;
     }
 
@@ -579,6 +584,11 @@ VulkanSwapchainConfigurationResolutionResult resolveSwapchainConfiguration(
     if ((format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0)
     {
         return failure(VulkanSwapchainConfigurationResolutionCode::SelectedFormatColorAttachmentUnsupported,
+                       VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties);
+    }
+    if ((format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) == 0)
+    {
+        return failure(VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferSourceUnsupported,
                        VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties);
     }
 

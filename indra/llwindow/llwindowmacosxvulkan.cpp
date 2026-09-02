@@ -685,6 +685,28 @@ LLWindowMacOSXVulkan::acquireSwapchainPresentationPipelineGeneration() noexcept
     return mInstanceGeneration->acquireSwapchainPresentationPipelineGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainReadbackAcquireResult LLWindowMacOSXVulkan::acquireSwapchainReadbackGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainReadbackAcquireError{ VulkanSwapchainReadbackAcquireCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mLoader || !validIdentity(mNativeWindow) || !refreshNativeGeometry())
+    {
+        return VulkanSwapchainReadbackAcquireError{ VulkanSwapchainReadbackAcquireCode::StaleWindowGeneration, std::nullopt };
+    }
+
+    SurfaceAcquireContext context{ this, mInstanceGeneration.get(), &mOperations, mRequirements->resolver(), mNativeWindow.mMetalLayer };
+    VulkanSwapchainReadbackRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = { mNativeWindow.mDrawableWidth, mNativeWindow.mDrawableHeight };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquireSwapchainReadbackGeneration(request);
+}
+
 LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult LLWindowMacOSXVulkan::acquireSwapchainFrameSlotGeneration() noexcept
 {
     using namespace LLRenderVulkan;
@@ -1046,6 +1068,15 @@ bool LLWindowMacOSXVulkan::resetSwapchainFrameSlotGeneration() noexcept
         return false;
     }
     return mInstanceGeneration->resetSwapchainFrameSlotGeneration();
+}
+
+bool LLWindowMacOSXVulkan::resetSwapchainReadbackGeneration() noexcept
+{
+    if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainReadbackGeneration())
+    {
+        return false;
+    }
+    return mInstanceGeneration->resetSwapchainReadbackGeneration();
 }
 
 bool LLWindowMacOSXVulkan::resetSwapchainPresentationPipelineGeneration() noexcept

@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -97,7 +98,16 @@ enum class MissingCommand : std::uint8_t
     CmdBindPipeline,
     CmdSetViewport,
     CmdSetScissor,
-    CmdDraw
+    CmdDraw,
+    GetPhysicalDeviceMemoryProperties,
+    CreateBuffer,
+    DestroyBuffer,
+    GetBufferMemoryRequirements,
+    AllocateMemory,
+    FreeMemory,
+    BindBufferMemory,
+    MapMemory,
+    UnmapMemory
 };
 
 enum class Event : std::uint8_t
@@ -143,7 +153,13 @@ enum class Event : std::uint8_t
     BindPipeline,
     SetViewport,
     SetScissor,
-    Draw
+    Draw,
+    CreateBuffer,
+    AllocateMemory,
+    MapMemory,
+    UnmapMemory,
+    DestroyBuffer,
+    FreeMemory
 };
 
 template<typename Handle>
@@ -219,20 +235,20 @@ struct FakeState
     VkSemaphore              mPresentationReadySemaphore = fakeHandle<VkSemaphore>(0xa005);
     VkFence                  mPresentCompletionFence     = fakeHandle<VkFence>(0xa006);
     std::vector<VkImage>     mSwapchainImages{ fakeHandle<VkImage>(0x8001), fakeHandle<VkImage>(0x8002), fakeHandle<VkImage>(0x8003) };
-    std::vector<VkImageView> mSwapchainImageViews{ fakeHandle<VkImageView>(0x9001), fakeHandle<VkImageView>(0x9002),
+    std::vector<VkImageView>      mSwapchainImageViews{ fakeHandle<VkImageView>(0x9001), fakeHandle<VkImageView>(0x9002),
                                                    fakeHandle<VkImageView>(0x9003) };
-    VkRenderPass             mPresentationRenderPass = fakeHandle<VkRenderPass>(0xb001);
-    std::vector<VkFramebuffer> mPresentationFramebuffers{ fakeHandle<VkFramebuffer>(0xb101),
-                                                          fakeHandle<VkFramebuffer>(0xb102),
+    VkRenderPass                  mPresentationRenderPass = fakeHandle<VkRenderPass>(0xb001);
+    std::vector<VkFramebuffer>    mPresentationFramebuffers{ fakeHandle<VkFramebuffer>(0xb101), fakeHandle<VkFramebuffer>(0xb102),
                                                           fakeHandle<VkFramebuffer>(0xb103) };
-    std::array<VkShaderModule, 2> mPresentationShaderModules{
-        fakeHandle<VkShaderModule>(0xc001), fakeHandle<VkShaderModule>(0xc002)
-    };
-    VkPipelineLayout mPresentationPipelineLayout = fakeHandle<VkPipelineLayout>(0xc101);
-    VkPipeline       mPresentationPipeline       = fakeHandle<VkPipeline>(0xc201);
-    std::vector<Event>       mEvents;
-    std::vector<std::string> mEnabledExtensions;
-    std::vector<std::string> mEnabledLayers;
+    std::array<VkShaderModule, 2> mPresentationShaderModules{ fakeHandle<VkShaderModule>(0xc001), fakeHandle<VkShaderModule>(0xc002) };
+    VkPipelineLayout              mPresentationPipelineLayout = fakeHandle<VkPipelineLayout>(0xc101);
+    VkPipeline                    mPresentationPipeline       = fakeHandle<VkPipeline>(0xc201);
+    VkBuffer                      mReadbackBuffer             = fakeHandle<VkBuffer>(0xd001);
+    VkDeviceMemory                mReadbackMemory             = fakeHandle<VkDeviceMemory>(0xd002);
+    std::array<std::byte, 4>      mReadbackMappedStorage{};
+    std::vector<Event>            mEvents;
+    std::vector<std::string>      mEnabledExtensions;
+    std::vector<std::string>      mEnabledLayers;
     VkInstanceCreateFlags    mInstanceFlags                  = 0;
     std::uint32_t            mRequestedApiVersion            = 0;
     PFN_vkDebugUtilsMessengerCallbackEXT mValidationCallback = nullptr;
@@ -347,11 +363,38 @@ struct FakeState
     bool                                      mObservedLogicalAtImageViewDestroy       = false;
     bool                                      mObservedSurfaceAtImageViewDestroy       = false;
     bool                                      mObservedPresentationTargetAtImageViewDestroy = false;
-    bool                                      mObservedFrameSlotAtImageViewDestroy     = false;
+    bool                                      mObservedFrameSlotAtImageViewDestroy          = false;
 
-    VkResult                                  mRenderPassCreateResult = VK_SUCCESS;
-    VkResult                                  mFramebufferCreateResult = VK_SUCCESS;
-    bool                                      mNullRenderPass = false;
+    VkPhysicalDeviceMemoryProperties mMemoryProperties{};
+    VkMemoryRequirements             mReadbackMemoryRequirements{};
+    VkResult                         mBufferCreateResult               = VK_SUCCESS;
+    VkResult                         mMemoryAllocateResult             = VK_SUCCESS;
+    VkResult                         mBufferBindResult                 = VK_SUCCESS;
+    VkResult                         mMemoryMapResult                  = VK_SUCCESS;
+    bool                             mNullReadbackBuffer               = false;
+    bool                             mNullReadbackMemory               = false;
+    bool                             mNullReadbackMapping              = false;
+    std::size_t                      mMemoryPropertiesCalls            = 0;
+    std::size_t                      mCreateBufferCalls                = 0;
+    std::size_t                      mDestroyBufferCalls               = 0;
+    std::size_t                      mGetBufferMemoryRequirementsCalls = 0;
+    std::size_t                      mAllocateMemoryCalls              = 0;
+    std::size_t                      mFreeMemoryCalls                  = 0;
+    std::size_t                      mBindBufferMemoryCalls            = 0;
+    std::size_t                      mMapMemoryCalls                   = 0;
+    std::size_t                      mUnmapMemoryCalls                 = 0;
+    VkBufferCreateInfo               mReadbackBufferCreateInfo{};
+    VkMemoryAllocateInfo             mReadbackMemoryAllocateInfo{};
+    VkBuffer                         mReadbackBoundBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory                   mReadbackBoundMemory = VK_NULL_HANDLE;
+    VkDeviceSize                     mReadbackBindOffset  = std::numeric_limits<VkDeviceSize>::max();
+    VkDeviceMemory                   mMappedMemory        = VK_NULL_HANDLE;
+    VkDeviceSize                     mMappedOffset        = std::numeric_limits<VkDeviceSize>::max();
+    VkDeviceSize                     mMappedSize          = 0;
+
+    VkResult                        mRenderPassCreateResult           = VK_SUCCESS;
+    VkResult                        mFramebufferCreateResult          = VK_SUCCESS;
+    bool                            mNullRenderPass                   = false;
     bool                                      mNullFramebuffer = false;
     std::size_t                               mCreateRenderPassCalls = 0;
     std::size_t                               mDestroyRenderPassCalls = 0;
@@ -517,9 +560,17 @@ struct FakeState
         mSwapchainCapabilities.currentTransform        = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         mSwapchainCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         mSwapchainCapabilities.supportedUsageFlags =
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         mSwapchainFormatProperties.optimalTilingFeatures =
-            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+        mMemoryProperties.memoryTypeCount              = 1;
+        mMemoryProperties.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        mMemoryProperties.memoryTypes[0].heapIndex     = 0;
+        mMemoryProperties.memoryHeapCount              = 1;
+        mMemoryProperties.memoryHeaps[0].size          = 64 * 1024 * 1024;
+        mReadbackMemoryRequirements.size               = 4 * 1024 * 1024;
+        mReadbackMemoryRequirements.alignment          = 256;
+        mReadbackMemoryRequirements.memoryTypeBits     = 1;
     }
 };
 
@@ -1721,6 +1772,117 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device, const
     return gFakeState->mReleaseSwapchainImagesResult;
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceMemoryProperties(VkPhysicalDevice                  physical_device,
+                                                                 VkPhysicalDeviceMemoryProperties* properties) noexcept
+{
+    if (gFakeState && physical_device == gFakeState->mPhysicalDevice && properties)
+    {
+        ++gFakeState->mMemoryPropertiesCalls;
+        *properties = gFakeState->mMemoryProperties;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice                  device,
+                                                const VkBufferCreateInfo* create_info,
+                                                const VkAllocationCallbacks*,
+                                                VkBuffer* buffer) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !create_info || !buffer)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gFakeState->mCreateBufferCalls;
+    gFakeState->mReadbackBufferCreateInfo = *create_info;
+    gFakeState->mEvents.push_back(Event::CreateBuffer);
+    *buffer = gFakeState->mNullReadbackBuffer ? VK_NULL_HANDLE : gFakeState->mReadbackBuffer;
+    return gFakeState->mBufferCreateResult;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAllocationCallbacks*) noexcept
+{
+    if (gFakeState && device == gFakeState->mDevice && buffer == gFakeState->mReadbackBuffer)
+    {
+        ++gFakeState->mDestroyBufferCalls;
+        gFakeState->mEvents.push_back(Event::DestroyBuffer);
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer, VkMemoryRequirements* requirements) noexcept
+{
+    if (gFakeState && device == gFakeState->mDevice && buffer == gFakeState->mReadbackBuffer && requirements)
+    {
+        ++gFakeState->mGetBufferMemoryRequirementsCalls;
+        *requirements      = gFakeState->mReadbackMemoryRequirements;
+        requirements->size = std::max(requirements->size, gFakeState->mReadbackBufferCreateInfo.size);
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice                    device,
+                                                  const VkMemoryAllocateInfo* allocate_info,
+                                                  const VkAllocationCallbacks*,
+                                                  VkDeviceMemory* memory) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !allocate_info || !memory)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gFakeState->mAllocateMemoryCalls;
+    gFakeState->mReadbackMemoryAllocateInfo = *allocate_info;
+    gFakeState->mEvents.push_back(Event::AllocateMemory);
+    *memory = gFakeState->mNullReadbackMemory ? VK_NULL_HANDLE : gFakeState->mReadbackMemory;
+    return gFakeState->mMemoryAllocateResult;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks*) noexcept
+{
+    if (gFakeState && device == gFakeState->mDevice && memory == gFakeState->mReadbackMemory)
+    {
+        ++gFakeState->mFreeMemoryCalls;
+        gFakeState->mEvents.push_back(Event::FreeMemory);
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice       device,
+                                                    VkBuffer       buffer,
+                                                    VkDeviceMemory memory,
+                                                    VkDeviceSize   memory_offset) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || buffer != gFakeState->mReadbackBuffer || memory != gFakeState->mReadbackMemory)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gFakeState->mBindBufferMemoryCalls;
+    gFakeState->mReadbackBoundBuffer = buffer;
+    gFakeState->mReadbackBoundMemory = memory;
+    gFakeState->mReadbackBindOffset  = memory_offset;
+    return gFakeState->mBufferBindResult;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+    fakeMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags, void** data) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || memory != gFakeState->mReadbackMemory || !data)
+    {
+        return VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    ++gFakeState->mMapMemoryCalls;
+    gFakeState->mMappedMemory = memory;
+    gFakeState->mMappedOffset = offset;
+    gFakeState->mMappedSize   = size;
+    gFakeState->mEvents.push_back(Event::MapMemory);
+    *data = gFakeState->mNullReadbackMapping ? nullptr : gFakeState->mReadbackMappedStorage.data();
+    return gFakeState->mMemoryMapResult;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice device, VkDeviceMemory memory) noexcept
+{
+    if (gFakeState && device == gFakeState->mDevice && memory == gFakeState->mReadbackMemory)
+    {
+        ++gFakeState->mUnmapMemoryCalls;
+        gFakeState->mEvents.push_back(Event::UnmapMemory);
+    }
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
 {
     if (!gFakeState || device != gFakeState->mDevice || !name)
@@ -1889,6 +2051,39 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     {
         return gFakeState->mMissing == MissingCommand::ReleaseSwapchainImages ? nullptr : eraseFunctionType(fakeReleaseSwapchainImages);
     }
+    if (std::strcmp(name, "vkCreateBuffer") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CreateBuffer ? nullptr : eraseFunctionType(fakeCreateBuffer);
+    }
+    if (std::strcmp(name, "vkDestroyBuffer") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::DestroyBuffer ? nullptr : eraseFunctionType(fakeDestroyBuffer);
+    }
+    if (std::strcmp(name, "vkGetBufferMemoryRequirements") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::GetBufferMemoryRequirements ? nullptr
+                                                                                   : eraseFunctionType(fakeGetBufferMemoryRequirements);
+    }
+    if (std::strcmp(name, "vkAllocateMemory") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::AllocateMemory ? nullptr : eraseFunctionType(fakeAllocateMemory);
+    }
+    if (std::strcmp(name, "vkFreeMemory") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::FreeMemory ? nullptr : eraseFunctionType(fakeFreeMemory);
+    }
+    if (std::strcmp(name, "vkBindBufferMemory") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::BindBufferMemory ? nullptr : eraseFunctionType(fakeBindBufferMemory);
+    }
+    if (std::strcmp(name, "vkMapMemory") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::MapMemory ? nullptr : eraseFunctionType(fakeMapMemory);
+    }
+    if (std::strcmp(name, "vkUnmapMemory") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::UnmapMemory ? nullptr : eraseFunctionType(fakeUnmapMemory);
+    }
     return nullptr;
 }
 
@@ -1998,6 +2193,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return gFakeState->mMissing == MissingCommand::GetPhysicalDeviceFormatProperties
                    ? nullptr
                    : eraseFunctionType(fakeGetPhysicalDeviceFormatProperties);
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceMemoryProperties") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::GetPhysicalDeviceMemoryProperties
+                   ? nullptr
+                   : eraseFunctionType(fakeGetPhysicalDeviceMemoryProperties);
     }
     if (std::strcmp(name, "vkCreateDebugUtilsMessengerEXT") == 0)
     {
@@ -2132,6 +2333,14 @@ VulkanSwapchainPresentationPipelineRequest makeSwapchainPresentationPipelineRequ
     FakeState&                state,
     VulkanInstanceGeneration& owner,
     VkExtent2D                drawable_extent = { 800, 600 }) noexcept
+{
+    state.mExpectedInstanceOwner = &owner;
+    return { 42, drawable_extent, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
+}
+
+VulkanSwapchainReadbackRequest makeSwapchainReadbackRequest(FakeState&                state,
+                                                            VulkanInstanceGeneration& owner,
+                                                            VkExtent2D                drawable_extent = { 800, 600 }) noexcept
 {
     state.mExpectedInstanceOwner = &owner;
     return { 42, drawable_extent, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
@@ -2638,14 +2847,12 @@ bool reentrantLeafPublicationOwnerIsCurrent(void* userdata, const VulkanInstance
         return false;
     }
 
-    const bool at_images_boundary = context->mPath == ReentrantLeafPublicationPath::Images &&
-                                    generation.hasSwapchainGeneration() &&
+    const bool at_images_boundary = context->mPath == ReentrantLeafPublicationPath::Images && generation.hasSwapchainGeneration() &&
                                     !generation.hasSwapchainImagesGeneration();
-    const bool at_frame_slot_boundary = context->mPath == ReentrantLeafPublicationPath::FrameSlot &&
-                                        generation.hasSwapchainImagesGeneration() &&
-                                        generation.hasSwapchainPresentationTargetGeneration() &&
-                                        generation.hasSwapchainPresentationPipelineGeneration() &&
-                                        !generation.hasSwapchainFrameSlotGeneration();
+    const bool at_frame_slot_boundary =
+        context->mPath == ReentrantLeafPublicationPath::FrameSlot && generation.hasSwapchainImagesGeneration() &&
+        generation.hasSwapchainPresentationTargetGeneration() && generation.hasSwapchainPresentationPipelineGeneration() &&
+        generation.hasSwapchainReadbackGeneration() && !generation.hasSwapchainFrameSlotGeneration();
     if (!context->mAttempted && (at_images_boundary || at_frame_slot_boundary))
     {
         context->mAttempted                          = true;
@@ -3235,8 +3442,18 @@ const VulkanSwapchainPresentationPipelineAcquireError& requireSwapchainPresentat
 void ensureSwapchainPresentationPipelineCode(const VulkanSwapchainPresentationPipelineAcquireResult& result,
                                              VulkanSwapchainPresentationPipelineAcquireCode          code)
 {
-    tut::ensure("the exact presentation-pipeline error is reported",
-                requireSwapchainPresentationPipelineError(result).mCode == code);
+    tut::ensure("the exact presentation-pipeline error is reported", requireSwapchainPresentationPipelineError(result).mCode == code);
+}
+
+const VulkanSwapchainReadbackAcquireError& requireSwapchainReadbackError(const VulkanSwapchainReadbackAcquireResult& result)
+{
+    tut::ensure("readback acquisition returns an error", result.has_value());
+    return *result;
+}
+
+void ensureSwapchainReadbackCode(const VulkanSwapchainReadbackAcquireResult& result, VulkanSwapchainReadbackAcquireCode code)
+{
+    tut::ensure("the exact readback error is reported", requireSwapchainReadbackError(result).mCode == code);
 }
 
 const VulkanSwapchainFrameSlotAcquireError& requireSwapchainFrameSlotError(const VulkanSwapchainFrameSlotAcquireResult& result)
@@ -3342,24 +3559,21 @@ void acquireSwapchainImagesChain(FakeState& state, VulkanInstanceGeneration& own
                 !owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner, drawable_extent)));
 }
 
-void acquireSwapchainPresentationTargetChain(FakeState&                state,
-                                             VulkanInstanceGeneration& owner,
-                                             VkExtent2D                drawable_extent = { 800, 600 })
+void acquireSwapchainPresentationTargetChain(FakeState& state, VulkanInstanceGeneration& owner, VkExtent2D drawable_extent = { 800, 600 })
 {
     acquireSwapchainImagesChain(state, owner, drawable_extent);
     tut::ensure("the presentation-target fixture succeeds",
-                !owner.acquireSwapchainPresentationTargetGeneration(
-                    makeSwapchainPresentationTargetRequest(state, owner, drawable_extent)));
+                !owner.acquireSwapchainPresentationTargetGeneration(makeSwapchainPresentationTargetRequest(state, owner, drawable_extent)));
 }
 
-void acquireCompleteSwapchainChain(FakeState&                state,
-                                   VulkanInstanceGeneration& owner,
-                                   VkExtent2D                drawable_extent = { 800, 600 })
+void acquireCompleteSwapchainChain(FakeState& state, VulkanInstanceGeneration& owner, VkExtent2D drawable_extent = { 800, 600 })
 {
     acquireSwapchainPresentationTargetChain(state, owner, drawable_extent);
-    tut::ensure("the complete-chain presentation-pipeline fixture succeeds",
-                !owner.acquireSwapchainPresentationPipelineGeneration(
-                    makeSwapchainPresentationPipelineRequest(state, owner, drawable_extent)));
+    tut::ensure(
+        "the complete-chain presentation-pipeline fixture succeeds",
+        !owner.acquireSwapchainPresentationPipelineGeneration(makeSwapchainPresentationPipelineRequest(state, owner, drawable_extent)));
+    tut::ensure("the complete-chain readback fixture succeeds",
+                !owner.acquireSwapchainReadbackGeneration(makeSwapchainReadbackRequest(state, owner, drawable_extent)));
     tut::ensure("the complete-chain frame-slot fixture succeeds",
                 !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, drawable_extent)));
 }
@@ -3574,6 +3788,48 @@ bool pipelineParentAbaWindowIsCurrent(void* userdata, std::uint64_t native_windo
     return context && context->mOwner && native_window_generation == context->mOwner->nativeWindowGeneration();
 }
 
+struct ReadbackParentAbaContext
+{
+    FakeState*                mState        = nullptr;
+    VulkanInstanceGeneration* mOwner        = nullptr;
+    std::size_t               mOwnerChecks  = 0;
+    std::size_t               mWindowChecks = 0;
+    bool                      mReset        = false;
+    bool                      mReacquired   = false;
+};
+
+bool readbackParentAbaOwnerIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
+{
+    auto* context = static_cast<ReadbackParentAbaContext*>(userdata);
+    if (!context || !context->mState || !context->mOwner || context->mOwner != &generation)
+    {
+        return false;
+    }
+    ++context->mOwnerChecks;
+    if (context->mOwnerChecks == 1)
+    {
+        const VkExtent2D extent = context->mOwner->swapchainDrawableExtent();
+        context->mReset         = context->mOwner->resetSwapchainImagesGeneration();
+        if (context->mReset)
+        {
+            context->mReacquired =
+                !context->mOwner->acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(*context->mState, *context->mOwner, extent));
+        }
+    }
+    return true;
+}
+
+bool readbackParentAbaWindowIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    auto* context = static_cast<ReadbackParentAbaContext*>(userdata);
+    if (!context || !context->mOwner || native_window_generation != context->mOwner->nativeWindowGeneration())
+    {
+        return false;
+    }
+    ++context->mWindowChecks;
+    return true;
+}
+
 void emitValidationMessage(FakeState& state, const char* message)
 {
     tut::ensure("the validation callback was retained", state.mValidationCallback != nullptr && state.mValidationUserdata != nullptr);
@@ -3593,7 +3849,7 @@ struct render_vulkan_instance_test
 {
 };
 
-using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 96>;
+using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 100>;
 using render_vulkan_instance_test_object = render_vulkan_instance_test_group::object;
 render_vulkan_instance_test_group render_vulkan_instance_tests("render Vulkan instance");
 
@@ -4928,10 +5184,11 @@ void render_vulkan_instance_test_object::test<35>()
                owner.swapchainPresentMode() == VK_PRESENT_MODE_FIFO_KHR && owner.swapchainImageCount() == 3 &&
                owner.swapchainImageExtent().width == 1280 && owner.swapchainImageExtent().height == 720 &&
                owner.swapchainImageArrayLayers() == 1 &&
-               owner.swapchainImageUsage() == (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
+               owner.swapchainImageUsage() ==
+                   (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
                owner.swapchainImageSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
                owner.swapchainPreTransform() == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR &&
-               owner.swapchainCompositeAlpha() == VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR && owner.swapchainClipped() == VK_TRUE);
+               owner.swapchainCompositeAlpha() == VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR && owner.swapchainClipped() == VK_FALSE);
     const std::size_t capability_calls = state.mSwapchainCapabilitiesCalls;
     ensureSwapchainConfigurationCode(owner.acquireSwapchainConfigurationGeneration(request),
                                      VulkanSwapchainConfigurationAcquireCode::SwapchainConfigurationAlreadyOwned);
@@ -6413,9 +6670,9 @@ template<>
 void render_vulkan_instance_test_object::test<60>()
 {
     static_assert(std::variant_size_v<VulkanSwapchainChainRebuildResult> == 2);
-    static_assert(std::variant_size_v<VulkanSwapchainChainRebuildChildError> == 7);
-    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().rebuildSwapchainChain(
-        std::declval<const VulkanSwapchainChainRebuildRequest&>())));
+    static_assert(std::variant_size_v<VulkanSwapchainChainRebuildChildError> == 8);
+    static_assert(noexcept(
+        std::declval<VulkanInstanceGeneration&>().rebuildSwapchainChain(std::declval<const VulkanSwapchainChainRebuildRequest&>())));
 
     FakeState                state;
     ScopedFakeState          scope(state);
@@ -6463,11 +6720,11 @@ void render_vulkan_instance_test_object::test<60>()
     state.mSurfaceWindowCurrent = true;
 
     ensure("preflight rejection leaves the complete chain untouched",
-               owner.hasSwapchainConfigurationGeneration() && owner.hasSwapchainGeneration() &&
-               owner.hasSwapchainImagesGeneration() && owner.hasSwapchainPresentationTargetGeneration() &&
-               owner.hasSwapchainPresentationPipelineGeneration() && owner.hasSwapchainFrameSlotGeneration() &&
-               state.mDestroyFenceCalls == 0 && state.mDestroySemaphoreCalls == 0 &&
-               state.mDestroyCommandPoolCalls == 0 && state.mDestroyImageViewCalls == 0 &&
+           owner.hasSwapchainConfigurationGeneration() && owner.hasSwapchainGeneration() && owner.hasSwapchainImagesGeneration() &&
+               owner.hasSwapchainPresentationTargetGeneration() && owner.hasSwapchainPresentationPipelineGeneration() &&
+               owner.hasSwapchainReadbackGeneration() && owner.hasSwapchainFrameSlotGeneration() && state.mUnmapMemoryCalls == 0 &&
+               state.mDestroyBufferCalls == 0 && state.mFreeMemoryCalls == 0 && state.mDestroyFenceCalls == 0 &&
+               state.mDestroySemaphoreCalls == 0 && state.mDestroyCommandPoolCalls == 0 && state.mDestroyImageViewCalls == 0 &&
                state.mDestroySwapchainCalls == 0);
 }
 
@@ -6490,25 +6747,35 @@ void render_vulkan_instance_test_object::test<61>()
     ensure("changed-extent rebuild publishes a complete fresh chain over unchanged older parents",
            owner.surface() == surface && owner.logicalDevice() == device && owner.presentationQueue() == queue &&
                owner.swapchainDrawableExtent().width == 1280 && owner.swapchainDrawableExtent().height == 720 &&
-               owner.hasSwapchainConfigurationGeneration() && owner.hasSwapchainGeneration() &&
-               owner.hasSwapchainImagesGeneration() && owner.hasSwapchainPresentationTargetGeneration() &&
-               owner.hasSwapchainPresentationPipelineGeneration() && owner.hasSwapchainFrameSlotGeneration());
+               owner.hasSwapchainConfigurationGeneration() && owner.hasSwapchainGeneration() && owner.hasSwapchainImagesGeneration() &&
+               owner.hasSwapchainPresentationTargetGeneration() && owner.hasSwapchainPresentationPipelineGeneration() &&
+               owner.hasSwapchainReadbackGeneration() && owner.hasSwapchainFrameSlotGeneration() &&
+               owner.swapchainReadbackBuffer() == state.mReadbackBuffer && owner.swapchainReadbackMemory() == state.mReadbackMemory &&
+               owner.swapchainReadbackIsMapped() && owner.swapchainReadbackImageExtent().width == 1280 &&
+               owner.swapchainReadbackImageExtent().height == 720 && owner.swapchainReadbackRowBytes() == 1280 * 4 &&
+               owner.swapchainReadbackByteCount() == 1280 * 720 * 4);
     ensure("rebuild uses the initial-form null oldSwapchain contract",
            state.mCreateSwapchainCalls == 2 && state.mSwapchainCreateInfo.oldSwapchain == VK_NULL_HANDLE);
     ensure("the first rebuild retires each old child exactly once",
-           state.mDestroyFenceCalls == 2 && state.mDestroySemaphoreCalls == 2 &&
-               state.mDestroyCommandPoolCalls == 1 && state.mDestroyImageViewCalls == state.mSwapchainImageViews.size() &&
-               state.mDestroySwapchainCalls == 1);
+           state.mDestroyFenceCalls == 2 && state.mDestroySemaphoreCalls == 2 && state.mDestroyCommandPoolCalls == 1 &&
+               state.mDestroyImageViewCalls == state.mSwapchainImageViews.size() && state.mDestroySwapchainCalls == 1);
 
-    const auto first_fence_destroy = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyFence);
-    const auto first_framebuffer_destroy = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyFramebuffer);
-    const auto first_view_destroy  = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyImageView);
-    const auto swapchain_destroy   = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroySwapchain);
+    const auto first_command_pool_destroy = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyCommandPool);
+    const auto first_unmap                = std::find(state.mEvents.begin(), state.mEvents.end(), Event::UnmapMemory);
+    const auto first_buffer_destroy       = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyBuffer);
+    const auto first_memory_free          = std::find(state.mEvents.begin(), state.mEvents.end(), Event::FreeMemory);
+    const auto first_pipeline_destroy     = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyPipeline);
+    const auto first_framebuffer_destroy  = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyFramebuffer);
+    const auto first_view_destroy         = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyImageView);
+    const auto swapchain_destroy          = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroySwapchain);
     ensure("retirement is child-first before any replacement creation",
-           first_fence_destroy != state.mEvents.end() && first_framebuffer_destroy != state.mEvents.end() &&
+           first_command_pool_destroy != state.mEvents.end() && first_unmap != state.mEvents.end() &&
+               first_buffer_destroy != state.mEvents.end() && first_memory_free != state.mEvents.end() &&
+               first_pipeline_destroy != state.mEvents.end() && first_framebuffer_destroy != state.mEvents.end() &&
                first_view_destroy != state.mEvents.end() && swapchain_destroy != state.mEvents.end() &&
-               first_fence_destroy < first_framebuffer_destroy && first_framebuffer_destroy < first_view_destroy &&
-               first_view_destroy < swapchain_destroy &&
+               first_command_pool_destroy < first_unmap && first_unmap < first_buffer_destroy && first_buffer_destroy < first_memory_free &&
+               first_memory_free < first_pipeline_destroy && first_pipeline_destroy < first_framebuffer_destroy &&
+               first_framebuffer_destroy < first_view_destroy && first_view_destroy < swapchain_destroy &&
                swapchain_destroy < std::find(state.mEvents.begin(), state.mEvents.end(), Event::CreateSwapchain));
 
     ensureSwapchainChainRebuildOutcome(owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1280, 720 })),
@@ -6537,9 +6804,9 @@ void render_vulkan_instance_test_object::test<62>()
                                        VulkanSwapchainChainRebuildOutcome::Suspended);
     ensure("zero pixels suspend with only the stable older parents retained",
            owner.surface() == surface && owner.logicalDevice() == device && owner.presentationQueue() == queue &&
-               !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() &&
-               !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainPresentationTargetGeneration() &&
-               !owner.hasSwapchainPresentationPipelineGeneration() && !owner.hasSwapchainFrameSlotGeneration());
+               !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() && !owner.hasSwapchainImagesGeneration() &&
+               !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+               !owner.hasSwapchainReadbackGeneration() && !owner.hasSwapchainFrameSlotGeneration());
     const std::size_t destroyed_swapchains = state.mDestroySwapchainCalls;
 
     ensureSwapchainChainRebuildOutcome(owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 0, 720 })),
@@ -6549,12 +6816,13 @@ void render_vulkan_instance_test_object::test<62>()
 
     ensureSwapchainChainRebuildOutcome(owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1024, 768 })),
                                        VulkanSwapchainChainRebuildOutcome::Ready);
-    ensure("a nonzero restore reconstructs all six children against the retained parents",
+    ensure("a nonzero restore reconstructs all seven children against the retained parents",
            owner.surface() == surface && owner.logicalDevice() == device && owner.presentationQueue() == queue &&
                owner.swapchainDrawableExtent().width == 1024 && owner.swapchainDrawableExtent().height == 768 &&
-               owner.hasSwapchainConfigurationGeneration() && owner.hasSwapchainGeneration() &&
-               owner.hasSwapchainImagesGeneration() && owner.hasSwapchainPresentationTargetGeneration() &&
-               owner.hasSwapchainPresentationPipelineGeneration() && owner.hasSwapchainFrameSlotGeneration());
+               owner.hasSwapchainConfigurationGeneration() && owner.hasSwapchainGeneration() && owner.hasSwapchainImagesGeneration() &&
+               owner.hasSwapchainPresentationTargetGeneration() && owner.hasSwapchainPresentationPipelineGeneration() &&
+               owner.hasSwapchainReadbackGeneration() && owner.hasSwapchainFrameSlotGeneration() &&
+               owner.swapchainReadbackRowBytes() == 1024 * 4 && owner.swapchainReadbackByteCount() == 1024 * 768 * 4);
 }
 
 template<>
@@ -6649,8 +6917,9 @@ void render_vulkan_instance_test_object::test<64>()
                    error.mPhase == VulkanSwapchainChainRebuildPhase::Configuration && child &&
                    child->mCode == VulkanSwapchainConfigurationAcquireCode::ResolutionFailure &&
                    !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() &&
-                   !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
-                   owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration());
+                   !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainPresentationTargetGeneration() &&
+                   !owner.hasSwapchainPresentationPipelineGeneration() && !owner.hasSwapchainReadbackGeneration() &&
+                   !owner.hasSwapchainFrameSlotGeneration() && owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration());
     }
 
     {
@@ -6665,9 +6934,10 @@ void render_vulkan_instance_test_object::test<64>()
         ensure("swapchain creation failure rolls the new configuration back with its exact error",
                error.mCode == VulkanSwapchainChainRebuildCode::ChildFailure &&
                    error.mPhase == VulkanSwapchainChainRebuildPhase::Swapchain && child &&
-                   child->mCode == VulkanSwapchainAcquireCode::ResolutionFailure &&
-                   !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() &&
-                   !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
+                   child->mCode == VulkanSwapchainAcquireCode::ResolutionFailure && !owner.hasSwapchainConfigurationGeneration() &&
+                   !owner.hasSwapchainGeneration() && !owner.hasSwapchainImagesGeneration() &&
+                   !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+                   !owner.hasSwapchainReadbackGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
                    owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration());
     }
 
@@ -6681,12 +6951,12 @@ void render_vulkan_instance_test_object::test<64>()
             owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1280, 720 })));
         const auto* child = std::get_if<VulkanSwapchainImagesAcquireError>(&error.mChildError);
         ensure("image enumeration failure rolls every partial child back with its exact error",
-               error.mCode == VulkanSwapchainChainRebuildCode::ChildFailure &&
-                   error.mPhase == VulkanSwapchainChainRebuildPhase::Images && child &&
-                   child->mCode == VulkanSwapchainImagesAcquireCode::ResolutionFailure &&
+               error.mCode == VulkanSwapchainChainRebuildCode::ChildFailure && error.mPhase == VulkanSwapchainChainRebuildPhase::Images &&
+                   child && child->mCode == VulkanSwapchainImagesAcquireCode::ResolutionFailure &&
                    !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() &&
-                   !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
-                   owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration());
+                   !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainPresentationTargetGeneration() &&
+                   !owner.hasSwapchainPresentationPipelineGeneration() && !owner.hasSwapchainReadbackGeneration() &&
+                   !owner.hasSwapchainFrameSlotGeneration() && owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration());
     }
 
     {
@@ -6701,9 +6971,10 @@ void render_vulkan_instance_test_object::test<64>()
         ensure("frame-slot resource failure rolls the rebuilt prefix back with its exact error",
                error.mCode == VulkanSwapchainChainRebuildCode::ChildFailure &&
                    error.mPhase == VulkanSwapchainChainRebuildPhase::FrameSlot && child &&
-                   child->mCode == VulkanSwapchainFrameSlotAcquireCode::ResolutionFailure &&
-                   !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() &&
-                   !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
+                   child->mCode == VulkanSwapchainFrameSlotAcquireCode::ResolutionFailure && !owner.hasSwapchainConfigurationGeneration() &&
+                   !owner.hasSwapchainGeneration() && !owner.hasSwapchainImagesGeneration() &&
+                   !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+                   !owner.hasSwapchainReadbackGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
                    owner.hasLogicalDeviceGeneration() && owner.hasSurfaceGeneration());
     }
 }
@@ -6712,14 +6983,13 @@ template<>
 template<>
 void render_vulkan_instance_test_object::test<65>()
 {
-    constexpr std::array phases{
-        VulkanSwapchainChainRebuildPhase::Configuration,
-        VulkanSwapchainChainRebuildPhase::Swapchain,
-        VulkanSwapchainChainRebuildPhase::Images,
-        VulkanSwapchainChainRebuildPhase::PresentationTarget,
-        VulkanSwapchainChainRebuildPhase::PresentationPipeline,
-        VulkanSwapchainChainRebuildPhase::FrameSlot
-    };
+    constexpr std::array phases{ VulkanSwapchainChainRebuildPhase::Configuration,
+                                 VulkanSwapchainChainRebuildPhase::Swapchain,
+                                 VulkanSwapchainChainRebuildPhase::Images,
+                                 VulkanSwapchainChainRebuildPhase::PresentationTarget,
+                                 VulkanSwapchainChainRebuildPhase::PresentationPipeline,
+                                 VulkanSwapchainChainRebuildPhase::Readback,
+                                 VulkanSwapchainChainRebuildPhase::FrameSlot };
 
     for (std::size_t failed_allocation = 1; failed_allocation <= phases.size(); ++failed_allocation)
     {
@@ -6776,6 +7046,12 @@ void render_vulkan_instance_test_object::test<65>()
                 }
                 break;
             case 6:
+                if (const auto* child = std::get_if<VulkanSwapchainReadbackAcquireError>(&error.mChildError))
+                {
+                    exact_allocation_error = child->mCode == VulkanSwapchainReadbackAcquireCode::AllocationFailure;
+                }
+                break;
+            case 7:
                 if (const auto* child = std::get_if<VulkanSwapchainFrameSlotAcquireError>(&error.mChildError))
                 {
                     exact_allocation_error = child->mCode == VulkanSwapchainFrameSlotAcquireCode::AllocationFailure;
@@ -6786,9 +7062,10 @@ void render_vulkan_instance_test_object::test<65>()
         }
         ensure("the exact nested allocation error is retained", exact_allocation_error);
         ensure("allocation rollback leaves no partial child and preserves every older parent",
-               !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() &&
-                   !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
-                   owner.surface() == surface && owner.logicalDevice() == device && owner.presentationQueue() == queue);
+               !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() && !owner.hasSwapchainImagesGeneration() &&
+                   !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+                   !owner.hasSwapchainReadbackGeneration() && !owner.hasSwapchainFrameSlotGeneration() && owner.surface() == surface &&
+                   owner.logicalDevice() == device && owner.presentationQueue() == queue);
     }
     gAllocationCheckpointCalls = 0;
     gFailAllocationCheckpoint  = 0;
@@ -6807,17 +7084,18 @@ void render_vulkan_instance_test_object::test<66>()
         const VkDevice     device  = owner.logicalDevice();
         const VkQueue      queue   = owner.presentationQueue();
 
-        state.mInstanceOwnerChecks    = 0;
-        state.mSurfaceWindowChecks    = 0;
-        state.mFailInstanceOwnerCheck = 14;
+        state.mInstanceOwnerChecks                    = 0;
+        state.mSurfaceWindowChecks                    = 0;
+        state.mFailInstanceOwnerCheck                 = 16;
         const VulkanSwapchainChainRebuildError& error = requireSwapchainChainRebuildError(
             owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1280, 720 })));
         ensure("final owner staleness rolls a fully rebuilt chain back to the stable baseline",
                error.mCode == VulkanSwapchainChainRebuildCode::StaleInstanceOwner &&
-                   error.mPhase == VulkanSwapchainChainRebuildPhase::FinalFreshness &&
-                   !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() &&
-                   !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
-                   owner.surface() == surface && owner.logicalDevice() == device && owner.presentationQueue() == queue);
+                   error.mPhase == VulkanSwapchainChainRebuildPhase::FinalFreshness && !owner.hasSwapchainConfigurationGeneration() &&
+                   !owner.hasSwapchainGeneration() && !owner.hasSwapchainImagesGeneration() &&
+                   !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+                   !owner.hasSwapchainReadbackGeneration() && !owner.hasSwapchainFrameSlotGeneration() && owner.surface() == surface &&
+                   owner.logicalDevice() == device && owner.presentationQueue() == queue);
     }
 
     {
@@ -6829,18 +7107,19 @@ void render_vulkan_instance_test_object::test<66>()
         const VkDevice     device  = owner.logicalDevice();
         const VkQueue      queue   = owner.presentationQueue();
 
-        state.mInstanceOwnerChecks                  = 0;
-        state.mSurfaceWindowChecks                  = 0;
-        state.mMutationOwner                        = &owner;
-        state.mResetFrameSlotOnInstanceOwnerCheck   = 14;
+        state.mInstanceOwnerChecks                    = 0;
+        state.mSurfaceWindowChecks                    = 0;
+        state.mMutationOwner                          = &owner;
+        state.mResetFrameSlotOnInstanceOwnerCheck     = 16;
         const VulkanSwapchainChainRebuildError& error = requireSwapchainChainRebuildError(
             owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1280, 720 })));
         ensure("final publication detects replaced child provenance and removes the remaining prefix",
                error.mCode == VulkanSwapchainChainRebuildCode::PublicationFailure &&
-                   error.mPhase == VulkanSwapchainChainRebuildPhase::FinalFreshness &&
-                   !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() &&
-                   !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
-                   owner.surface() == surface && owner.logicalDevice() == device && owner.presentationQueue() == queue);
+                   error.mPhase == VulkanSwapchainChainRebuildPhase::FinalFreshness && !owner.hasSwapchainConfigurationGeneration() &&
+                   !owner.hasSwapchainGeneration() && !owner.hasSwapchainImagesGeneration() &&
+                   !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+                   !owner.hasSwapchainReadbackGeneration() && !owner.hasSwapchainFrameSlotGeneration() && owner.surface() == surface &&
+                   owner.logicalDevice() == device && owner.presentationQueue() == queue);
     }
 }
 
@@ -7755,12 +8034,15 @@ void render_vulkan_instance_test_object::test<77>()
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainChainRebuildPhase::FinalFreshness) == 6);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainChainRebuildPhase::PresentationTarget) == 7);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainChainRebuildPhase::PresentationPipeline) == 8);
-    static_assert(std::is_same_v<std::variant_alternative_t<4, VulkanSwapchainChainRebuildChildError>,
-                                 VulkanSwapchainFrameSlotAcquireError>);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainChainRebuildPhase::Readback) == 9);
+    static_assert(
+        std::is_same_v<std::variant_alternative_t<4, VulkanSwapchainChainRebuildChildError>, VulkanSwapchainFrameSlotAcquireError>);
     static_assert(std::is_same_v<std::variant_alternative_t<5, VulkanSwapchainChainRebuildChildError>,
                                  VulkanSwapchainPresentationTargetAcquireError>);
     static_assert(std::is_same_v<std::variant_alternative_t<6, VulkanSwapchainChainRebuildChildError>,
                                  VulkanSwapchainPresentationPipelineAcquireError>);
+    static_assert(
+        std::is_same_v<std::variant_alternative_t<7, VulkanSwapchainChainRebuildChildError>, VulkanSwapchainReadbackAcquireError>);
     static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().hasSwapchainPresentationTargetGeneration()));
     static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().swapchainPresentationRenderPass()));
     static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().swapchainPresentationFramebuffer(0)));
@@ -8883,6 +9165,222 @@ void render_vulkan_instance_test_object::test<96>()
                    reset.mOwnerChecks == 2 && reset.mWindowChecks == 2 && reset.mResetSucceeded && owner.instance() == VK_NULL_HANDLE &&
                    state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 && state.mDrawCalls == 0);
     }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<97>()
+{
+    static_assert(std::is_same_v<decltype(std::declval<VulkanInstanceGeneration&>().acquireSwapchainReadbackGeneration(
+                                     std::declval<const VulkanSwapchainReadbackRequest&>())),
+                                 VulkanSwapchainReadbackAcquireResult>);
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().acquireSwapchainReadbackGeneration(
+        std::declval<const VulkanSwapchainReadbackRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().resetSwapchainReadbackGeneration()));
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSwapchainImagesChain(state, owner);
+
+    ensure("readback acquisition is independent of presentation target, pipeline, and frame-slot ownership",
+           !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+               !owner.hasSwapchainFrameSlotGeneration() &&
+               !owner.acquireSwapchainReadbackGeneration(makeSwapchainReadbackRequest(state, owner, { 800, 600 })));
+    ensure("the exact mapped destination and byte-layout metadata are published",
+           owner.hasSwapchainReadbackGeneration() && owner.swapchainReadbackBuffer() == state.mReadbackBuffer &&
+               owner.swapchainReadbackMemory() == state.mReadbackMemory &&
+               owner.swapchainReadbackIsMapped() &&
+               owner.swapchainReadbackImageFormat() == VK_FORMAT_B8G8R8A8_UNORM && owner.swapchainReadbackImageExtent().width == 800 &&
+               owner.swapchainReadbackImageExtent().height == 600 && owner.swapchainReadbackImageCount() == state.mSwapchainImages.size() &&
+               owner.swapchainReadbackRowBytes() == 800 * 4 && owner.swapchainReadbackByteCount() == 800 * 600 * 4 &&
+               owner.swapchainReadbackAllocationSize() == state.mReadbackMemoryRequirements.size &&
+               owner.swapchainReadbackMemoryTypeIndex() == 0 &&
+               owner.swapchainReadbackMemoryPropertyFlags() ==
+                   (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+    ensure("the parent creates one exact transfer destination and maps its whole allocation",
+           state.mMemoryPropertiesCalls == 1 && state.mCreateBufferCalls == 1 &&
+               state.mReadbackBufferCreateInfo.sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &&
+               state.mReadbackBufferCreateInfo.size == 800 * 600 * 4 &&
+               state.mReadbackBufferCreateInfo.usage == VK_BUFFER_USAGE_TRANSFER_DST_BIT &&
+               state.mReadbackBufferCreateInfo.sharingMode == VK_SHARING_MODE_EXCLUSIVE && state.mAllocateMemoryCalls == 1 &&
+               state.mReadbackMemoryAllocateInfo.sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &&
+               state.mReadbackMemoryAllocateInfo.allocationSize == state.mReadbackMemoryRequirements.size &&
+               state.mReadbackMemoryAllocateInfo.memoryTypeIndex == 0 && state.mBindBufferMemoryCalls == 1 &&
+               state.mReadbackBoundBuffer == state.mReadbackBuffer && state.mReadbackBoundMemory == state.mReadbackMemory &&
+               state.mReadbackBindOffset == 0 && state.mMapMemoryCalls == 1 && state.mMappedMemory == state.mReadbackMemory &&
+               state.mMappedOffset == 0 && state.mMappedSize == VK_WHOLE_SIZE);
+    ensureSwapchainReadbackCode(owner.acquireSwapchainReadbackGeneration(makeSwapchainReadbackRequest(state, owner, { 800, 600 })),
+                                VulkanSwapchainReadbackAcquireCode::SwapchainReadbackAlreadyOwned);
+    ensure_equals("duplicate acquisition performs no second native creation", state.mCreateBufferCalls, std::size_t{ 1 });
+
+    ensure(
+        "the independent presentation siblings can be added around the readback owner",
+        !owner.acquireSwapchainPresentationTargetGeneration(makeSwapchainPresentationTargetRequest(state, owner, { 800, 600 })) &&
+            !owner.acquireSwapchainPresentationPipelineGeneration(makeSwapchainPresentationPipelineRequest(state, owner, { 800, 600 })) &&
+            !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, { 800, 600 })));
+    VulkanInstanceGeneration moved(std::move(owner));
+    ensure("move construction transfers readback provenance without recreating native resources",
+           owner.instance() == VK_NULL_HANDLE && moved.hasSwapchainReadbackGeneration() &&
+               moved.swapchainReadbackBuffer() == state.mReadbackBuffer && moved.hasSwapchainPresentationTargetGeneration() &&
+               moved.hasSwapchainPresentationPipelineGeneration() && moved.hasSwapchainFrameSlotGeneration() &&
+               state.mCreateBufferCalls == 1);
+
+    state.mEvents.clear();
+    ensure("explicit readback reset preserves every independent sibling and exact image parent",
+           moved.resetSwapchainReadbackGeneration() && !moved.hasSwapchainReadbackGeneration() && moved.hasSwapchainImagesGeneration() &&
+               moved.hasSwapchainPresentationTargetGeneration() && moved.hasSwapchainPresentationPipelineGeneration() &&
+               moved.hasSwapchainFrameSlotGeneration());
+    const auto unmap   = std::find(state.mEvents.begin(), state.mEvents.end(), Event::UnmapMemory);
+    const auto destroy = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyBuffer);
+    const auto free    = std::find(state.mEvents.begin(), state.mEvents.end(), Event::FreeMemory);
+    ensure("readback reset destroys its persistent mapping, buffer, then memory exactly once",
+           state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 && state.mFreeMemoryCalls == 1 && unmap != state.mEvents.end() &&
+               destroy != state.mEvents.end() && free != state.mEvents.end() && unmap < destroy && destroy < free &&
+               moved.resetSwapchainReadbackGeneration() && state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 &&
+               state.mFreeMemoryCalls == 1 && moved.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<98>()
+{
+    {
+        FakeState                      state;
+        ScopedFakeState                scope(state);
+        VulkanInstanceGeneration       owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        VulkanSwapchainReadbackRequest request{};
+        ensureSwapchainReadbackCode(owner.acquireSwapchainReadbackGeneration(request),
+                                    VulkanSwapchainReadbackAcquireCode::InvalidInstanceOwnerCheck);
+        request                        = makeSwapchainReadbackRequest(state, owner);
+        request.mWindowGenerationCheck = {};
+        ensureSwapchainReadbackCode(owner.acquireSwapchainReadbackGeneration(request),
+                                    VulkanSwapchainReadbackAcquireCode::InvalidWindowGenerationCheck);
+        request                         = makeSwapchainReadbackRequest(state, owner);
+        request.mNativeWindowGeneration = 0;
+        ensureSwapchainReadbackCode(owner.acquireSwapchainReadbackGeneration(request),
+                                    VulkanSwapchainReadbackAcquireCode::InvalidNativeWindowGeneration);
+        request                 = makeSwapchainReadbackRequest(state, owner);
+        request.mDrawableExtent = {};
+        ensureSwapchainReadbackCode(owner.acquireSwapchainReadbackGeneration(request),
+                                    VulkanSwapchainReadbackAcquireCode::InvalidDrawableExtent);
+        ensure("invalid readback requests perform no native mutation", state.mCreateBufferCalls == 0 && owner.reset());
+    }
+
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireSwapchainImagesChain(state, owner);
+        state.mMissing = MissingCommand::UnmapMemory;
+        const VulkanSwapchainReadbackAcquireResult result =
+            owner.acquireSwapchainReadbackGeneration(makeSwapchainReadbackRequest(state, owner));
+        const VulkanSwapchainReadbackAcquireError& error = requireSwapchainReadbackError(result);
+        ensure("a missing readback command retains exact nested provenance before native mutation",
+               error.mCode == VulkanSwapchainReadbackAcquireCode::ResolutionFailure && error.mResolutionError &&
+                   error.mResolutionError->mCode == VulkanSwapchainReadbackResolutionCode::MissingRequiredCommand &&
+                   error.mResolutionError->mCommand == VulkanSwapchainReadbackCommand::UnmapMemory && state.mCreateBufferCalls == 0 &&
+                   !owner.hasSwapchainReadbackGeneration() && owner.hasSwapchainImagesGeneration() && owner.reset());
+    }
+
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireSwapchainImagesChain(state, owner);
+        state.mInstanceOwnerCurrent = false;
+        ensureSwapchainReadbackCode(owner.acquireSwapchainReadbackGeneration(makeSwapchainReadbackRequest(state, owner)),
+                                    VulkanSwapchainReadbackAcquireCode::StaleInstanceOwner);
+        ensure("stale parent ownership is rejected before any readback-native mutation",
+               state.mCreateBufferCalls == 0 && !owner.hasSwapchainReadbackGeneration());
+        state.mInstanceOwnerCurrent = true;
+        ensureSwapchainReadbackCode(
+            VulkanInstanceDetail::acquireSwapchainReadback(owner, makeSwapchainReadbackRequest(state, owner), failAllocation),
+            VulkanSwapchainReadbackAcquireCode::AllocationFailure);
+        ensure("publication allocation failure rolls the mapped candidate back while preserving its image parent",
+               !owner.hasSwapchainReadbackGeneration() && owner.hasSwapchainImagesGeneration() && state.mCreateBufferCalls == 1 &&
+                   state.mAllocateMemoryCalls == 1 && state.mMapMemoryCalls == 1 && state.mUnmapMemoryCalls == 1 &&
+                   state.mDestroyBufferCalls == 1 && state.mFreeMemoryCalls == 1 && owner.reset());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<99>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner);
+    const VkSurfaceKHR surface                        = owner.surface();
+    const VkDevice     device                         = owner.logicalDevice();
+    const std::size_t  created_buffers_before_rebuild = state.mCreateBufferCalls;
+
+    state.mMissing                               = MissingCommand::UnmapMemory;
+    const VulkanSwapchainChainRebuildError error = requireSwapchainChainRebuildError(
+        owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1280, 720 })));
+    const auto* child = std::get_if<VulkanSwapchainReadbackAcquireError>(&error.mChildError);
+    ensure("aggregate rebuild reports the exact readback phase and nested missing command",
+           error.mCode == VulkanSwapchainChainRebuildCode::ChildFailure && error.mPhase == VulkanSwapchainChainRebuildPhase::Readback &&
+               child && child->mCode == VulkanSwapchainReadbackAcquireCode::ResolutionFailure && child->mResolutionError &&
+               child->mResolutionError->mCode == VulkanSwapchainReadbackResolutionCode::MissingRequiredCommand &&
+               child->mResolutionError->mCommand == VulkanSwapchainReadbackCommand::UnmapMemory);
+    ensure("readback-phase rollback removes the rebuilt prefix while retaining stable parents",
+           owner.surface() == surface && owner.logicalDevice() == device && owner.hasLogicalDeviceGeneration() &&
+               !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() && !owner.hasSwapchainImagesGeneration() &&
+               !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+               !owner.hasSwapchainReadbackGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
+               state.mCreateBufferCalls == created_buffers_before_rebuild);
+
+    state.mMissing = MissingCommand::None;
+    ensureSwapchainChainRebuildOutcome(owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1280, 720 })),
+                                       VulkanSwapchainChainRebuildOutcome::Ready);
+    ensure("a clean retry publishes readback between the independent pipeline and frame slot",
+           owner.hasSwapchainPresentationPipelineGeneration() && owner.hasSwapchainReadbackGeneration() &&
+               owner.hasSwapchainFrameSlotGeneration() && owner.swapchainReadbackImageExtent().width == 1280 &&
+               owner.swapchainReadbackImageExtent().height == 720 && owner.swapchainReadbackRowBytes() == 1280 * 4 &&
+               owner.swapchainReadbackByteCount() == 1280 * 720 * 4 && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<100>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSwapchainImagesChain(state, owner);
+
+    std::vector<VkImage>     original_images;
+    std::vector<VkImageView> original_views;
+    for (std::uint32_t index = 0; index < owner.resolvedSwapchainImageCount(); ++index)
+    {
+        original_images.push_back(owner.swapchainImage(index));
+        original_views.push_back(owner.swapchainImageView(index));
+    }
+
+    ReadbackParentAbaContext             replacement{ &state, &owner };
+    const VulkanSwapchainReadbackRequest request{ owner.nativeWindowGeneration(),
+                                                  owner.swapchainDrawableExtent(),
+                                                  { &replacement, readbackParentAbaOwnerIsCurrent },
+                                                  { &replacement, readbackParentAbaWindowIsCurrent } };
+    ensureSwapchainReadbackCode(owner.acquireSwapchainReadbackGeneration(request),
+                                VulkanSwapchainReadbackAcquireCode::SwapchainImagesNotLive);
+
+    bool same_looking_images = owner.resolvedSwapchainImageCount() == original_images.size();
+    for (std::size_t index = 0; same_looking_images && index < original_images.size(); ++index)
+    {
+        same_looking_images = owner.swapchainImage(static_cast<std::uint32_t>(index)) == original_images[index] &&
+                              owner.swapchainImageView(static_cast<std::uint32_t>(index)) == original_views[index];
+    }
+    ensure("the readback callback replaces and reacquires its image parent with the same-looking Vulkan handles",
+           replacement.mOwnerChecks == 1 && replacement.mWindowChecks == 0 && replacement.mReset && replacement.mReacquired &&
+               owner.hasSwapchainImagesGeneration() && same_looking_images && state.mCreateImageViewCalls == 2 * original_views.size() &&
+               state.mDestroyImageViewCalls == original_views.size());
+    ensure("the image-parent epoch rejects stale readback publication before any readback-native mutation",
+           !owner.hasSwapchainReadbackGeneration() && state.mMemoryPropertiesCalls == 0 && state.mCreateBufferCalls == 0 &&
+               state.mAllocateMemoryCalls == 0 && state.mBindBufferMemoryCalls == 0 && state.mMapMemoryCalls == 0 &&
+               state.mUnmapMemoryCalls == 0 && state.mDestroyBufferCalls == 0 && state.mFreeMemoryCalls == 0 && owner.reset());
 }
 
 } // namespace tut

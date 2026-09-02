@@ -97,24 +97,20 @@ struct FakeState
     VkSwapchainKHR   mSwapchain      = fakeHandle<VkSwapchainKHR>(0x6000);
     std::uint32_t    mQueueFamily    = 2;
 
-    VkSurfaceCapabilitiesKHR mCapabilities{
-        2,
-        0,
-        { std::numeric_limits<std::uint32_t>::max(), std::numeric_limits<std::uint32_t>::max() },
-        { 64, 64 },
-        { 4096, 2160 },
-        1,
-        VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
-        VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
-        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
-    };
-    std::array<VkSurfaceFormatKHR, 1> mFormats{
-        VkSurfaceFormatKHR{ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR }
-    };
-    std::array<VkPresentModeKHR, 1> mPresentModes{ VK_PRESENT_MODE_FIFO_KHR };
-    std::array<VkImage, 3>          mImages{ fakeHandle<VkImage>(0x7100), fakeHandle<VkImage>(0x7200),
-                                             fakeHandle<VkImage>(0x7300) };
+    VkSurfaceCapabilitiesKHR          mCapabilities{ 2,
+                                            0,
+                                                     { std::numeric_limits<std::uint32_t>::max(), std::numeric_limits<std::uint32_t>::max() },
+                                                     { 64, 64 },
+                                                     { 4096, 2160 },
+                                            1,
+                                            VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+                                            VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+                                            VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT };
+    std::array<VkSurfaceFormatKHR, 1> mFormats{ VkSurfaceFormatKHR{ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR } };
+    std::array<VkPresentModeKHR, 1>   mPresentModes{ VK_PRESENT_MODE_FIFO_KHR };
+    std::array<VkImage, 3>            mImages{ fakeHandle<VkImage>(0x7100), fakeHandle<VkImage>(0x7200), fakeHandle<VkImage>(0x7300) };
 
     MissingCommand           mMissingCommand = MissingCommand::None;
     std::vector<std::string> mInstanceLookups;
@@ -405,8 +401,9 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFormatProperties(VkPhysicalDevic
 {
     if (gFakeState && physical_device == gFakeState->mPhysicalDevice && format == gFakeState->mFormats[0].format && properties)
     {
-        *properties                       = {};
-        properties->optimalTilingFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        *properties = {};
+        properties->optimalTilingFeatures =
+            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
     }
 }
 

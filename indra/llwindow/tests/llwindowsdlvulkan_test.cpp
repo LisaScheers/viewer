@@ -92,12 +92,17 @@ struct FakeState
         mSurfaceCapabilities.currentTransform    = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         mSurfaceCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         mSurfaceCapabilities.supportedUsageFlags =
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         mFormatProperties.optimalTilingFeatures =
-            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+        mMemoryProperties.memoryHeapCount              = 1;
+        mMemoryProperties.memoryHeaps[0].size          = 64 * 1024 * 1024;
+        mMemoryProperties.memoryTypeCount              = 1;
+        mMemoryProperties.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        mMemoryProperties.memoryTypes[0].heapIndex     = 0;
     }
 
-    std::array<Event, 32>              mEvents{};
+    std::array<Event, 48>              mEvents{};
     std::size_t                        mEventCount                 = 0;
     Failure                            mFailure                    = Failure::None;
     int                                mExplicitLoaderReferences   = 0;
@@ -160,12 +165,23 @@ struct FakeState
     std::size_t                mDestroyShaderModuleCalls    = 0;
     std::size_t                mCreatePipelineLayoutCalls   = 0;
     std::size_t                mDestroyPipelineLayoutCalls = 0;
-    std::size_t                mCreateGraphicsPipelineCalls = 0;
-    std::size_t                mDestroyPipelineCalls        = 0;
-    VkPipelineLayout           mLastPipelineLayout           = VK_NULL_HANDLE;
-    VkCommandPool              mCommandPool             = reinterpret_cast<VkCommandPool>(static_cast<std::uintptr_t>(0x71000));
-    VkCommandBuffer            mCommandBuffer           = reinterpret_cast<VkCommandBuffer>(static_cast<std::uintptr_t>(0x72000));
-    VkSemaphore                mImageAvailableSemaphore = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x73000));
+    std::size_t                      mCreateGraphicsPipelineCalls = 0;
+    std::size_t                      mDestroyPipelineCalls        = 0;
+    VkPipelineLayout                 mLastPipelineLayout          = VK_NULL_HANDLE;
+    VkPhysicalDeviceMemoryProperties mMemoryProperties{};
+    VkBuffer                         mReadbackBuffer             = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x81000));
+    VkDeviceMemory                   mReadbackMemory             = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x82000));
+    std::uint8_t                     mReadbackMappedByte         = 0;
+    VkDeviceSize                     mReadbackBufferSize         = 0;
+    std::size_t                      mCreateBufferCalls          = 0;
+    std::size_t                      mAllocateMemoryCalls        = 0;
+    std::size_t                      mMapMemoryCalls             = 0;
+    std::size_t                      mUnmapMemoryCalls           = 0;
+    std::size_t                      mDestroyBufferCalls         = 0;
+    std::size_t                      mFreeMemoryCalls            = 0;
+    VkCommandPool                    mCommandPool                = reinterpret_cast<VkCommandPool>(static_cast<std::uintptr_t>(0x71000));
+    VkCommandBuffer                  mCommandBuffer              = reinterpret_cast<VkCommandBuffer>(static_cast<std::uintptr_t>(0x72000));
+    VkSemaphore                      mImageAvailableSemaphore    = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x73000));
     VkFence                    mSubmissionFence         = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x74000));
     VkSemaphore                mPresentationReadySemaphore = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x75000));
     VkFence                    mPresentCompletionFence     = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x76000));
@@ -1069,6 +1085,96 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device, const
     return gVulkanState->mReleaseSwapchainImagesResult;
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceMemoryProperties(VkPhysicalDevice                  physical_device,
+                                                                 VkPhysicalDeviceMemoryProperties* properties) noexcept
+{
+    if (gVulkanState && physical_device == gVulkanState->mPhysicalDevice && properties)
+    {
+        *properties = gVulkanState->mMemoryProperties;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice,
+                                                const VkBufferCreateInfo* create_info,
+                                                const VkAllocationCallbacks*,
+                                                VkBuffer* buffer) noexcept
+{
+    if (!gVulkanState || !create_info || !buffer)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateBufferCalls;
+    gVulkanState->mReadbackBufferSize = create_info->size;
+    *buffer                           = gVulkanState->mReadbackBuffer;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice, VkBuffer buffer, const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && buffer == gVulkanState->mReadbackBuffer)
+    {
+        ++gVulkanState->mDestroyBufferCalls;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice, VkBuffer buffer, VkMemoryRequirements* requirements) noexcept
+{
+    if (gVulkanState && buffer == gVulkanState->mReadbackBuffer && requirements)
+    {
+        *requirements = { gVulkanState->mReadbackBufferSize, 256, 1 };
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice,
+                                                  const VkMemoryAllocateInfo* allocate_info,
+                                                  const VkAllocationCallbacks*,
+                                                  VkDeviceMemory* memory) noexcept
+{
+    if (!gVulkanState || !allocate_info || !memory || allocate_info->allocationSize < gVulkanState->mReadbackBufferSize ||
+        allocate_info->memoryTypeIndex != 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mAllocateMemoryCalls;
+    *memory = gVulkanState->mReadbackMemory;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && memory == gVulkanState->mReadbackMemory)
+    {
+        ++gVulkanState->mFreeMemoryCalls;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset) noexcept
+{
+    return gVulkanState && buffer == gVulkanState->mReadbackBuffer && memory == gVulkanState->mReadbackMemory && offset == 0
+               ? VK_SUCCESS
+               : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+    fakeMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** data) noexcept
+{
+    if (!gVulkanState || memory != gVulkanState->mReadbackMemory || offset != 0 || size != VK_WHOLE_SIZE || flags != 0 || !data)
+    {
+        return VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    ++gVulkanState->mMapMemoryCalls;
+    *data = &gVulkanState->mReadbackMappedByte;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice, VkDeviceMemory memory) noexcept
+{
+    if (gVulkanState && memory == gVulkanState->mReadbackMemory)
+    {
+        ++gVulkanState->mUnmapMemoryCalls;
+    }
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
 {
     if (!gVulkanState || device != gVulkanState->mDevice || !name)
@@ -1124,6 +1230,14 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
         return eraseFunctionType(fakeReleaseSwapchainImages);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateBuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyBuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(GetBufferMemoryRequirements);
+    LL_SDL_VULKAN_DEVICE_COMMAND(AllocateMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(FreeMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(BindBufferMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(MapMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(UnmapMemory);
 #undef LL_SDL_VULKAN_DEVICE_COMMAND
     return nullptr;
 }
@@ -1164,6 +1278,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeGetPhysicalDeviceProperties);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceFormatProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceMemoryProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceMemoryProperties);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceQueueFamilyProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceQueueFamilyProperties);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0)
@@ -1394,7 +1510,7 @@ bool acquireCompleteFrameSlot(LLWindowSDLVulkan& owner) noexcept
            !owner.acquireSurfaceGeneration() && !owner.acquirePresentationDeviceGeneration() && !owner.acquireLogicalDeviceGeneration() &&
            !owner.acquireSwapchainConfigurationGeneration() && !owner.acquireSwapchainGeneration() &&
            !owner.acquireSwapchainImagesGeneration() && !owner.acquireSwapchainPresentationTargetGeneration() &&
-           !owner.acquireSwapchainPresentationPipelineGeneration() &&
+           !owner.acquireSwapchainPresentationPipelineGeneration() && !owner.acquireSwapchainReadbackGeneration() &&
            !owner.acquireSwapchainFrameSlotGeneration();
 }
 
@@ -1438,6 +1554,11 @@ void window_sdl_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainPresentationPipelineGeneration()),
                                  LLRenderVulkan::VulkanSwapchainPresentationPipelineAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainPresentationPipelineGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainReadbackGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainReadbackAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainReadbackGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().resetSwapchainReadbackGeneration()), bool>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainReadbackGeneration()));
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainFrameSlotGeneration()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainFrameSlotGeneration()));
@@ -3079,6 +3200,68 @@ void window_sdl_vulkan_object::test<24>()
                state.mSetViewportCalls == 1 && state.mSetScissorCalls == 1 && state.mDrawCalls == 1);
 
     ensure("the diagnostic draw fixture tears down child-first", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<25>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 213, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("readback adapter fixture acquires its SDL owner", owner != nullptr);
+
+    const VulkanSwapchainReadbackAcquireResult missing_instance = owner->acquireSwapchainReadbackGeneration();
+    ensure("readback requires a live instance before sampling SDL backing pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainReadbackAcquireCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("readback fixture acquires the exact chain through swapchain images",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
+               !owner->acquireSurfaceGeneration() && !owner->acquirePresentationDeviceGeneration() &&
+               !owner->acquireLogicalDeviceGeneration() && !owner->acquireSwapchainConfigurationGeneration() &&
+               !owner->acquireSwapchainGeneration() && !owner->acquireSwapchainImagesGeneration());
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("the readback owner is absent before explicit acquisition",
+           instance && !instance->hasSwapchainReadbackGeneration() && !owner->resetSwapchainReadbackGeneration());
+
+    const std::size_t drawable_queries                         = state.mDrawableSizeCalls;
+    state.mDrawableSizeSucceeds                                = false;
+    const VulkanSwapchainReadbackAcquireResult failed_geometry = owner->acquireSwapchainReadbackGeneration();
+    ensure("readback rejects a failed backing-pixel sample without native mutation",
+           failed_geometry && failed_geometry->mCode == VulkanSwapchainReadbackAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == drawable_queries + 1 && state.mCreateBufferCalls == 0);
+    state.mDrawableSizeSucceeds = true;
+
+    ensure("readback acquisition depends on images but not presentation target or pipeline",
+           !owner->acquireSwapchainReadbackGeneration() && instance->hasSwapchainReadbackGeneration() &&
+               !instance->hasSwapchainPresentationTargetGeneration() && !instance->hasSwapchainPresentationPipelineGeneration());
+    ensure("the SDL adapter publishes exact mapped readback metadata",
+           instance->swapchainReadbackBuffer() == state.mReadbackBuffer && instance->swapchainReadbackMemory() == state.mReadbackMemory &&
+               instance->swapchainReadbackIsMapped() &&
+               instance->swapchainReadbackImageFormat() == VK_FORMAT_B8G8R8A8_UNORM &&
+               instance->swapchainReadbackImageExtent().width == 1280 && instance->swapchainReadbackImageExtent().height == 720 &&
+               instance->swapchainReadbackImageCount() == 3 && instance->swapchainReadbackRowBytes() == 1280 * 4 &&
+               instance->swapchainReadbackByteCount() == 1280 * 720 * 4 &&
+               instance->swapchainReadbackAllocationSize() >= instance->swapchainReadbackByteCount() &&
+               (instance->swapchainReadbackMemoryPropertyFlags() &
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                   (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+
+    const VulkanSwapchainReadbackAcquireResult duplicate = owner->acquireSwapchainReadbackGeneration();
+    ensure("duplicate readback acquisition is typed and performs no second mutation",
+           duplicate && duplicate->mCode == VulkanSwapchainReadbackAcquireCode::SwapchainReadbackAlreadyOwned &&
+               state.mCreateBufferCalls == 1 && state.mAllocateMemoryCalls == 1 && state.mMapMemoryCalls == 1);
+    ensure("explicit readback reset unmaps, destroys, and frees without disturbing images",
+           owner->resetSwapchainReadbackGeneration() && !instance->hasSwapchainReadbackGeneration() &&
+               instance->hasSwapchainImagesGeneration() && state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 &&
+               state.mFreeMemoryCalls == 1 && !owner->resetSwapchainReadbackGeneration());
+    ensure("the independent frame-slot sibling remains legal without readback",
+           !owner->acquireSwapchainFrameSlotGeneration() && instance->hasSwapchainFrameSlotGeneration());
+    ensure("readback adapter fixture tears down its retained chain", owner->reset());
 }
 
 } // namespace tut

@@ -67,7 +67,9 @@ enum class VulkanSwapchainConfigurationResolutionCode : std::uint8_t
     SelectedFormatTransferDestinationUnsupported,
     SelectedFormatColorAttachmentUnsupported,
     SelectedImageExtentExceedsFramebufferLimits,
-    SelectedImageExtentExceedsViewportLimits
+    SelectedImageExtentExceedsViewportLimits,
+    SurfaceTransferSourceUsageUnsupported,
+    SelectedFormatTransferSourceUnsupported
 };
 
 struct VulkanSwapchainConfigurationResolutionError
@@ -109,12 +111,12 @@ public:
     std::uint32_t                   imageArrayLayers() const noexcept { return 1; }
     VkImageUsageFlags imageUsage() const noexcept
     {
-        return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     }
     VkSharingMode                   imageSharingMode() const noexcept { return VK_SHARING_MODE_EXCLUSIVE; }
     VkSurfaceTransformFlagBitsKHR   preTransform() const noexcept { return mPreTransform; }
     VkCompositeAlphaFlagBitsKHR     compositeAlpha() const noexcept { return mCompositeAlpha; }
-    VkBool32                        clipped() const noexcept { return VK_TRUE; }
+    VkBool32                        clipped() const noexcept { return VK_FALSE; }
 
     bool createdFor(const VulkanPhysicalDeviceGeneration& physical_device_generation,
                     const VulkanLogicalDeviceGeneration&  logical_device_generation,

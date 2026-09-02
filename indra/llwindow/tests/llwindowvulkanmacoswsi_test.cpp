@@ -262,9 +262,9 @@ void window_vulkan_macos_wsi_object::test<1>()
     const VkSurfaceCapabilitiesKHR capabilities    = instance_generation->swapchainSurfaceCapabilities();
     const VkExtent2D               image_extent    = instance_generation->swapchainImageExtent();
     const VkExtent2D               expected_extent = expectedImageExtent(capabilities, drawable_extent);
-    constexpr VkImageUsageFlags expected_image_usage =
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    ensure("the MoltenVK surface admits the exact color-attachment and transfer-destination usage",
+    constexpr VkImageUsageFlags    expected_image_usage =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ensure("the MoltenVK surface admits the exact color-attachment, transfer-destination, and transfer-source usage",
            (capabilities.supportedUsageFlags & expected_image_usage) == expected_image_usage);
     ensure("the MoltenVK create-ready configuration follows exact clear-capable policy",
            instance_generation->swapchainPresentMode() == VK_PRESENT_MODE_FIFO_KHR &&
@@ -275,7 +275,7 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->swapchainImageSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
                instance_generation->swapchainPreTransform() == capabilities.currentTransform &&
                instance_generation->swapchainCompositeAlpha() == expectedCompositeAlpha(capabilities.supportedCompositeAlpha) &&
-               instance_generation->swapchainClipped() == VK_TRUE);
+               instance_generation->swapchainClipped() == VK_FALSE);
     ensure("swapchain configuration creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("swapchain configuration leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
@@ -341,13 +341,33 @@ void window_vulkan_macos_wsi_object::test<1>()
            instance_generation->swapchainPresentationPipelineLayout() != VK_NULL_HANDLE &&
                instance_generation->swapchainPresentationPipeline() != VK_NULL_HANDLE);
     ensure("the presentation pipeline retains its current Retina backing-pixel chain",
-           owner->refreshNativeGeometry() && owner->drawableWidth() == BACKING_WIDTH &&
-               owner->drawableHeight() == BACKING_HEIGHT && owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION));
-    ensure_equals("presentation-pipeline acquisition emits no validation messages",
-                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+           owner->refreshNativeGeometry() && owner->drawableWidth() == BACKING_WIDTH && owner->drawableHeight() == BACKING_HEIGHT &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION));
+    ensure_equals("presentation-pipeline acquisition emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
     ensure("presentation-pipeline acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("presentation-pipeline acquisition leaves the OpenGL manager unchanged", gGLManager.mInited,
-                  initial_gl_manager);
+    ensure_equals("presentation-pipeline acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const auto readback_error = owner->acquireSwapchainReadbackGeneration();
+    ensure("the exact swapchain-image chain creates one coherent mapped readback destination", !readback_error.has_value());
+    ensure("the instance parent owns one readback generation with exact swapchain-image metadata",
+           instance_generation->hasSwapchainReadbackGeneration() && instance_generation->swapchainReadbackBuffer() != VK_NULL_HANDLE &&
+               instance_generation->swapchainReadbackMemory() != VK_NULL_HANDLE &&
+               instance_generation->swapchainReadbackIsMapped() &&
+               instance_generation->swapchainReadbackImageFormat() == surface_format.format &&
+               instance_generation->swapchainReadbackImageExtent().width == image_extent.width &&
+               instance_generation->swapchainReadbackImageExtent().height == image_extent.height &&
+               instance_generation->swapchainReadbackImageCount() == resolved_image_count &&
+               instance_generation->swapchainReadbackRowBytes() == static_cast<VkDeviceSize>(image_extent.width) * 4 &&
+               instance_generation->swapchainReadbackByteCount() ==
+                   static_cast<VkDeviceSize>(image_extent.width) * image_extent.height * 4 &&
+               (instance_generation->swapchainReadbackMemoryPropertyFlags() &
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                   (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+    ensure_equals("readback acquisition emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("readback acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("readback acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     const auto frame_slot_error = owner->acquireSwapchainFrameSlotGeneration();
     ensure("the exact swapchain-image chain creates one idle frame slot", !frame_slot_error.has_value());
@@ -437,14 +457,12 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("the current Cocoa owner rebuilds the complete swapchain-dependent chain",
            rebuild_outcome && *rebuild_outcome == LLRenderVulkan::VulkanSwapchainChainRebuildOutcome::Ready &&
                instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
-               instance_generation->hasSwapchainImagesGeneration() &&
-               instance_generation->hasSwapchainPresentationTargetGeneration() &&
-               instance_generation->hasSwapchainPresentationPipelineGeneration() &&
+               instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->hasSwapchainPresentationPipelineGeneration() && instance_generation->hasSwapchainReadbackGeneration() &&
                instance_generation->hasSwapchainFrameSlotGeneration());
     const VkExtent2D rebuilt_drawable_extent = instance_generation->swapchainDrawableExtent();
     ensure("the rebuilt configuration authenticates the changed Cocoa backing extent",
-           rebuilt_drawable_extent.width == REBUILT_BACKING_WIDTH &&
-               rebuilt_drawable_extent.height == REBUILT_BACKING_HEIGHT &&
+           rebuilt_drawable_extent.width == REBUILT_BACKING_WIDTH && rebuilt_drawable_extent.height == REBUILT_BACKING_HEIGHT &&
                owner->drawableWidth() == rebuilt_drawable_extent.width && owner->drawableHeight() == rebuilt_drawable_extent.height &&
                instance_generation->swapchainImageUsage() == expected_image_usage);
     ensure("same-surface rebuild retains every older Vulkan parent and borrowed queue",
@@ -461,11 +479,26 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->swapchainPresentationFramebuffer(0) != VK_NULL_HANDLE &&
                instance_generation->swapchainPresentationPipelineLayout() != VK_NULL_HANDLE &&
                instance_generation->swapchainPresentationPipeline() != VK_NULL_HANDLE &&
+               instance_generation->swapchainReadbackBuffer() != VK_NULL_HANDLE &&
+               instance_generation->swapchainReadbackMemory() != VK_NULL_HANDLE &&
+               instance_generation->swapchainReadbackIsMapped() &&
                instance_generation->swapchainFrameCommandBuffer() != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameImageAvailableSemaphore() != VK_NULL_HANDLE &&
                instance_generation->swapchainFramePresentationReadySemaphore() != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameSubmissionFence() != VK_NULL_HANDLE &&
                instance_generation->swapchainFramePresentCompletionFence() != VK_NULL_HANDLE);
+    const VkExtent2D rebuilt_image_extent = instance_generation->swapchainImageExtent();
+    ensure("the rebuilt readback destination follows the changed swapchain image extent",
+           instance_generation->swapchainReadbackImageFormat() == instance_generation->swapchainSurfaceFormat().format &&
+               instance_generation->swapchainReadbackImageExtent().width == rebuilt_image_extent.width &&
+               instance_generation->swapchainReadbackImageExtent().height == rebuilt_image_extent.height &&
+               instance_generation->swapchainReadbackImageCount() == resolved_image_count &&
+               instance_generation->swapchainReadbackRowBytes() == static_cast<VkDeviceSize>(rebuilt_image_extent.width) * 4 &&
+               instance_generation->swapchainReadbackByteCount() ==
+                   static_cast<VkDeviceSize>(rebuilt_image_extent.width) * rebuilt_image_extent.height * 4 &&
+               (instance_generation->swapchainReadbackMemoryPropertyFlags() &
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                   (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
     ensure_equals("changed-extent rebuild emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
     ensure("changed-extent rebuild creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
@@ -537,14 +570,33 @@ void window_vulkan_macos_wsi_object::test<1>()
                !instance_generation->swapchainFrameAcquiredImageIndex());
     ensure("frame-slot reset leaves its exact image, swapchain, configuration, device, and surface parents live",
            instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() != 0 &&
-               instance_generation->hasSwapchainGeneration() && instance_generation->swapchain() != VK_NULL_HANDLE &&
-               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasLogicalDeviceGeneration() &&
-               instance_generation->logicalDevice() != VK_NULL_HANDLE && instance_generation->hasSurfaceGeneration() &&
-               instance_generation->surface() != VK_NULL_HANDLE);
+               instance_generation->hasSwapchainReadbackGeneration() && instance_generation->hasSwapchainGeneration() &&
+               instance_generation->swapchain() != VK_NULL_HANDLE && instance_generation->hasSwapchainConfigurationGeneration() &&
+               instance_generation->hasLogicalDeviceGeneration() && instance_generation->logicalDevice() != VK_NULL_HANDLE &&
+               instance_generation->hasSurfaceGeneration() && instance_generation->surface() != VK_NULL_HANDLE);
     ensure_equals("frame-slot creation and destruction emit no validation messages",
                   instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
     ensure("frame-slot reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("frame-slot reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    ensure("the native smoke explicitly resets the readback destination before the presentation pipeline",
+           owner->resetSwapchainReadbackGeneration());
+    ensure("explicit readback reset removes the mapped buffer and memory",
+           !instance_generation->hasSwapchainReadbackGeneration() && instance_generation->swapchainReadbackBuffer() == VK_NULL_HANDLE &&
+               instance_generation->swapchainReadbackMemory() == VK_NULL_HANDLE &&
+               !instance_generation->swapchainReadbackIsMapped());
+    ensure("readback reset leaves the independent target, pipeline, and every older swapchain parent live",
+           instance_generation->hasSwapchainPresentationPipelineGeneration() &&
+               instance_generation->swapchainPresentationPipeline() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainGeneration() &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasLogicalDeviceGeneration() &&
+               instance_generation->hasSurfaceGeneration());
+    ensure_equals("readback creation and destruction emit no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("readback reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("readback reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     ensure("the native smoke explicitly resets the presentation pipeline before its presentation target",
            owner->resetSwapchainPresentationPipelineGeneration());
@@ -631,6 +683,10 @@ void window_vulkan_macos_wsi_object::test<1>()
            !instance_generation->hasSwapchainPresentationPipelineGeneration() &&
                instance_generation->swapchainPresentationPipelineLayout() == VK_NULL_HANDLE &&
                instance_generation->swapchainPresentationPipeline() == VK_NULL_HANDLE);
+    ensure("surface reset leaves no readback generation or mapped destination",
+           !instance_generation->hasSwapchainReadbackGeneration() && instance_generation->swapchainReadbackBuffer() == VK_NULL_HANDLE &&
+               instance_generation->swapchainReadbackMemory() == VK_NULL_HANDLE &&
+               !instance_generation->swapchainReadbackIsMapped());
     ensure("surface reset leaves no frame-slot generation or owned frame handle",
            !instance_generation->hasSwapchainFrameSlotGeneration() && instance_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE &&
                instance_generation->swapchainFrameCommandBuffer() == VK_NULL_HANDLE &&

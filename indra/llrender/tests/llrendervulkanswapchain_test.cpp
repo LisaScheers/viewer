@@ -346,15 +346,13 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfacePresentModes(VkPhysicalDevice  phys
     return enumerate(gFakeState->mPresentModes, count, modes);
 }
 
-VKAPI_ATTR void VKAPI_CALL fakeGetFormatProperties(VkPhysicalDevice physical_device,
-                                                   VkFormat,
-                                                   VkFormatProperties* properties) noexcept
+VKAPI_ATTR void VKAPI_CALL fakeGetFormatProperties(VkPhysicalDevice physical_device, VkFormat, VkFormatProperties* properties) noexcept
 {
     if (gFakeState && physical_device == gFakeState->mPhysicalDevice && properties)
     {
-        *properties                        = {};
+        *properties = {};
         properties->optimalTilingFeatures =
-            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
     }
 }
 
@@ -513,7 +511,8 @@ void ensureExactCreateInfo(const VkSwapchainCreateInfoKHR& info, const Parents& 
                     info.imageFormat == format.format && info.imageColorSpace == format.colorSpace &&
                     info.imageExtent.width == extent.width && info.imageExtent.height == extent.height &&
                     info.imageArrayLayers == configuration.imageArrayLayers() && info.imageUsage == configuration.imageUsage() &&
-                    info.imageUsage == (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+                    info.imageUsage ==
+                        (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     tut::ensure("exclusive sharing supplies no queue-family array",
                 info.imageSharingMode == VK_SHARING_MODE_EXCLUSIVE && info.queueFamilyIndexCount == 0 &&
                     info.pQueueFamilyIndices == nullptr);
