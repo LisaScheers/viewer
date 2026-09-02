@@ -158,6 +158,7 @@ public:
     LLRenderVulkan::VulkanSwapchainAcquireResult              acquireSwapchainGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainImagesAcquireResult        acquireSwapchainImagesGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainPresentationTargetAcquireResult acquireSwapchainPresentationTargetGeneration() noexcept;
+    LLRenderVulkan::VulkanSwapchainPresentationPipelineAcquireResult acquireSwapchainPresentationPipelineGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult     acquireSwapchainFrameSlotGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainChainRebuildResult         rebuildSwapchainChain() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot() noexcept;
@@ -173,6 +174,7 @@ public:
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult    retrySwapchainFrameSlotCancellationCompletion() noexcept;
     const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
     bool                                                      resetSwapchainFrameSlotGeneration() noexcept;
+    bool                                                      resetSwapchainPresentationPipelineGeneration() noexcept;
     bool                                                      resetSwapchainPresentationTargetGeneration() noexcept;
     bool                                                      resetSwapchainImagesGeneration() noexcept;
     bool                                                      resetSwapchainGeneration() noexcept;

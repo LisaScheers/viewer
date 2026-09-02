@@ -24,6 +24,7 @@
 #include "llrendervulkanswapchainframeslot.h"
 #include "llrendervulkanswapchainimages.h"
 #include "llrendervulkanswapchainpresentationtarget.h"
+#include "llrendervulkanswapchainpresentationpipeline.h"
 
 #include <vulkan/vulkan.h>
 
@@ -430,6 +431,52 @@ struct VulkanSwapchainPresentationTargetAcquireError
 
 using VulkanSwapchainPresentationTargetAcquireResult = std::optional<VulkanSwapchainPresentationTargetAcquireError>;
 
+struct VulkanSwapchainPresentationPipelineRequest
+{
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent, native-window, and drawable-geometry changes.
+    std::uint64_t               mNativeWindowGeneration = 0;
+    VkExtent2D                  mDrawableExtent{};
+    VulkanInstanceOwnerCheck    mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck mWindowGenerationCheck;
+};
+
+enum class VulkanSwapchainPresentationPipelineAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InvalidDrawableExtent,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    SwapchainConfigurationNotLive,
+    SwapchainNotLive,
+    SwapchainImagesNotLive,
+    SwapchainPresentationTargetNotLive,
+    SwapchainPresentationPipelineAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    DrawableExtentMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanSwapchainPresentationPipelineAcquireError
+{
+    VulkanSwapchainPresentationPipelineAcquireCode                    mCode =
+        VulkanSwapchainPresentationPipelineAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanSwapchainPresentationPipelineResolutionError> mResolutionError;
+
+    friend constexpr bool operator==(const VulkanSwapchainPresentationPipelineAcquireError&,
+                                     const VulkanSwapchainPresentationPipelineAcquireError&) = default;
+};
+
+using VulkanSwapchainPresentationPipelineAcquireResult =
+    std::optional<VulkanSwapchainPresentationPipelineAcquireError>;
+
 struct VulkanSwapchainFrameSlotRequest
 {
     // These callbacks are synchronous and are not retained. The caller must
@@ -546,7 +593,8 @@ enum class VulkanSwapchainChainRebuildPhase : std::uint8_t
     Images,
     FrameSlot,
     FinalFreshness,
-    PresentationTarget
+    PresentationTarget,
+    PresentationPipeline
 };
 
 enum class VulkanSwapchainChainRebuildCode : std::uint8_t
@@ -573,7 +621,8 @@ enum class VulkanSwapchainChainRebuildCode : std::uint8_t
 using VulkanSwapchainChainRebuildChildError =
     std::variant<std::monostate, VulkanSwapchainConfigurationAcquireError, VulkanSwapchainAcquireError,
                  VulkanSwapchainImagesAcquireError, VulkanSwapchainFrameSlotAcquireError,
-                 VulkanSwapchainPresentationTargetAcquireError>;
+                 VulkanSwapchainPresentationTargetAcquireError,
+                 VulkanSwapchainPresentationPipelineAcquireError>;
 
 struct VulkanSwapchainChainRebuildError
 {
@@ -669,6 +718,9 @@ public:
     VkRenderPass                      swapchainPresentationRenderPass() const noexcept;
     std::uint32_t                     swapchainPresentationFramebufferCount() const noexcept;
     VkFramebuffer                     swapchainPresentationFramebuffer(std::uint32_t index) const noexcept;
+    bool                              hasSwapchainPresentationPipelineGeneration() const noexcept;
+    VkPipelineLayout                  swapchainPresentationPipelineLayout() const noexcept;
+    VkPipeline                        swapchainPresentationPipeline() const noexcept;
     bool                              hasSwapchainFrameSlotGeneration() const noexcept;
     VkCommandPool                     swapchainFrameCommandPool() const noexcept;
     VkCommandBuffer                   swapchainFrameCommandBuffer() const noexcept;
@@ -689,6 +741,8 @@ public:
     VulkanSwapchainImagesAcquireResult acquireSwapchainImagesGeneration(const VulkanSwapchainImagesRequest& request) noexcept;
     VulkanSwapchainPresentationTargetAcquireResult acquireSwapchainPresentationTargetGeneration(
         const VulkanSwapchainPresentationTargetRequest& request) noexcept;
+    VulkanSwapchainPresentationPipelineAcquireResult acquireSwapchainPresentationPipelineGeneration(
+        const VulkanSwapchainPresentationPipelineRequest& request) noexcept;
     VulkanSwapchainFrameSlotAcquireResult acquireSwapchainFrameSlotGeneration(const VulkanSwapchainFrameSlotRequest& request) noexcept;
     VulkanSwapchainChainRebuildResult      rebuildSwapchainChain(const VulkanSwapchainChainRebuildRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot(
@@ -712,11 +766,13 @@ public:
     VulkanSwapchainFrameSlotParentOperationResult retrySwapchainFrameSlotCancellationCompletion(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     // Callers externally serialize these resets. Resetting a presentation target
-    // first retires its frame-slot sibling, so no slot command may still use the
-    // target or images. False preserves the target and every parent; it reports
-    // either an outstanding frame obligation or an in-progress native child
-    // acquisition. The latter refuses even an otherwise idempotent reset.
+    // retires its frame slot, then its presentation pipeline, before the target,
+    // so no slot command may still use a dependent object. False preserves the
+    // requested owner and every parent; it reports either an outstanding frame
+    // obligation or an in-progress native child acquisition. The latter refuses
+    // even an otherwise idempotent reset.
     bool resetSwapchainFrameSlotGeneration() noexcept;
+    bool resetSwapchainPresentationPipelineGeneration() noexcept;
     bool resetSwapchainPresentationTargetGeneration() noexcept;
     bool resetSwapchainImagesGeneration() noexcept;
     bool resetSwapchainGeneration() noexcept;
@@ -763,6 +819,7 @@ private:
     std::unique_ptr<VulkanSwapchainGeneration>                 mSwapchainGeneration;
     std::unique_ptr<VulkanSwapchainImagesGeneration>           mSwapchainImagesGeneration;
     std::unique_ptr<VulkanSwapchainPresentationTargetGeneration> mSwapchainPresentationTargetGeneration;
+    std::unique_ptr<VulkanSwapchainPresentationPipelineGeneration> mSwapchainPresentationPipelineGeneration;
     std::unique_ptr<VulkanSwapchainFrameSlotGeneration>        mSwapchainFrameSlotGeneration;
     std::uint64_t                                              mOwnershipTransitionEpoch = 0;
     std::size_t                                                mNativeAcquisitionDepth   = 0;
@@ -808,6 +865,11 @@ namespace VulkanInstanceDetail
     VulkanSwapchainPresentationTargetAcquireResult acquireSwapchainPresentationTarget(
         VulkanInstanceGeneration&                         instance_generation,
         const VulkanSwapchainPresentationTargetRequest&   request,
+        AllocationCheckpoint                              allocation_checkpoint) noexcept;
+
+    VulkanSwapchainPresentationPipelineAcquireResult acquireSwapchainPresentationPipeline(
+        VulkanInstanceGeneration&                         instance_generation,
+        const VulkanSwapchainPresentationPipelineRequest& request,
         AllocationCheckpoint                              allocation_checkpoint) noexcept;
 
     VulkanSwapchainFrameSlotAcquireResult acquireSwapchainFrameSlot(VulkanInstanceGeneration&              instance_generation,

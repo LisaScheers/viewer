@@ -383,6 +383,36 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       INTEGRATION_TEST_llrendervulkanswapchainpresentationtarget
       PRIVATE VK_NO_PROTOTYPES)
 
+  add_library(llrendervulkanswapchainpresentationpipeline STATIC
+      vulkan/llrendervulkanswapchainpresentationpipeline.cpp
+      vulkan/llrendervulkanswapchainpresentationpipeline.h
+      vulkan/shaders/presentation.vert.glsl
+      vulkan/shaders/presentation.frag.glsl)
+  set_source_files_properties(
+      vulkan/shaders/presentation.vert.glsl
+      vulkan/shaders/presentation.frag.glsl
+      PROPERTIES HEADER_FILE_ONLY TRUE)
+  target_include_directories(llrendervulkanswapchainpresentationpipeline
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanswapchainpresentationpipeline SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanswapchainpresentationpipeline
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanswapchainpresentationpipeline
+      PUBLIC llrendervulkanswapchainpresentationtarget)
+  set_target_properties(llrendervulkanswapchainpresentationpipeline PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanswapchainpresentationpipeline_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanswapchainpresentationpipeline
+      ""
+      "llrendervulkanswapchainpresentationpipeline;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanswapchainpresentationpipeline
+      PRIVATE VK_NO_PROTOTYPES)
+
   add_library(llrendervulkanswapchainframeslot STATIC
       vulkan/llrendervulkanswapchainframeslot.cpp
       vulkan/llrendervulkanswapchainframeslot.h)
@@ -424,6 +454,7 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
           llrendervulkanswapchain
           llrendervulkanswapchainimages
           llrendervulkanswapchainpresentationtarget
+          llrendervulkanswapchainpresentationpipeline
           llrendervulkanswapchainframeslot
           llrendervulkanswapchainconfiguration)
   set_target_properties(llrendervulkaninstance PROPERTIES FOLDER "Tests")

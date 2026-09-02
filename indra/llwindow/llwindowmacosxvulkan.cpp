@@ -659,6 +659,32 @@ LLWindowMacOSXVulkan::acquireSwapchainPresentationTargetGeneration() noexcept
     return mInstanceGeneration->acquireSwapchainPresentationTargetGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainPresentationPipelineAcquireResult
+LLWindowMacOSXVulkan::acquireSwapchainPresentationPipelineGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainPresentationPipelineAcquireError{ VulkanSwapchainPresentationPipelineAcquireCode::InstanceNotLive,
+                                                                std::nullopt };
+    }
+    if (!mRequirements || !mLoader || !validIdentity(mNativeWindow) || !refreshNativeGeometry())
+    {
+        return VulkanSwapchainPresentationPipelineAcquireError{
+            VulkanSwapchainPresentationPipelineAcquireCode::StaleWindowGeneration, std::nullopt
+        };
+    }
+
+    SurfaceAcquireContext context{ this, mInstanceGeneration.get(), &mOperations, mRequirements->resolver(), mNativeWindow.mMetalLayer };
+    VulkanSwapchainPresentationPipelineRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = { mNativeWindow.mDrawableWidth, mNativeWindow.mDrawableHeight };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquireSwapchainPresentationPipelineGeneration(request);
+}
+
 LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult LLWindowMacOSXVulkan::acquireSwapchainFrameSlotGeneration() noexcept
 {
     using namespace LLRenderVulkan;
@@ -979,6 +1005,16 @@ bool LLWindowMacOSXVulkan::resetSwapchainFrameSlotGeneration() noexcept
         return false;
     }
     return mInstanceGeneration->resetSwapchainFrameSlotGeneration();
+}
+
+bool LLWindowMacOSXVulkan::resetSwapchainPresentationPipelineGeneration() noexcept
+{
+    if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainPresentationPipelineGeneration() ||
+        !mOperations.mIsMainThread || !mOperations.mIsMainThread(mOperations.mUserdata))
+    {
+        return false;
+    }
+    return mInstanceGeneration->resetSwapchainPresentationPipelineGeneration();
 }
 
 bool LLWindowMacOSXVulkan::resetSwapchainPresentationTargetGeneration() noexcept

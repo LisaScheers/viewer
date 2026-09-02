@@ -330,6 +330,23 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("presentation-target acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("presentation-target acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    const auto presentation_pipeline_error = owner->acquireSwapchainPresentationPipelineGeneration();
+    ensure("the exact presentation target creates one real render-pass-compatible graphics pipeline",
+           !presentation_pipeline_error.has_value());
+    ensure("the instance parent owns one presentation-pipeline generation",
+           instance_generation->hasSwapchainPresentationPipelineGeneration());
+    ensure("the real presentation pipeline owns one non-null layout and graphics pipeline",
+           instance_generation->swapchainPresentationPipelineLayout() != VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationPipeline() != VK_NULL_HANDLE);
+    ensure("the presentation pipeline retains its current Retina backing-pixel chain",
+           owner->refreshNativeGeometry() && owner->drawableWidth() == BACKING_WIDTH &&
+               owner->drawableHeight() == BACKING_HEIGHT && owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION));
+    ensure_equals("presentation-pipeline acquisition emits no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+    ensure("presentation-pipeline acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("presentation-pipeline acquisition leaves the OpenGL manager unchanged", gGLManager.mInited,
+                  initial_gl_manager);
+
     const auto frame_slot_error = owner->acquireSwapchainFrameSlotGeneration();
     ensure("the exact swapchain-image chain creates one idle frame slot", !frame_slot_error.has_value());
     ensure("the instance parent owns one frame-slot generation", instance_generation->hasSwapchainFrameSlotGeneration());
@@ -399,6 +416,7 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
                instance_generation->hasSwapchainImagesGeneration() &&
                instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->hasSwapchainPresentationPipelineGeneration() &&
                instance_generation->hasSwapchainFrameSlotGeneration());
     const VkExtent2D rebuilt_drawable_extent = instance_generation->swapchainDrawableExtent();
     ensure("the rebuilt configuration authenticates the changed Cocoa backing extent",
@@ -418,6 +436,8 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
                instance_generation->swapchainPresentationFramebufferCount() == resolved_image_count &&
                instance_generation->swapchainPresentationFramebuffer(0) != VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationPipelineLayout() != VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationPipeline() != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameCommandBuffer() != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameImageAvailableSemaphore() != VK_NULL_HANDLE &&
                instance_generation->swapchainFramePresentationReadySemaphore() != VK_NULL_HANDLE &&
@@ -482,6 +502,24 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("frame-slot reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("frame-slot reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    ensure("the native smoke explicitly resets the presentation pipeline before its presentation target",
+           owner->resetSwapchainPresentationPipelineGeneration());
+    ensure("explicit presentation-pipeline reset removes both owned graphics handles",
+           !instance_generation->hasSwapchainPresentationPipelineGeneration() &&
+               instance_generation->swapchainPresentationPipelineLayout() == VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationPipeline() == VK_NULL_HANDLE);
+    ensure("presentation-pipeline reset leaves its exact target and every older swapchain parent live",
+           instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationFramebufferCount() == resolved_image_count &&
+               instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainGeneration() &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasLogicalDeviceGeneration() &&
+               instance_generation->hasSurfaceGeneration());
+    ensure_equals("presentation-pipeline creation and destruction emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+    ensure("presentation-pipeline reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("presentation-pipeline reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     ensure("the native smoke explicitly resets the presentation target before swapchain images",
            owner->resetSwapchainPresentationTargetGeneration());
     ensure("explicit presentation-target reset removes its pass and every framebuffer",
@@ -545,6 +583,10 @@ void window_vulkan_macos_wsi_object::test<1>()
            !instance_generation->hasSwapchainPresentationTargetGeneration() &&
                instance_generation->swapchainPresentationRenderPass() == VK_NULL_HANDLE &&
                instance_generation->swapchainPresentationFramebufferCount() == 0);
+    ensure("surface reset leaves no presentation-pipeline generation",
+           !instance_generation->hasSwapchainPresentationPipelineGeneration() &&
+               instance_generation->swapchainPresentationPipelineLayout() == VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationPipeline() == VK_NULL_HANDLE);
     ensure("surface reset leaves no frame-slot generation or owned frame handle",
            !instance_generation->hasSwapchainFrameSlotGeneration() && instance_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE &&
                instance_generation->swapchainFrameCommandBuffer() == VK_NULL_HANDLE &&
