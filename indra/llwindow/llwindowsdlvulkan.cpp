@@ -715,6 +715,39 @@ LLWindowSDLVulkan::acquireRenderPassClearToPresentSwapchainFrameSlot(
     return mInstanceGeneration->acquireRenderPassClearToPresentSwapchainFrameSlot(request, clear_color);
 }
 
+LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult LLWindowSDLVulkan::acquireRenderPassDrawToPresentSwapchainFrameSlot(
+    const LLRenderVulkan::VulkanSwapchainFrameClearColor& clear_color) noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive, std::nullopt };
+    }
+    if (!mRequirements || !mWindow || !mOperations.mGetWindowSizeInPixels)
+    {
+        return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration,
+                                                             std::nullopt };
+    }
+
+    int drawable_width  = 0;
+    int drawable_height = 0;
+    if (!mOperations.mGetWindowSizeInPixels(mOperations.mUserdata, mWindow, &drawable_width, &drawable_height) || drawable_width <= 0 ||
+        drawable_height <= 0)
+    {
+        return VulkanSwapchainFrameSlotParentOperationError{ VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent,
+                                                             std::nullopt };
+    }
+
+    SurfaceAcquireContext                    context{ this, mInstanceGeneration.get(), &mOperations, mWindow };
+    VulkanSwapchainFrameSlotOperationRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = { static_cast<std::uint32_t>(drawable_width), static_cast<std::uint32_t>(drawable_height) };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquireRenderPassDrawToPresentSwapchainFrameSlot(request, clear_color);
+}
+
 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult LLWindowSDLVulkan::retrySwapchainFrameSlotPresentation() noexcept
 {
     const FrameSlotResult result = operateSwapchainFrameSlot(FrameSlotOperation::RetryPresentation);

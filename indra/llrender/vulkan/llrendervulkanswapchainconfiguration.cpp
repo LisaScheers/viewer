@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <memory>
 #include <new>
@@ -539,6 +540,25 @@ VulkanSwapchainConfigurationResolutionResult resolveSwapchainConfiguration(
     if (image_extent.width > limits.maxFramebufferWidth || image_extent.height > limits.maxFramebufferHeight)
     {
         return failure(VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsFramebufferLimits);
+    }
+
+    const float             viewport_width         = static_cast<float>(image_extent.width);
+    const float             viewport_height        = static_cast<float>(image_extent.height);
+    const float             viewport_lower         = limits.viewportBoundsRange[0];
+    const float             viewport_upper         = limits.viewportBoundsRange[1];
+    constexpr std::uint32_t maximum_scissor_extent = static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
+    if (image_extent.width > limits.maxViewportDimensions[0] || image_extent.height > limits.maxViewportDimensions[1] ||
+        image_extent.width > maximum_scissor_extent || image_extent.height > maximum_scissor_extent || !std::isfinite(viewport_width) ||
+        !std::isfinite(viewport_height) || !std::isfinite(viewport_lower) || !std::isfinite(viewport_upper) ||
+        !(viewport_lower <= 0.0f && 0.0f <= viewport_upper) ||
+        static_cast<double>(viewport_width) != static_cast<double>(image_extent.width) ||
+        static_cast<double>(viewport_height) != static_cast<double>(image_extent.height) ||
+        static_cast<double>(viewport_width) > static_cast<double>(limits.maxViewportDimensions[0]) ||
+        static_cast<double>(viewport_height) > static_cast<double>(limits.maxViewportDimensions[1]) ||
+        !(viewport_lower <= viewport_width && viewport_width <= viewport_upper) ||
+        !(viewport_lower <= viewport_height && viewport_height <= viewport_upper))
+    {
+        return failure(VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsViewportLimits);
     }
 
     auto format_result = selectSurfaceFormat(dispatch, physical_device_generation.physicalDevice(), physical_device_generation.surface(),

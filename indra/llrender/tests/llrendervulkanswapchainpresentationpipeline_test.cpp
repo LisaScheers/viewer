@@ -277,9 +277,13 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice     
     }
     *properties                             = {};
     properties->apiVersion                  = VK_API_VERSION_1_1;
-    properties->limits.maxFramebufferWidth  = 4096;
-    properties->limits.maxFramebufferHeight = 2160;
-    properties->limits.maxFramebufferLayers = 1;
+    properties->limits.maxFramebufferWidth      = 4096;
+    properties->limits.maxFramebufferHeight     = 2160;
+    properties->limits.maxFramebufferLayers     = 1;
+    properties->limits.maxViewportDimensions[0] = 4096;
+    properties->limits.maxViewportDimensions[1] = 4096;
+    properties->limits.viewportBoundsRange[0]   = -8192.0f;
+    properties->limits.viewportBoundsRange[1]   = 8191.0f;
     std::strncpy(properties->deviceName, "presentation-target-fake", VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1);
 }
 

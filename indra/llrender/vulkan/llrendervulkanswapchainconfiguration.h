@@ -66,7 +66,8 @@ enum class VulkanSwapchainConfigurationResolutionCode : std::uint8_t
     SurfaceTransferDestinationUsageUnsupported,
     SelectedFormatTransferDestinationUnsupported,
     SelectedFormatColorAttachmentUnsupported,
-    SelectedImageExtentExceedsFramebufferLimits
+    SelectedImageExtentExceedsFramebufferLimits,
+    SelectedImageExtentExceedsViewportLimits
 };
 
 struct VulkanSwapchainConfigurationResolutionError

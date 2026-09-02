@@ -549,7 +549,8 @@ enum class VulkanSwapchainFrameSlotParentOperationCode : std::uint8_t
     StaleWindowGeneration,
     OperationFailure,
     InvalidClearColor,
-    SwapchainPresentationTargetNotLive
+    SwapchainPresentationTargetNotLive,
+    SwapchainPresentationPipelineNotLive
 };
 
 struct VulkanSwapchainFrameSlotParentOperationError
@@ -757,6 +758,9 @@ public:
     VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassClearToPresentSwapchainFrameSlot(
         const VulkanSwapchainFrameSlotOperationRequest& request,
         const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
+    VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassDrawToPresentSwapchainFrameSlot(
+        const VulkanSwapchainFrameSlotOperationRequest& request,
+        const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentationCompletion(
@@ -801,6 +805,21 @@ private:
                              PFN_vkDestroyDebugUtilsMessengerEXT destroy_debug_messenger) noexcept;
 
     void noteOwnershipTransition() noexcept { ++mOwnershipTransitionEpoch; }
+    void noteSwapchainPresentationTargetTransition() noexcept
+    {
+        ++mSwapchainPresentationTargetEpoch;
+        noteOwnershipTransition();
+    }
+    void noteSwapchainPresentationPipelineTransition() noexcept
+    {
+        ++mSwapchainPresentationPipelineEpoch;
+        noteOwnershipTransition();
+    }
+    void noteSwapchainFrameSlotTransition() noexcept
+    {
+        ++mSwapchainFrameSlotEpoch;
+        noteOwnershipTransition();
+    }
 
     std::optional<VulkanGlobalDispatchGeneration>           mGlobalDispatch;
     std::unique_ptr<ValidationState>                        mValidationState;
@@ -821,6 +840,9 @@ private:
     std::unique_ptr<VulkanSwapchainPresentationTargetGeneration> mSwapchainPresentationTargetGeneration;
     std::unique_ptr<VulkanSwapchainPresentationPipelineGeneration> mSwapchainPresentationPipelineGeneration;
     std::unique_ptr<VulkanSwapchainFrameSlotGeneration>        mSwapchainFrameSlotGeneration;
+    std::uint64_t                                                  mSwapchainPresentationTargetEpoch   = 0;
+    std::uint64_t                                                  mSwapchainPresentationPipelineEpoch = 0;
+    std::uint64_t                                                  mSwapchainFrameSlotEpoch            = 0;
     std::uint64_t                                              mOwnershipTransitionEpoch = 0;
     std::size_t                                                mNativeAcquisitionDepth   = 0;
 };

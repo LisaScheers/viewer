@@ -16,6 +16,7 @@
 #include "linden_common.h"
 
 #include "llrendervulkanswapchainframeslot.h"
+#include "llrendervulkanswapchainpresentationpipeline.h"
 #include "llrendervulkanswapchainpresentationtarget.h"
 #include "lltut.h"
 
@@ -70,7 +71,11 @@ enum class MissingCommand : std::uint8_t
     CmdBeginRenderPass,
     CmdEndRenderPass,
     QueuePresent,
-    ReleaseSwapchainImages
+    ReleaseSwapchainImages,
+    CmdBindPipeline,
+    CmdSetViewport,
+    CmdSetScissor,
+    CmdDraw
 };
 
 struct FenceWaitRecord
@@ -156,6 +161,38 @@ struct RenderPassBeginRecord
     VkSubpassContents     mContents = VK_SUBPASS_CONTENTS_MAX_ENUM;
 };
 
+struct BindPipelineRecord
+{
+    VkCommandBuffer     mCommandBuffer = VK_NULL_HANDLE;
+    VkPipelineBindPoint mBindPoint     = VK_PIPELINE_BIND_POINT_MAX_ENUM;
+    VkPipeline          mPipeline      = VK_NULL_HANDLE;
+};
+
+struct ViewportRecord
+{
+    VkCommandBuffer mCommandBuffer = VK_NULL_HANDLE;
+    std::uint32_t   mFirstViewport = 0;
+    std::uint32_t   mViewportCount = 0;
+    VkViewport      mViewport{};
+};
+
+struct ScissorRecord
+{
+    VkCommandBuffer mCommandBuffer = VK_NULL_HANDLE;
+    std::uint32_t   mFirstScissor  = 0;
+    std::uint32_t   mScissorCount  = 0;
+    VkRect2D        mScissor{};
+};
+
+struct DrawRecord
+{
+    VkCommandBuffer mCommandBuffer = VK_NULL_HANDLE;
+    std::uint32_t   mVertexCount   = 0;
+    std::uint32_t   mInstanceCount = 0;
+    std::uint32_t   mFirstVertex   = 0;
+    std::uint32_t   mFirstInstance = 0;
+};
+
 struct PresentRecord
 {
     VkQueue             mQueue = VK_NULL_HANDLE;
@@ -216,6 +253,9 @@ struct FakeState
     VkSemaphore     mSemaphoreOutput      = fakeHandle<VkSemaphore>(0x9200);
     VkResult        mFenceResult          = VK_SUCCESS;
     VkFence         mFenceOutput          = fakeHandle<VkFence>(0x9300);
+    VkPipelineLayout mPipelineLayoutOutput = fakeHandle<VkPipelineLayout>(0xc000);
+    VkPipeline       mPipelineOutput       = fakeHandle<VkPipeline>(0xc300);
+    std::size_t      mNextShaderModule     = 0;
 
     VkSemaphore presentationReadySemaphore() const noexcept { return fakeHandle<VkSemaphore>(0x9201); }
     VkFence     presentCompletionFence() const noexcept { return fakeHandle<VkFence>(0x9301); }
@@ -237,6 +277,9 @@ struct FakeState
     std::vector<VkResult> mReleaseResults;
     std::size_t           mNextReleaseResult = 0;
     VulkanSwapchainPresentationTargetGeneration* mResetPresentationTargetOnAcquire = nullptr;
+    VulkanSwapchainPresentationPipelineGeneration* mResetPresentationPipelineOnAcquire    = nullptr;
+    VulkanSwapchainPresentationPipelineGeneration* mResetPresentationPipelineOnDrawLookup = nullptr;
+    VulkanSwapchainFrameClearColor*                mClearColorToMutateOnAcquire           = nullptr;
 
     std::vector<std::string>                 mEvents;
     std::vector<VkDevice>                    mMutationDevices;
@@ -259,6 +302,10 @@ struct FakeState
     std::vector<ClearColorRecord>             mClears;
     std::vector<RenderPassBeginRecord>         mRenderPassBegins;
     std::vector<VkCommandBuffer>               mEndedRenderPassBuffers;
+    std::vector<BindPipelineRecord>            mPipelineBinds;
+    std::vector<ViewportRecord>                mViewports;
+    std::vector<ScissorRecord>                 mScissors;
+    std::vector<DrawRecord>                    mDraws;
     std::vector<PresentRecord>               mPresents;
     std::vector<ReleaseRecord>               mReleases;
 
@@ -298,6 +345,10 @@ struct FakeState
         mClears.clear();
         mRenderPassBegins.clear();
         mEndedRenderPassBuffers.clear();
+        mPipelineBinds.clear();
+        mViewports.clear();
+        mScissors.clear();
+        mDraws.clear();
         mPresents.clear();
         mReleases.clear();
         mNextWaitResult = 0;
@@ -306,6 +357,9 @@ struct FakeState
         mNextPresentResult = 0;
         mNextReleaseResult = 0;
         mResetPresentationTargetOnAcquire = nullptr;
+        mResetPresentationPipelineOnAcquire    = nullptr;
+        mResetPresentationPipelineOnDrawLookup = nullptr;
+        mClearColorToMutateOnAcquire           = nullptr;
     }
 };
 
@@ -359,6 +413,10 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice     
         properties->apiVersion = VK_API_VERSION_1_1;
         properties->limits.maxFramebufferWidth  = 4096;
         properties->limits.maxFramebufferHeight = 2160;
+        properties->limits.maxViewportDimensions[0] = 4096;
+        properties->limits.maxViewportDimensions[1] = 4096;
+        properties->limits.viewportBoundsRange[0]   = -8192.0f;
+        properties->limits.viewportBoundsRange[1]   = 8191.0f;
         std::strncpy(properties->deviceName, "frame-slot-fake", VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1);
     }
 }
@@ -632,6 +690,59 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyFramebuffer(VkDevice, VkFramebuffer, const
 {
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreatePipelineLayout(VkDevice                          device,
+                                                        const VkPipelineLayoutCreateInfo* create_info,
+                                                        const VkAllocationCallbacks*,
+                                                        VkPipelineLayout* pipeline_layout) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !create_info || !pipeline_layout)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *pipeline_layout = gFakeState->mPipelineLayoutOutput;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyPipelineLayout(VkDevice, VkPipelineLayout, const VkAllocationCallbacks*) noexcept
+{
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateShaderModule(VkDevice                        device,
+                                                      const VkShaderModuleCreateInfo* create_info,
+                                                      const VkAllocationCallbacks*,
+                                                      VkShaderModule* shader_module) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !create_info || !create_info->pCode || !shader_module)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *shader_module = fakeHandle<VkShaderModule>(0xc100 + (gFakeState->mNextShaderModule++ % 2) * 0x100);
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyShaderModule(VkDevice, VkShaderModule, const VkAllocationCallbacks*) noexcept
+{
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateGraphicsPipelines(VkDevice device,
+                                                           VkPipelineCache,
+                                                           std::uint32_t                       create_info_count,
+                                                           const VkGraphicsPipelineCreateInfo* create_infos,
+                                                           const VkAllocationCallbacks*,
+                                                           VkPipeline* pipelines) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || create_info_count != 1 || !create_infos || !pipelines)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *pipelines = gFakeState->mPipelineOutput;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyPipeline(VkDevice, VkPipeline, const VkAllocationCallbacks*) noexcept
+{
+}
+
 const std::vector<std::string>& expectedDeviceLookups()
 {
     static const std::vector<std::string> names{ "vkCreateCommandPool", "vkDestroyCommandPool", "vkAllocateCommandBuffers",
@@ -671,6 +782,19 @@ const std::vector<std::string>& expectedRenderPassPresentationLookups()
                                                  "vkEndCommandBuffer",   "vkResetFences",        "vkQueueSubmit",
                                                  "vkAcquireNextImageKHR", "vkCmdPipelineBarrier", "vkCmdBeginRenderPass",
                                                  "vkCmdEndRenderPass",   "vkQueuePresentKHR",     "vkReleaseSwapchainImagesKHR" };
+    return names;
+}
+
+const std::vector<std::string>& expectedRenderPassDrawPresentationLookups()
+{
+    static const std::vector<std::string> names{ "vkWaitForFences",       "vkResetCommandBuffer",
+                                                 "vkBeginCommandBuffer",  "vkEndCommandBuffer",
+                                                 "vkResetFences",         "vkQueueSubmit",
+                                                 "vkAcquireNextImageKHR", "vkCmdPipelineBarrier",
+                                                 "vkCmdBeginRenderPass",  "vkCmdEndRenderPass",
+                                                 "vkCmdBindPipeline",     "vkCmdSetViewport",
+                                                 "vkCmdSetScissor",       "vkCmdDraw",
+                                                 "vkQueuePresentKHR",     "vkReleaseSwapchainImagesKHR" };
     return names;
 }
 
@@ -891,6 +1015,16 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice device, VkSwapchain
         gFakeState->mResetPresentationTargetOnAcquire->reset();
         gFakeState->mResetPresentationTargetOnAcquire = nullptr;
     }
+    if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && gFakeState->mResetPresentationPipelineOnAcquire)
+    {
+        gFakeState->mResetPresentationPipelineOnAcquire->reset();
+        gFakeState->mResetPresentationPipelineOnAcquire = nullptr;
+    }
+    if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && gFakeState->mClearColorToMutateOnAcquire)
+    {
+        *gFakeState->mClearColorToMutateOnAcquire = VulkanSwapchainFrameClearColor{ { 1.0f, 0.0f, 1.0f, 0.0f } };
+        gFakeState->mClearColorToMutateOnAcquire  = nullptr;
+    }
     return result;
 }
 
@@ -967,6 +1101,56 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdEndRenderPass(VkCommandBuffer command_buffer) 
     gFakeState->mEndedRenderPassBuffers.push_back(command_buffer);
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer command_buffer, VkPipelineBindPoint bind_point, VkPipeline pipeline) noexcept
+{
+    if (!gFakeState)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("bind pipeline");
+    gFakeState->mPipelineBinds.push_back({ command_buffer, bind_point, pipeline });
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdSetViewport(VkCommandBuffer   command_buffer,
+                                              std::uint32_t     first_viewport,
+                                              std::uint32_t     viewport_count,
+                                              const VkViewport* viewports) noexcept
+{
+    if (!gFakeState || !viewports || viewport_count == 0)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("set viewport");
+    gFakeState->mViewports.push_back({ command_buffer, first_viewport, viewport_count, viewports[0] });
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdSetScissor(VkCommandBuffer command_buffer,
+                                             std::uint32_t   first_scissor,
+                                             std::uint32_t   scissor_count,
+                                             const VkRect2D* scissors) noexcept
+{
+    if (!gFakeState || !scissors || scissor_count == 0)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("set scissor");
+    gFakeState->mScissors.push_back({ command_buffer, first_scissor, scissor_count, scissors[0] });
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdDraw(VkCommandBuffer command_buffer,
+                                       std::uint32_t   vertex_count,
+                                       std::uint32_t   instance_count,
+                                       std::uint32_t   first_vertex,
+                                       std::uint32_t   first_instance) noexcept
+{
+    if (!gFakeState)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("draw");
+    gFakeState->mDraws.push_back({ command_buffer, vertex_count, instance_count, first_vertex, first_instance });
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
 {
     if (!gFakeState || !present_info)
@@ -1036,6 +1220,18 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeCreateFramebuffer);
     if (std::strcmp(name, "vkDestroyFramebuffer") == 0)
         return eraseFunctionType(fakeDestroyFramebuffer);
+    if (std::strcmp(name, "vkCreateShaderModule") == 0)
+        return eraseFunctionType(fakeCreateShaderModule);
+    if (std::strcmp(name, "vkDestroyShaderModule") == 0)
+        return eraseFunctionType(fakeDestroyShaderModule);
+    if (std::strcmp(name, "vkCreatePipelineLayout") == 0)
+        return eraseFunctionType(fakeCreatePipelineLayout);
+    if (std::strcmp(name, "vkDestroyPipelineLayout") == 0)
+        return eraseFunctionType(fakeDestroyPipelineLayout);
+    if (std::strcmp(name, "vkCreateGraphicsPipelines") == 0)
+        return eraseFunctionType(fakeCreateGraphicsPipelines);
+    if (std::strcmp(name, "vkDestroyPipeline") == 0)
+        return eraseFunctionType(fakeDestroyPipeline);
 
     gFakeState->mDeviceLookups.emplace_back(name);
     if (std::strcmp(name, "vkCreateCommandPool") == 0)
@@ -1075,6 +1271,22 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return gFakeState->mMissingCommand == MissingCommand::CmdBeginRenderPass ? nullptr : eraseFunctionType(fakeCmdBeginRenderPass);
     if (std::strcmp(name, "vkCmdEndRenderPass") == 0)
         return gFakeState->mMissingCommand == MissingCommand::CmdEndRenderPass ? nullptr : eraseFunctionType(fakeCmdEndRenderPass);
+    if (std::strcmp(name, "vkCmdBindPipeline") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::CmdBindPipeline ? nullptr : eraseFunctionType(fakeCmdBindPipeline);
+    if (std::strcmp(name, "vkCmdSetViewport") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::CmdSetViewport ? nullptr : eraseFunctionType(fakeCmdSetViewport);
+    if (std::strcmp(name, "vkCmdSetScissor") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::CmdSetScissor ? nullptr : eraseFunctionType(fakeCmdSetScissor);
+    if (std::strcmp(name, "vkCmdDraw") == 0)
+    {
+        const bool missing = gFakeState->mMissingCommand == MissingCommand::CmdDraw;
+        if (!missing && gFakeState->mResetPresentationPipelineOnDrawLookup)
+        {
+            gFakeState->mResetPresentationPipelineOnDrawLookup->reset();
+            gFakeState->mResetPresentationPipelineOnDrawLookup = nullptr;
+        }
+        return missing ? nullptr : eraseFunctionType(fakeCmdDraw);
+    }
     if (std::strcmp(name, "vkQueuePresentKHR") == 0)
         return gFakeState->mMissingCommand == MissingCommand::QueuePresent ? nullptr : eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
@@ -1195,6 +1407,17 @@ VulkanSwapchainPresentationTargetGeneration makePresentationTarget(Parents& pare
     return std::get<VulkanSwapchainPresentationTargetGeneration>(std::move(result));
 }
 
+VulkanSwapchainPresentationPipelineGeneration makePresentationPipeline(
+    Parents&                                           parents,
+    const VulkanSwapchainPresentationTargetGeneration& presentation_target)
+{
+    auto result = resolveVulkanSwapchainPresentationPipelineGeneration(parents.mLogical, parents.mConfiguration, parents.mSwapchain,
+                                                                       parents.mImages, presentation_target);
+    tut::ensure("the presentation-pipeline fixture resolves",
+                std::holds_alternative<VulkanSwapchainPresentationPipelineGeneration>(result));
+    return std::get<VulkanSwapchainPresentationPipelineGeneration>(std::move(result));
+}
+
 void ensureOnlyExactDevice(const FakeState& state)
 {
     tut::ensure("every frame-slot mutation uses the exact logical device",
@@ -1250,6 +1473,16 @@ VulkanSwapchainFrameSlotOperationResult resolveRenderPassPresentation(
                                                             parents.mImages, presentation_target);
 }
 
+VulkanSwapchainFrameSlotOperationResult resolveRenderPassDrawPresentation(
+    VulkanSwapchainFrameSlotGeneration&                  generation,
+    Parents&                                             parents,
+    const VulkanSwapchainPresentationTargetGeneration&   presentation_target,
+    const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline)
+{
+    return generation.resolveRenderPassDrawPresentationDispatch(parents.mLogical, parents.mConfiguration, parents.mSwapchain,
+                                                                parents.mImages, presentation_target, presentation_pipeline);
+}
+
 const VulkanSwapchainFrameSlotPresentationSuccess& requirePresentationSuccess(
     const VulkanSwapchainFrameSlotPresentationResult& result)
 {
@@ -1274,7 +1507,7 @@ struct render_vulkan_swapchain_frame_slot_test
 {
 };
 
-using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test, 35>;
+using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test, 40>;
 using render_vulkan_swapchain_frame_slot_object = render_vulkan_swapchain_frame_slot_group::object;
 render_vulkan_swapchain_frame_slot_group render_vulkan_swapchain_frame_slot_tests("render Vulkan swapchain frame slot");
 
@@ -1300,19 +1533,33 @@ void render_vulkan_swapchain_frame_slot_object::test<1>()
         std::declval<const VulkanLogicalDeviceGeneration&>(), std::declval<const VulkanSwapchainConfigurationGeneration&>(),
         std::declval<const VulkanSwapchainGeneration&>(), std::declval<const VulkanSwapchainImagesGeneration&>(),
         std::declval<const VulkanSwapchainPresentationTargetGeneration&>())));
+    static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().resolveRenderPassDrawPresentationDispatch(
+        std::declval<const VulkanLogicalDeviceGeneration&>(), std::declval<const VulkanSwapchainConfigurationGeneration&>(),
+        std::declval<const VulkanSwapchainGeneration&>(), std::declval<const VulkanSwapchainImagesGeneration&>(),
+        std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
+        std::declval<const VulkanSwapchainPresentationPipelineGeneration&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeEmptySubmission()));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeAcquireRenderPassClearToPresent(
         std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
+        std::declval<const VulkanSwapchainFrameClearColor&>())));
+    static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeAcquireRenderPassDrawToPresent(
+        std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
+        std::declval<const VulkanSwapchainPresentationPipelineGeneration&>(),
         std::declval<const VulkanSwapchainFrameClearColor&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().retryEmptySubmissionCompletion()));
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::ReleaseSwapchainImages) == 17);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdClearColorImage) == 18);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdBeginRenderPass) == 19);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdEndRenderPass) == 20);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdBindPipeline) == 21);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdSetViewport) == 22);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdSetScissor) == 23);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdDraw) == 24);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::CommandFailure) == 8);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor) == 9);
     static_assert(static_cast<std::uint8_t>(
                       VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration) == 10);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration) == 11);
 
     const VulkanSwapchainFrameSlotResolutionError value{ VulkanSwapchainFrameSlotResolutionCode::SubmissionFenceCreationFailure,
                                                          VulkanSwapchainFrameSlotCommand::CreateFence, VK_ERROR_OUT_OF_DEVICE_MEMORY };
@@ -3168,6 +3415,360 @@ void render_vulkan_swapchain_frame_slot_object::test<35>()
                moved.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !moved.acquiredImageIndex() &&
                state.mRenderPassBegins.size() == 1 &&
                state.mRenderPassBegins[0].mInfo.framebuffer == presentation_target.framebuffer(1));
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<36>()
+{
+    constexpr std::array cases{
+        std::pair{ MissingCommand::GetDeviceProcAddr, VulkanSwapchainFrameSlotCommand::GetDeviceProcAddr },
+        std::pair{ MissingCommand::WaitForFences, VulkanSwapchainFrameSlotCommand::WaitForFences },
+        std::pair{ MissingCommand::ResetCommandBuffer, VulkanSwapchainFrameSlotCommand::ResetCommandBuffer },
+        std::pair{ MissingCommand::BeginCommandBuffer, VulkanSwapchainFrameSlotCommand::BeginCommandBuffer },
+        std::pair{ MissingCommand::EndCommandBuffer, VulkanSwapchainFrameSlotCommand::EndCommandBuffer },
+        std::pair{ MissingCommand::ResetFences, VulkanSwapchainFrameSlotCommand::ResetFences },
+        std::pair{ MissingCommand::QueueSubmit, VulkanSwapchainFrameSlotCommand::QueueSubmit },
+        std::pair{ MissingCommand::AcquireNextImage, VulkanSwapchainFrameSlotCommand::AcquireNextImage },
+        std::pair{ MissingCommand::CmdPipelineBarrier, VulkanSwapchainFrameSlotCommand::CmdPipelineBarrier },
+        std::pair{ MissingCommand::CmdBeginRenderPass, VulkanSwapchainFrameSlotCommand::CmdBeginRenderPass },
+        std::pair{ MissingCommand::CmdEndRenderPass, VulkanSwapchainFrameSlotCommand::CmdEndRenderPass },
+        std::pair{ MissingCommand::CmdBindPipeline, VulkanSwapchainFrameSlotCommand::CmdBindPipeline },
+        std::pair{ MissingCommand::CmdSetViewport, VulkanSwapchainFrameSlotCommand::CmdSetViewport },
+        std::pair{ MissingCommand::CmdSetScissor, VulkanSwapchainFrameSlotCommand::CmdSetScissor },
+        std::pair{ MissingCommand::CmdDraw, VulkanSwapchainFrameSlotCommand::CmdDraw },
+        std::pair{ MissingCommand::QueuePresent, VulkanSwapchainFrameSlotCommand::QueuePresent },
+        std::pair{ MissingCommand::ReleaseSwapchainImages, VulkanSwapchainFrameSlotCommand::ReleaseSwapchainImages },
+    };
+
+    const auto& expected = expectedRenderPassDrawPresentationLookups();
+    for (std::size_t index = 0; index < cases.size(); ++index)
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            generation            = takeGeneration(resolveSlot(parents));
+        state.clearFrameRecords();
+        state.mMissingCommand = cases[index].first;
+
+        ensureOperationError(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
+                             VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, VulkanSwapchainFrameSlotDisposition::Reusable,
+                             cases[index].second);
+        ensure("missing draw dispatch stops at the exact lookup and does no frame work",
+               state.mInstanceLookups == std::vector<std::string>{ "vkGetDeviceProcAddr" } &&
+                   state.mDeviceLookups == std::vector<std::string>(expected.begin(), expected.begin() + index) && state.mEvents.empty() &&
+                   state.mAcquires.empty() && state.mRenderPassBegins.empty() && state.mPipelineBinds.empty() && state.mViewports.empty() &&
+                   state.mScissors.empty() && state.mDraws.empty());
+
+        const auto  unpublished = generation.executeAcquireToPresent();
+        const auto& error       = requirePresentationError(unpublished);
+        ensure("failed draw resolution publishes none of the shared presentation dispatch",
+               error.mCode == VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand &&
+                   error.mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+                   error.mDisposition == VulkanSwapchainFrameSlotDisposition::Reusable && state.mEvents.empty() && state.mAcquires.empty());
+    }
+
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents               = makeParents(state);
+    auto            presentation_target   = makePresentationTarget(parents);
+    auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+    auto            generation            = takeGeneration(resolveSlot(parents));
+    state.clearFrameRecords();
+    state.mResetPresentationPipelineOnDrawLookup = &presentation_pipeline;
+
+    ensureOperationError(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
+                         VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration,
+                         VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("pipeline invalidation during lookup is caught before atomic dispatch publication",
+           state.mDeviceLookups == expected && state.mEvents.empty() && state.mAcquires.empty());
+    ensure("pipeline invalidation during lookup leaves the base operation unpublished",
+           requirePresentationError(generation.executeAcquireToPresent()).mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+               state.mEvents.empty() && state.mAcquires.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<37>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents               = makeParents(state);
+    auto            presentation_target   = makePresentationTarget(parents);
+    auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+    auto            generation            = takeGeneration(resolveSlot(parents));
+    state.clearFrameRecords();
+
+    ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("draw dispatch resolves every old presentation and render-pass command before the four draw commands",
+           state.mDeviceLookups == expectedRenderPassDrawPresentationLookups() && state.mEvents.empty());
+
+    state.clearFrameRecords();
+    state.mAcquireIndices = { 2 };
+    VulkanSwapchainFrameClearColor clear_color{ { 0.125f, 0.25f, 0.5f, 1.0f } };
+    const auto                     expected_clear = clear_color;
+    state.mClearColorToMutateOnAcquire            = &clear_color;
+
+    const auto result = generation.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, clear_color);
+    ensure("the exact draw frame presents and retires the acquired image",
+           requirePresentationSuccess(result) ==
+                   VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2 } &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
+
+    const std::vector<std::string> expected_events{
+        "wait fence",    "acquire image", "reset buffer", "begin buffer",  "pipeline barrier", "begin render pass",
+        "bind pipeline", "set viewport",  "set scissor",  "draw",          "end render pass",  "pipeline barrier",
+        "end buffer",    "reset fence",   "queue submit", "queue present", "wait fence"
+    };
+    ensure("draw recording follows the exact acquire, pass, draw, submit, present, and retire order", state.mEvents == expected_events);
+
+    ensure("draw mode begins the exact pass with the same-index framebuffer and copied clear value",
+           state.mRenderPassBegins.size() == 1 && state.mRenderPassBegins[0].mCommandBuffer == generation.commandBuffer() &&
+               state.mRenderPassBegins[0].mInfo.renderPass == presentation_target.renderPass() &&
+               state.mRenderPassBegins[0].mInfo.framebuffer == presentation_target.framebuffer(2) &&
+               state.mRenderPassBegins[0].mInfo.renderArea.offset.x == 0 && state.mRenderPassBegins[0].mInfo.renderArea.offset.y == 0 &&
+               state.mRenderPassBegins[0].mInfo.renderArea.extent.width == presentation_target.imageExtent().width &&
+               state.mRenderPassBegins[0].mInfo.renderArea.extent.height == presentation_target.imageExtent().height &&
+               state.mRenderPassBegins[0].mHadClearValues &&
+               state.mRenderPassBegins[0].mClearValue.color.float32[0] == expected_clear.mRgba[0] &&
+               state.mRenderPassBegins[0].mClearValue.color.float32[1] == expected_clear.mRgba[1] &&
+               state.mRenderPassBegins[0].mClearValue.color.float32[2] == expected_clear.mRgba[2] &&
+               state.mRenderPassBegins[0].mClearValue.color.float32[3] == expected_clear.mRgba[3]);
+    ensure("draw mode binds the exact retained graphics pipeline",
+           state.mPipelineBinds.size() == 1 && state.mPipelineBinds[0].mCommandBuffer == generation.commandBuffer() &&
+               state.mPipelineBinds[0].mBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
+               state.mPipelineBinds[0].mPipeline == presentation_pipeline.pipeline());
+
+    const VkExtent2D extent = presentation_target.imageExtent();
+    ensure("draw mode sets one positive-height full-extent viewport",
+           state.mViewports.size() == 1 && state.mViewports[0].mCommandBuffer == generation.commandBuffer() &&
+               state.mViewports[0].mFirstViewport == 0 && state.mViewports[0].mViewportCount == 1 &&
+               state.mViewports[0].mViewport.x == 0.0f && state.mViewports[0].mViewport.y == 0.0f &&
+               state.mViewports[0].mViewport.width == static_cast<float>(extent.width) &&
+               state.mViewports[0].mViewport.height == static_cast<float>(extent.height) && state.mViewports[0].mViewport.height > 0.0f &&
+               state.mViewports[0].mViewport.minDepth == 0.0f && state.mViewports[0].mViewport.maxDepth == 1.0f);
+    ensure("draw mode sets one full-extent zero-offset scissor",
+           state.mScissors.size() == 1 && state.mScissors[0].mCommandBuffer == generation.commandBuffer() &&
+               state.mScissors[0].mFirstScissor == 0 && state.mScissors[0].mScissorCount == 1 &&
+               state.mScissors[0].mScissor.offset.x == 0 && state.mScissors[0].mScissor.offset.y == 0 &&
+               state.mScissors[0].mScissor.extent.width == extent.width && state.mScissors[0].mScissor.extent.height == extent.height);
+    ensure("draw mode emits exactly one three-vertex, one-instance draw",
+           state.mDraws.size() == 1 && state.mDraws[0].mCommandBuffer == generation.commandBuffer() && state.mDraws[0].mVertexCount == 3 &&
+               state.mDraws[0].mInstanceCount == 1 && state.mDraws[0].mFirstVertex == 0 && state.mDraws[0].mFirstInstance == 0 &&
+               state.mEndedRenderPassBuffers == std::vector<VkCommandBuffer>{ generation.commandBuffer() } && state.mClears.empty());
+
+    const VkImage image = parents.mImages.image(2);
+    ensure("draw mode preserves the acquire-to-color and color-to-present barriers on the exact image",
+           state.mBarriers.size() == 2 && state.mBarriers[0].mSourceStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &&
+               state.mBarriers[0].mDestinationStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &&
+               state.mBarriers[0].mImageBarrier.srcAccessMask == 0 &&
+               state.mBarriers[0].mImageBarrier.dstAccessMask == VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT &&
+               state.mBarriers[0].mImageBarrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+               state.mBarriers[0].mImageBarrier.newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+               state.mBarriers[0].mImageBarrier.image == image &&
+               state.mBarriers[1].mSourceStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &&
+               state.mBarriers[1].mDestinationStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+               state.mBarriers[1].mImageBarrier.srcAccessMask == VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT &&
+               state.mBarriers[1].mImageBarrier.dstAccessMask == 0 &&
+               state.mBarriers[1].mImageBarrier.oldLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+               state.mBarriers[1].mImageBarrier.newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
+               state.mBarriers[1].mImageBarrier.image == image);
+    ensure("draw submission waits for image availability at color output and presents the paired image",
+           state.mQueueSubmits.size() == 1 && state.mQueueSubmits[0].mWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &&
+               state.mQueueSubmits[0].mWaitSemaphore == generation.imageAvailableSemaphore() &&
+               state.mQueueSubmits[0].mSignalSemaphore == generation.presentationReadySemaphore() && state.mPresents.size() == 1 &&
+               state.mPresents[0].mImageIndex == 2 && state.mFenceWaits.size() == 2);
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<38>()
+{
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents             = makeParents(state);
+        auto            presentation_target = makePresentationTarget(parents);
+        auto            first_pipeline      = makePresentationPipeline(parents, presentation_target);
+        auto            second_pipeline     = makePresentationPipeline(parents, presentation_target);
+        auto            generation          = takeGeneration(resolveSlot(parents));
+        ensure("the two pipeline owners deliberately expose exact-looking handles",
+               first_pipeline.pipelineLayout() == second_pipeline.pipelineLayout() &&
+                   first_pipeline.pipeline() == second_pipeline.pipeline());
+        ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, first_pipeline),
+                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+
+        ensureOperationError(resolveRenderPassDrawPresentation(generation, parents, presentation_target, second_pipeline),
+                             VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration,
+                             VulkanSwapchainFrameSlotDisposition::Reusable);
+        const auto distinct = generation.executeAcquireRenderPassDrawToPresent(presentation_target, second_pipeline, {});
+        ensure("a handle-equivalent replacement pipeline fails exact owner identity before acquisition",
+               requirePresentationError(distinct).mCode ==
+                       VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration &&
+                   state.mInstanceLookups.empty() && state.mDeviceLookups.empty() && state.mEvents.empty() && state.mAcquires.empty());
+
+        first_pipeline.reset();
+        const auto stale = generation.executeAcquireRenderPassDrawToPresent(presentation_target, first_pipeline, {});
+        ensure("a stale retained pipeline fails its handle snapshots before acquisition",
+               requirePresentationError(stale).mCode ==
+                       VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration &&
+                   state.mEvents.empty() && state.mAcquires.empty());
+    }
+
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            generation            = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
+                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices                     = { 1 };
+        state.mResetPresentationPipelineOnAcquire = &presentation_pipeline;
+
+        const auto  result = generation.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, {});
+        const auto& error  = requirePresentationError(result);
+        ensure("post-acquire pipeline invalidation retains the exact cancellable image obligation",
+               error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration &&
+                   error.mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired && error.mImageIndex == 1 &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired && generation.acquiredImageIndex() == 1 &&
+                   state.mEvents == std::vector<std::string>{ "wait fence", "acquire image" } && state.mCommandBufferResets.empty() &&
+                   state.mBarriers.empty() && state.mRenderPassBegins.empty() && state.mPipelineBinds.empty() && state.mDraws.empty() &&
+                   state.mQueueSubmits.empty());
+
+        presentation_target.reset();
+        ensureOperationSuccess(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("cancellation does not consult the stale target or pipeline",
+               state.mQueueSubmits.size() == 1 && state.mQueueSubmits[0].mCommandBufferCount == 0 &&
+                   state.mQueueSubmits[0].mWaitSemaphore == generation.imageAvailableSemaphore() && state.mReleases.size() == 1 &&
+                   state.mReleases[0].mImageIndex == 1 && !generation.acquiredImageIndex());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<39>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents               = makeParents(state);
+    auto            presentation_target   = makePresentationTarget(parents);
+    auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+    auto            generation            = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    auto moved = std::move(generation);
+    state.clearFrameRecords();
+
+    const auto source = generation.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, {});
+    ensure("moving a draw-bound slot disarms target and pipeline provenance in the source",
+           requirePresentationError(source).mCode == VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration &&
+               state.mEvents.empty());
+
+    state.mAcquireIndices = { 1 };
+    ensure("moving a draw-bound slot transfers every callback and exact owner snapshot",
+           requirePresentationSuccess(moved.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, {})) ==
+                   VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1 } &&
+               state.mPipelineBinds.size() == 1 && state.mPipelineBinds[0].mPipeline == presentation_pipeline.pipeline() &&
+               state.mDraws.size() == 1);
+
+    state.clearFrameRecords();
+    moved.reset();
+    state.clearFrameRecords();
+    const auto reset_result = moved.executeAcquireToPresent();
+    ensure("reset clears all transferred presentation and draw callbacks",
+           requirePresentationError(reset_result).mCode == VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand &&
+               requirePresentationError(reset_result).mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences && state.mEvents.empty() &&
+               state.mAcquires.empty());
+    presentation_pipeline.reset();
+    presentation_target.reset();
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<40>()
+{
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents             = makeParents(state);
+        auto            presentation_target = makePresentationTarget(parents);
+        auto            generation          = takeGeneration(resolveSlot(parents));
+        state.clearFrameRecords();
+        state.mMissingCommand = MissingCommand::CmdBindPipeline;
+
+        ensureOperationSuccess(resolvePresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensureOperationSuccess(resolveClearPresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensureOperationSuccess(resolveRenderPassPresentation(generation, parents, presentation_target),
+                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices = { 0, 1, 2 };
+
+        ensure("layout-only presentation remains usable without a pipeline",
+               requirePresentationSuccess(generation.executeAcquireToPresent()).mImageIndex == 0);
+        ensure("transfer clear remains usable without a pipeline",
+               requirePresentationSuccess(generation.executeAcquireClearToPresent({})).mImageIndex == 1);
+        ensure("render-pass clear remains usable without a pipeline",
+               requirePresentationSuccess(generation.executeAcquireRenderPassClearToPresent(presentation_target, {})).mImageIndex == 2);
+        ensure("all legacy modes remain independent of the missing draw command",
+               state.mPipelineBinds.empty() && state.mViewports.empty() && state.mScissors.empty() && state.mDraws.empty() &&
+                   state.mClears.size() == 1 && state.mRenderPassBegins.size() == 1 && state.mPresents.size() == 3);
+    }
+
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            generation            = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
+                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensureOperationSuccess(resolveClearPresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
+        presentation_pipeline.reset();
+        state.clearFrameRecords();
+        state.mAcquireIndices = { 0, 1, 2 };
+
+        ensure("layout-only presentation ignores stale retained pipeline provenance",
+               requirePresentationSuccess(generation.executeAcquireToPresent()).mImageIndex == 0);
+        ensure("transfer clear ignores stale retained pipeline provenance",
+               requirePresentationSuccess(generation.executeAcquireClearToPresent({})).mImageIndex == 1);
+        ensure("render-pass clear ignores stale retained pipeline provenance",
+               requirePresentationSuccess(generation.executeAcquireRenderPassClearToPresent(presentation_target, {})).mImageIndex == 2);
+        ensure("legacy execution never emits a draw from stale retained callbacks",
+               state.mPipelineBinds.empty() && state.mViewports.empty() && state.mScissors.empty() && state.mDraws.empty());
+    }
+
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            generation            = takeGeneration(resolveSlot(parents));
+        ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
+                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        state.clearFrameRecords();
+        state.mAcquireIndices = { 2 };
+        state.mPresentResults = { VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS };
+
+        const auto first = generation.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, {});
+        ensure("a retryable draw present failure retains the presentation-ready transaction",
+               requirePresentationError(first).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+                   generation.acquiredImageIndex() == 2);
+        presentation_pipeline.reset();
+        presentation_target.reset();
+        ensure("presentation retry and completion do not consult stale draw owners",
+               requirePresentationSuccess(generation.retryPresentation()) ==
+                       VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2 } &&
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
+    }
 }
 
 } // namespace tut

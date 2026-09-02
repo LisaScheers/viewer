@@ -44,8 +44,10 @@ constexpr U32  REBUILT_BACKING_WIDTH      = 1440;
 constexpr U32  REBUILT_BACKING_HEIGHT     = 810;
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_CLEAR_ONE{ { 0.125f, 0.25f, 0.5f, 1.0f } };
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_CLEAR_TWO{ { 0.75f, 0.125f, 0.375f, 1.0f } };
+constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_DRAW_CLEAR{ { 0.1875f, 0.5625f, 0.8125f, 1.0f } };
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_CLEAR_ONE{ { 0.0625f, 0.625f, 0.25f, 1.0f } };
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_CLEAR_TWO{ { 0.875f, 0.375f, 0.0625f, 1.0f } };
+constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_DRAW_CLEAR{ { 0.3125f, 0.75f, 0.125f, 1.0f } };
 
 static_assert(INITIAL_CLEAR_ONE != INITIAL_CLEAR_TWO && INITIAL_CLEAR_ONE != REBUILT_CLEAR_ONE &&
               INITIAL_CLEAR_ONE != REBUILT_CLEAR_TWO && INITIAL_CLEAR_TWO != REBUILT_CLEAR_ONE &&
@@ -400,6 +402,27 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("the initial render-pass clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("the initial render-pass clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    const F64  initial_draw_backing_scale = owner->backingScale();
+    const auto initial_draw_presentation  = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(INITIAL_DRAW_CLEAR);
+    ensure("the complete initial target-pipeline-slot chain submits and presents one diagnostic draw",
+           presentationCompleted(initial_draw_presentation, resolved_image_count) &&
+               instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance_generation->swapchainFrameAcquiredImageIndex());
+    ensure("the initial diagnostic draw retains all four synchronization handles",
+           instance_generation->swapchainFrameImageAvailableSemaphore() == initial_image_available &&
+               instance_generation->swapchainFramePresentationReadySemaphore() == initial_presentation_ready &&
+               instance_generation->swapchainFrameSubmissionFence() == initial_submission_fence &&
+               instance_generation->swapchainFramePresentCompletionFence() == initial_present_completion_fence);
+    ensure_equals("the initial diagnostic draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("the initial diagnostic draw preserves the private Cocoa owner and exact Vulkan generation",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == initial_draw_backing_scale &&
+               owner->drawableWidth() == BACKING_WIDTH && owner->drawableHeight() == BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("the initial diagnostic draw creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the initial diagnostic draw leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     const VkSurfaceKHR    retained_surface         = instance_generation->surface();
     const VkPhysicalDevice retained_physical_device = instance_generation->physicalDevice();
     const VkDevice         retained_logical_device  = instance_generation->logicalDevice();
@@ -481,6 +504,27 @@ void window_vulkan_macos_wsi_object::test<1>()
                   instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
     ensure("the rebuilt render-pass clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("the rebuilt render-pass clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const F64  rebuilt_draw_backing_scale = owner->backingScale();
+    const auto rebuilt_draw_presentation  = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(REBUILT_DRAW_CLEAR);
+    ensure("the rebuilt target-pipeline-slot chain submits and presents one diagnostic draw at the changed extent",
+           presentationCompleted(rebuilt_draw_presentation, resolved_image_count) &&
+               instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance_generation->swapchainFrameAcquiredImageIndex());
+    ensure("the rebuilt diagnostic draw retains all four synchronization handles",
+           instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
+               instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
+               instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
+               instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
+    ensure_equals("the rebuilt diagnostic draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("the rebuilt diagnostic draw preserves the private Cocoa owner and exact changed geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == rebuilt_draw_backing_scale &&
+               owner->drawableWidth() == REBUILT_BACKING_WIDTH && owner->drawableHeight() == REBUILT_BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("the rebuilt diagnostic draw creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the rebuilt diagnostic draw leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     ensure("the native smoke explicitly resets the frame slot before swapchain images", owner->resetSwapchainFrameSlotGeneration());
     ensure("explicit frame-slot reset removes all six owned handles",

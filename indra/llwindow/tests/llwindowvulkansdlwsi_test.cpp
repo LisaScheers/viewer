@@ -261,8 +261,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool swapchain_rebuild_extent_exact    = false;
     bool frame_slot_transfer_clear_before_rebuild    = false;
     bool frame_slot_render_pass_clear_before_rebuild = false;
+    bool frame_slot_render_pass_draw_before_rebuild  = false;
     bool frame_slot_transfer_clear_after_rebuild     = false;
     bool frame_slot_render_pass_clear_after_rebuild  = false;
+    bool frame_slot_render_pass_draw_after_rebuild   = false;
     bool frame_slot_handles_untouched      = false;
     bool frame_slot_presentation_clean     = false;
     bool frame_slot_explicitly_reset       = false;
@@ -494,6 +496,12 @@ void window_vulkan_sdl_wsi_object::test<1>()
                                                                  instance_generation->swapchainFrameSlotDisposition() ==
                                                                      LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                                                                  !instance_generation->swapchainFrameAcquiredImageIndex();
+                    const auto draw_before_rebuild =
+                        mutable_generation->acquireRenderPassDrawToPresentSwapchainFrameSlot(operation_request, clear_color);
+                    frame_slot_render_pass_draw_before_rebuild = presentationCompleted(draw_before_rebuild, image_count) &&
+                                                                 instance_generation->swapchainFrameSlotDisposition() ==
+                                                                     LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                                 !instance_generation->swapchainFrameAcquiredImageIndex();
 
                     const LLCoordScreen requested_size(current_drawable.mX + 32, current_drawable.mY + 24);
                     swapchain_resize_requested = window->setSize(requested_size);
@@ -574,6 +582,12 @@ void window_vulkan_sdl_wsi_object::test<1>()
                         const auto second_clear_after_rebuild =
                             mutable_generation->acquireRenderPassClearToPresentSwapchainFrameSlot(operation_request, clear_color);
                         frame_slot_render_pass_clear_after_rebuild = presentationCompleted(second_clear_after_rebuild, image_count) &&
+                                                                    instance_generation->swapchainFrameSlotDisposition() ==
+                                                                        LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
+                                                                    !instance_generation->swapchainFrameAcquiredImageIndex();
+                        const auto draw_after_rebuild =
+                            mutable_generation->acquireRenderPassDrawToPresentSwapchainFrameSlot(operation_request, clear_color);
+                        frame_slot_render_pass_draw_after_rebuild = presentationCompleted(draw_after_rebuild, image_count) &&
                                                                     instance_generation->swapchainFrameSlotDisposition() ==
                                                                         LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                                                                     !instance_generation->swapchainFrameAcquiredImageIndex();
@@ -749,10 +763,14 @@ void window_vulkan_sdl_wsi_object::test<1>()
            frame_slot_transfer_clear_before_rebuild);
     ensure("the native SDL owner completes one render-pass clear before rebuild",
            frame_slot_render_pass_clear_before_rebuild);
+    ensure("the complete initial target-pipeline-slot chain completes one diagnostic draw before rebuild",
+           frame_slot_render_pass_draw_before_rebuild);
     ensure("the rebuilt native SDL owner completes one legacy transfer clear", frame_slot_transfer_clear_after_rebuild);
     ensure("the rebuilt native SDL owner completes one render-pass clear", frame_slot_render_pass_clear_after_rebuild);
-    ensure("both post-rebuild clear-present cycles retain all four synchronization handles", frame_slot_handles_untouched);
-    ensure("four mixed clear-present cycles and rebuild emit no validation messages", frame_slot_presentation_clean);
+    ensure("the rebuilt target-pipeline-slot chain completes one diagnostic draw at the changed extent",
+           frame_slot_render_pass_draw_after_rebuild);
+    ensure("all post-rebuild presentation cycles retain all four synchronization handles", frame_slot_handles_untouched);
+    ensure("six mixed presentation cycles and rebuild emit no validation messages", frame_slot_presentation_clean);
     ensure("the native smoke explicitly resets the frame-slot child before its parents", frame_slot_explicitly_reset);
     ensure("the native smoke explicitly resets the presentation pipeline after the frame slot",
            presentation_pipeline_explicitly_reset);

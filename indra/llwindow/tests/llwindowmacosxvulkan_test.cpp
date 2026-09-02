@@ -86,6 +86,10 @@ struct FakeState
         mPhysicalProperties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
         mPhysicalProperties.limits.maxFramebufferWidth  = 4096;
         mPhysicalProperties.limits.maxFramebufferHeight = 2160;
+        mPhysicalProperties.limits.maxViewportDimensions[0] = 4096;
+        mPhysicalProperties.limits.maxViewportDimensions[1] = 4096;
+        mPhysicalProperties.limits.viewportBoundsRange[0]   = -8192.0f;
+        mPhysicalProperties.limits.viewportBoundsRange[1]   = 8191.0f;
         std::memcpy(mPhysicalProperties.deviceName, "macOS adapter fake", sizeof("macOS adapter fake"));
         mSurfaceCapabilities.minImageCount       = 2;
         mSurfaceCapabilities.maxImageCount       = 3;
@@ -236,6 +240,21 @@ struct FakeState
     VkRect2D                   mRenderPassArea{};
     VkClearValue               mRenderPassClear{};
     VkSubpassContents          mRenderPassContents         = VK_SUBPASS_CONTENTS_MAX_ENUM;
+    std::size_t                mBindPipelineCount          = 0;
+    std::size_t                mSetViewportCount           = 0;
+    std::size_t                mSetScissorCount            = 0;
+    std::size_t                mDrawCount                  = 0;
+    VkCommandBuffer            mDrawCommandBuffer          = VK_NULL_HANDLE;
+    VkPipelineBindPoint        mPipelineBindPoint          = VK_PIPELINE_BIND_POINT_MAX_ENUM;
+    VkPipeline                 mBoundPipeline              = VK_NULL_HANDLE;
+    std::uint32_t              mFirstViewport              = std::numeric_limits<std::uint32_t>::max();
+    VkViewport                 mViewport{};
+    std::uint32_t              mFirstScissor = std::numeric_limits<std::uint32_t>::max();
+    VkRect2D                   mScissor{};
+    std::uint32_t              mDrawVertexCount            = 0;
+    std::uint32_t              mDrawInstanceCount          = 0;
+    std::uint32_t              mDrawFirstVertex            = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t              mDrawFirstInstance          = std::numeric_limits<std::uint32_t>::max();
     VkCommandBuffer            mClearCommandBuffer         = VK_NULL_HANDLE;
     VkImage                    mClearedImage               = VK_NULL_HANDLE;
     VkImageLayout              mClearImageLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1088,6 +1107,61 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdEndRenderPass(VkCommandBuffer command_buffer) 
     }
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer     command_buffer,
+                                               VkPipelineBindPoint pipeline_bind_point,
+                                               VkPipeline          pipeline) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer)
+    {
+        ++gState->mBindPipelineCount;
+        gState->mDrawCommandBuffer = command_buffer;
+        gState->mPipelineBindPoint = pipeline_bind_point;
+        gState->mBoundPipeline     = pipeline;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdSetViewport(VkCommandBuffer   command_buffer,
+                                              std::uint32_t     first_viewport,
+                                              std::uint32_t     viewport_count,
+                                              const VkViewport* viewports) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer && viewport_count == 1 && viewports)
+    {
+        ++gState->mSetViewportCount;
+        gState->mFirstViewport = first_viewport;
+        gState->mViewport      = viewports[0];
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdSetScissor(VkCommandBuffer command_buffer,
+                                             std::uint32_t   first_scissor,
+                                             std::uint32_t   scissor_count,
+                                             const VkRect2D* scissors) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer && scissor_count == 1 && scissors)
+    {
+        ++gState->mSetScissorCount;
+        gState->mFirstScissor = first_scissor;
+        gState->mScissor      = scissors[0];
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdDraw(VkCommandBuffer command_buffer,
+                                       std::uint32_t   vertex_count,
+                                       std::uint32_t   instance_count,
+                                       std::uint32_t   first_vertex,
+                                       std::uint32_t   first_instance) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer)
+    {
+        ++gState->mDrawCount;
+        gState->mDrawVertexCount   = vertex_count;
+        gState->mDrawInstanceCount = instance_count;
+        gState->mDrawFirstVertex   = first_vertex;
+        gState->mDrawFirstInstance = first_instance;
+    }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
 {
     const auto* fence_info = present_info ? static_cast<const VkSwapchainPresentFenceInfoKHR*>(present_info->pNext) : nullptr;
@@ -1163,6 +1237,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdClearColorImage);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdBeginRenderPass);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdEndRenderPass);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdBindPipeline);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdSetViewport);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdSetScissor);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdDraw);
     if (std::strcmp(name, "vkQueuePresentKHR") == 0)
         return eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
@@ -1615,6 +1693,11 @@ void window_macosx_vulkan_object::test<1>()
                                      std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireRenderPassClearToPresentSwapchainFrameSlot(
+        std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireRenderPassDrawToPresentSwapchainFrameSlot(
+                                     std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireRenderPassDrawToPresentSwapchainFrameSlot(
         std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotPresentation()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotPresentationCompletion()));
@@ -3259,6 +3342,165 @@ void window_macosx_vulkan_object::test<21>()
                   std::size_t{ 1 });
     ensure_equals("presentation-pipeline adapter preserves one instance destruction", state.mDestroyInstanceCount,
                   std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_macosx_vulkan_object::test<22>()
+{
+    using namespace LLRenderVulkan;
+
+    constexpr VulkanSwapchainFrameClearColor draw_clear{ { 0.15625f, 0.46875f, 0.78125f, 1.0f } };
+
+    FakeState   missing_state;
+    ScopedState active(missing_state);
+    auto        missing_result = acquireLLWindowMacOSXVulkan(createInfo(), 221, fakeOperations(missing_state));
+    auto*       missing_owner  = acquiredWindow(missing_result);
+    ensure("draw adapter fixture acquires its private Cocoa owner", missing_owner != nullptr);
+
+    const auto  missing_instance_result = missing_owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto* missing_instance        = presentationError(missing_instance_result);
+    ensure("diagnostic draw requires a live instance before observing Cocoa geometry",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               missing_state.mRefreshCount == 0 && missing_state.mAcquireNextImageCount == 0 && missing_state.mDrawCount == 0);
+
+    ensure("the missing-pipeline fixture acquires the exact target and a younger frame slot",
+           !missing_owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
+               !missing_owner->acquireSurfaceGeneration() && !missing_owner->acquirePresentationDeviceGeneration() &&
+               !missing_owner->acquireLogicalDeviceGeneration() && !missing_owner->acquireSwapchainConfigurationGeneration() &&
+               !missing_owner->acquireSwapchainGeneration() && !missing_owner->acquireSwapchainImagesGeneration() &&
+               !missing_owner->acquireSwapchainPresentationTargetGeneration() && !missing_owner->acquireSwapchainFrameSlotGeneration());
+    const std::size_t missing_pipeline_refreshes = missing_state.mRefreshCount;
+    const auto        missing_pipeline_result    = missing_owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto*       missing_pipeline           = presentationError(missing_pipeline_result);
+    ensure("diagnostic draw reports the typed missing presentation-pipeline parent after one current identity refresh",
+           missing_pipeline &&
+               missing_pipeline->mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive &&
+               missing_state.mRefreshCount == missing_pipeline_refreshes + 1 && missing_state.mAcquireNextImageCount == 0 &&
+               missing_state.mBindPipelineCount == 0 && missing_state.mDrawCount == 0);
+    missing_state.mAcquiredImageIndex = 1;
+    const auto clear_without_pipeline = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(draw_clear);
+    ensure("the existing render-pass clear route remains draw-free without a presentation pipeline",
+           presentationSucceeded(clear_without_pipeline, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
+               missing_state.mBeginRenderPassCount == 1 && missing_state.mEndRenderPassCount == 1 &&
+               missing_state.mBindPipelineCount == 0 && missing_state.mSetViewportCount == 0 && missing_state.mSetScissorCount == 0 &&
+               missing_state.mDrawCount == 0);
+    missing_state.mOwnerDuringDestroy = missing_owner;
+    ensure("the missing-pipeline fixture tears down child-first", missing_owner->reset());
+
+    FakeState state;
+    active.use(state);
+    auto  result = acquireLLWindowMacOSXVulkan(createInfo(), 222, fakeOperations(state));
+    auto* owner  = acquiredWindow(result);
+    ensure("diagnostic draw fixture acquires target, pipeline, then a fresh frame slot", owner && acquireCompleteSwapchainChain(*owner));
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("complete-chain acquisition has no implicit draw hook",
+           instance && owner->isGenerationCurrent(222) && instance->nativeWindowGeneration() == 222 &&
+               instance->hasSwapchainPresentationTargetGeneration() && instance->hasSwapchainPresentationPipelineGeneration() &&
+               instance->hasSwapchainFrameSlotGeneration() && state.mBindPipelineCount == 0 && state.mSetViewportCount == 0 &&
+               state.mSetScissorCount == 0 && state.mDrawCount == 0);
+    const std::size_t refreshes_after_chain = state.mRefreshCount;
+
+    state.mMainThread           = false;
+    const auto  off_main_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto* off_main        = presentationError(off_main_result);
+    ensure("off-main diagnostic draw fails before refreshing or dispatching native work",
+           off_main && off_main->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_chain && state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+
+    state.mMainThread                 = true;
+    state.mRefreshSucceeds            = false;
+    const auto  failed_refresh_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto* failed_refresh        = presentationError(failed_refresh_result);
+    ensure("a failed Cocoa refresh is a stale diagnostic draw request",
+           failed_refresh && failed_refresh->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_chain + 1 && state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+
+    state.mRefreshSucceeds            = true;
+    state.mRefreshMutation            = RefreshMutation::Layer;
+    const auto  stale_identity_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto* stale_identity        = presentationError(stale_identity_result);
+    ensure("a callback-mutated Metal-layer identity is rejected before diagnostic draw dispatch",
+           stale_identity && stale_identity->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_chain + 2 && state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+
+    state.mRefreshMutation         = RefreshMutation::None;
+    state.mRefreshWidth            = 0;
+    const auto  zero_extent_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto* zero_extent        = presentationError(zero_extent_result);
+    ensure("zero refreshed Cocoa backing pixels fail without replacing the retained geometry",
+           zero_extent && zero_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mRefreshCount == refreshes_after_chain + 3 && owner->drawableWidth() == 1280 && owner->drawableHeight() == 720 &&
+               state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+
+    state.mRefreshWidth               = 1600;
+    state.mRefreshHeight              = 900;
+    const auto  changed_extent_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto* changed_extent        = presentationError(changed_extent_result);
+    ensure("diagnostic draw forwards changed positive pixels to exact parent authentication",
+           changed_extent && changed_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch &&
+               state.mRefreshCount == refreshes_after_chain + 4 && owner->drawableWidth() == 1600 && owner->drawableHeight() == 900 &&
+               state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+
+    VulkanSwapchainFrameClearColor invalid_clear = draw_clear;
+    invalid_clear.mRgba[0]                       = -0.01f;
+    state.mRefreshWidth                          = 1280;
+    state.mRefreshHeight                         = 720;
+    const auto  invalid_clear_result             = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(invalid_clear);
+    const auto* invalid_clear_error              = presentationError(invalid_clear_result);
+    ensure("diagnostic draw preserves the core's typed normalized-color preflight",
+           invalid_clear_error && invalid_clear_error->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor &&
+               !invalid_clear_error->mOperationError && state.mRefreshCount == refreshes_after_chain + 5 &&
+               state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+
+    state.mAcquiredImageIndex                                              = 2;
+    const VkRenderPass                                expected_render_pass = instance->swapchainPresentationRenderPass();
+    const VkFramebuffer                               expected_framebuffer = instance->swapchainPresentationFramebuffer(2);
+    const VkPipeline                                  expected_pipeline    = instance->swapchainPresentationPipeline();
+    const VkExtent2D                                  expected_extent      = instance->swapchainImageExtent();
+    const auto                                        draw_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const VulkanSwapchainFrameSlotPresentationSuccess expected_success{ VulkanSwapchainFrameSlotPresentationOutcome::Presented,
+                                                                        std::uint32_t{ 2 } };
+    ensure("diagnostic draw returns the exact parent success and reusable image disposition",
+           draw_result == VulkanSwapchainFrameSlotParentPresentationResult{ expected_success } &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+    ensure("diagnostic draw refreshes once and records one balanced submitted pass",
+           state.mRefreshCount == refreshes_after_chain + 6 && owner->drawableWidth() == 1280 && owner->drawableHeight() == 720 &&
+               state.mAcquireNextImageCount == 1 && state.mPipelineBarrierCount == 2 && state.mBeginRenderPassCount == 1 &&
+               state.mEndRenderPassCount == 1 && state.mClearColorImageCount == 0 && state.mBindPipelineCount == 1 &&
+               state.mSetViewportCount == 1 && state.mSetScissorCount == 1 && state.mDrawCount == 1 && state.mQueueSubmitCount == 1 &&
+               state.mQueuePresentCount == 1 && state.mWaitForFencesCount == 2 &&
+               state.mSubmitWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    ensure("diagnostic draw forwards the acquired framebuffer, pipeline, and exact clear value",
+           state.mRenderPassCommandBuffer == state.mCommandBuffer && state.mRenderPass == expected_render_pass &&
+               state.mRenderPassFramebuffer == expected_framebuffer && state.mRenderPassArea.offset.x == 0 &&
+               state.mRenderPassArea.offset.y == 0 && state.mRenderPassArea.extent.width == expected_extent.width &&
+               state.mRenderPassArea.extent.height == expected_extent.height && state.mRenderPassContents == VK_SUBPASS_CONTENTS_INLINE &&
+               state.mDrawCommandBuffer == state.mCommandBuffer && state.mPipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
+               state.mBoundPipeline == expected_pipeline && state.mRenderPassClear.color.float32[0] == draw_clear.mRgba[0] &&
+               state.mRenderPassClear.color.float32[1] == draw_clear.mRgba[1] &&
+               state.mRenderPassClear.color.float32[2] == draw_clear.mRgba[2] &&
+               state.mRenderPassClear.color.float32[3] == draw_clear.mRgba[3]);
+    ensure("diagnostic draw forwards one full positive-height dynamic viewport and matching scissor",
+           state.mFirstViewport == 0 && state.mViewport.x == 0.0f && state.mViewport.y == 0.0f &&
+               state.mViewport.width == static_cast<float>(expected_extent.width) &&
+               state.mViewport.height == static_cast<float>(expected_extent.height) && state.mViewport.minDepth == 0.0f &&
+               state.mViewport.maxDepth == 1.0f && state.mFirstScissor == 0 && state.mScissor.offset.x == 0 &&
+               state.mScissor.offset.y == 0 && state.mScissor.extent.width == expected_extent.width &&
+               state.mScissor.extent.height == expected_extent.height);
+    ensure("diagnostic draw forwards one exact three-vertex, one-instance draw",
+           state.mDrawVertexCount == 3 && state.mDrawInstanceCount == 1 && state.mDrawFirstVertex == 0 && state.mDrawFirstInstance == 0);
+
+    state.mAcquiredImageIndex = 1;
+    const auto clear_result   = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(draw_clear);
+    ensure("the existing render-pass clear wrapper remains independent from the explicit draw route",
+           presentationSucceeded(clear_result, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
+               state.mRefreshCount == refreshes_after_chain + 7 && state.mBeginRenderPassCount == 2 && state.mEndRenderPassCount == 2 &&
+               state.mBindPipelineCount == 1 && state.mSetViewportCount == 1 && state.mSetScissorCount == 1 && state.mDrawCount == 1);
+
+    state.mOwnerDuringDestroy = owner;
+    ensure("the diagnostic draw fixture tears down child-first", owner->reset());
 }
 
 } // namespace tut

@@ -93,7 +93,11 @@ enum class MissingCommand : std::uint8_t
     CreatePipelineLayout,
     DestroyPipelineLayout,
     CreateGraphicsPipelines,
-    DestroyPipeline
+    DestroyPipeline,
+    CmdBindPipeline,
+    CmdSetViewport,
+    CmdSetScissor,
+    CmdDraw
 };
 
 enum class Event : std::uint8_t
@@ -135,7 +139,11 @@ enum class Event : std::uint8_t
     CreatePipelineLayout,
     DestroyPipelineLayout,
     CreateGraphicsPipeline,
-    DestroyPipeline
+    DestroyPipeline,
+    BindPipeline,
+    SetViewport,
+    SetScissor,
+    Draw
 };
 
 template<typename Handle>
@@ -440,6 +448,10 @@ struct FakeState
     std::size_t           mClearColorImageCalls         = 0;
     std::size_t           mBeginRenderPassCalls         = 0;
     std::size_t           mEndRenderPassCalls           = 0;
+    std::size_t             mBindPipelineCalls            = 0;
+    std::size_t             mSetViewportCalls             = 0;
+    std::size_t             mSetScissorCalls              = 0;
+    std::size_t             mDrawCalls                    = 0;
     std::size_t           mQueuePresentCalls            = 0;
     std::size_t           mReleaseSwapchainImagesCalls  = 0;
     VkDevice              mOperationDevice          = VK_NULL_HANDLE;
@@ -457,6 +469,14 @@ struct FakeState
     VkRect2D              mOperationRenderArea{};
     VkClearValue          mRenderPassClearValue{};
     VkSubpassContents     mOperationSubpassContents     = VK_SUBPASS_CONTENTS_MAX_ENUM;
+    VkPipelineBindPoint     mOperationPipelineBindPoint   = VK_PIPELINE_BIND_POINT_MAX_ENUM;
+    VkPipeline              mOperationPipeline            = VK_NULL_HANDLE;
+    VkViewport              mOperationViewport{};
+    VkRect2D                mOperationScissor{};
+    std::uint32_t           mDrawVertexCount   = 0;
+    std::uint32_t           mDrawInstanceCount = 0;
+    std::uint32_t           mDrawFirstVertex   = 0;
+    std::uint32_t           mDrawFirstInstance = 0;
 
     bool        mGenerationCurrent   = true;
     std::size_t mGenerationChecks    = 0;
@@ -479,6 +499,10 @@ struct FakeState
         mPhysicalDeviceProperties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
         mPhysicalDeviceProperties.limits.maxFramebufferWidth  = 4096;
         mPhysicalDeviceProperties.limits.maxFramebufferHeight = 2160;
+        mPhysicalDeviceProperties.limits.maxViewportDimensions[0] = 4096;
+        mPhysicalDeviceProperties.limits.maxViewportDimensions[1] = 4096;
+        mPhysicalDeviceProperties.limits.viewportBoundsRange[0]   = -32768.0f;
+        mPhysicalDeviceProperties.limits.viewportBoundsRange[1]   = 32767.0f;
         std::memcpy(mPhysicalDeviceProperties.deviceName, "fake-presentation-device", sizeof("fake-presentation-device"));
         mQueueFamilyProperties.queueFlags     = VK_QUEUE_GRAPHICS_BIT;
         mQueueFamilyProperties.queueCount     = 1;
@@ -1598,6 +1622,67 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdBeginRenderPass(VkCommandBuffer             co
     gFakeState->mEvents.push_back(Event::BeginRenderPass);
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer     command_buffer,
+                                               VkPipelineBindPoint pipeline_bind_point,
+                                               VkPipeline          pipeline) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mCommandBuffer || pipeline == VK_NULL_HANDLE)
+    {
+        return;
+    }
+    ++gFakeState->mBindPipelineCalls;
+    gFakeState->mOperationCommandBuffer     = command_buffer;
+    gFakeState->mOperationPipelineBindPoint = pipeline_bind_point;
+    gFakeState->mOperationPipeline          = pipeline;
+    gFakeState->mEvents.push_back(Event::BindPipeline);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdSetViewport(VkCommandBuffer   command_buffer,
+                                              std::uint32_t     first_viewport,
+                                              std::uint32_t     viewport_count,
+                                              const VkViewport* viewports) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mCommandBuffer || first_viewport != 0 || viewport_count != 1 || !viewports)
+    {
+        return;
+    }
+    ++gFakeState->mSetViewportCalls;
+    gFakeState->mOperationViewport = viewports[0];
+    gFakeState->mEvents.push_back(Event::SetViewport);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdSetScissor(VkCommandBuffer command_buffer,
+                                             std::uint32_t   first_scissor,
+                                             std::uint32_t   scissor_count,
+                                             const VkRect2D* scissors) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mCommandBuffer || first_scissor != 0 || scissor_count != 1 || !scissors)
+    {
+        return;
+    }
+    ++gFakeState->mSetScissorCalls;
+    gFakeState->mOperationScissor = scissors[0];
+    gFakeState->mEvents.push_back(Event::SetScissor);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdDraw(VkCommandBuffer command_buffer,
+                                       std::uint32_t   vertex_count,
+                                       std::uint32_t   instance_count,
+                                       std::uint32_t   first_vertex,
+                                       std::uint32_t   first_instance) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mCommandBuffer)
+    {
+        return;
+    }
+    ++gFakeState->mDrawCalls;
+    gFakeState->mDrawVertexCount   = vertex_count;
+    gFakeState->mDrawInstanceCount = instance_count;
+    gFakeState->mDrawFirstVertex   = first_vertex;
+    gFakeState->mDrawFirstInstance = first_instance;
+    gFakeState->mEvents.push_back(Event::Draw);
+}
+
 VKAPI_ATTR void VKAPI_CALL fakeCmdEndRenderPass(VkCommandBuffer command_buffer) noexcept
 {
     if (!gFakeState || command_buffer != gFakeState->mCommandBuffer)
@@ -1775,6 +1860,22 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     if (std::strcmp(name, "vkCmdBeginRenderPass") == 0)
     {
         return gFakeState->mMissing == MissingCommand::CmdBeginRenderPass ? nullptr : eraseFunctionType(fakeCmdBeginRenderPass);
+    }
+    if (std::strcmp(name, "vkCmdBindPipeline") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CmdBindPipeline ? nullptr : eraseFunctionType(fakeCmdBindPipeline);
+    }
+    if (std::strcmp(name, "vkCmdSetViewport") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CmdSetViewport ? nullptr : eraseFunctionType(fakeCmdSetViewport);
+    }
+    if (std::strcmp(name, "vkCmdSetScissor") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CmdSetScissor ? nullptr : eraseFunctionType(fakeCmdSetScissor);
+    }
+    if (std::strcmp(name, "vkCmdDraw") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CmdDraw ? nullptr : eraseFunctionType(fakeCmdDraw);
     }
     if (std::strcmp(name, "vkCmdEndRenderPass") == 0)
     {
@@ -2172,6 +2273,115 @@ bool presentationTargetReplacementWindowIsCurrent(void* userdata, std::uint64_t 
 {
     const auto* context = static_cast<const PresentationTargetReplacementContext*>(userdata);
     return context && context->mOwner && native_window_generation == context->mOwner->nativeWindowGeneration();
+}
+
+struct PresentationPipelineReplacementContext
+{
+    FakeState*                mState                = nullptr;
+    VulkanInstanceGeneration* mOwner                = nullptr;
+    std::size_t               mOwnerChecks          = 0;
+    bool                      mResetSucceeded       = false;
+    bool                      mReplacementSucceeded = false;
+};
+
+bool presentationPipelineReplacementOwnerIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
+{
+    auto* context = static_cast<PresentationPipelineReplacementContext*>(userdata);
+    if (!context || !context->mState || !context->mOwner || context->mOwner != &generation)
+    {
+        return false;
+    }
+    ++context->mOwnerChecks;
+    if (context->mOwnerChecks == 2)
+    {
+        const VkExtent2D extent  = context->mOwner->swapchainDrawableExtent();
+        context->mResetSucceeded = context->mOwner->resetSwapchainPresentationPipelineGeneration();
+        if (context->mResetSucceeded)
+        {
+            context->mReplacementSucceeded = !context->mOwner->acquireSwapchainPresentationPipelineGeneration(
+                                                 makeSwapchainPresentationPipelineRequest(*context->mState, *context->mOwner, extent)) &&
+                                             !context->mOwner->acquireSwapchainFrameSlotGeneration(
+                                                 makeSwapchainFrameSlotRequest(*context->mState, *context->mOwner, extent));
+        }
+    }
+    return true;
+}
+
+bool presentationPipelineReplacementWindowIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto* context = static_cast<const PresentationPipelineReplacementContext*>(userdata);
+    return context && context->mOwner && native_window_generation == context->mOwner->nativeWindowGeneration();
+}
+
+struct FrameSlotReplacementContext
+{
+    FakeState*                mState                = nullptr;
+    VulkanInstanceGeneration* mOwner                = nullptr;
+    std::size_t               mOwnerChecks          = 0;
+    bool                      mResetSucceeded       = false;
+    bool                      mReplacementSucceeded = false;
+};
+
+bool frameSlotReplacementOwnerIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
+{
+    auto* context = static_cast<FrameSlotReplacementContext*>(userdata);
+    if (!context || !context->mState || !context->mOwner || context->mOwner != &generation)
+    {
+        return false;
+    }
+    ++context->mOwnerChecks;
+    if (context->mOwnerChecks == 2)
+    {
+        const VkExtent2D extent  = context->mOwner->swapchainDrawableExtent();
+        context->mResetSucceeded = context->mOwner->resetSwapchainFrameSlotGeneration();
+        if (context->mResetSucceeded)
+        {
+            context->mReplacementSucceeded = !context->mOwner->acquireSwapchainFrameSlotGeneration(
+                makeSwapchainFrameSlotRequest(*context->mState, *context->mOwner, extent));
+        }
+    }
+    return true;
+}
+
+bool frameSlotReplacementWindowIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto* context = static_cast<const FrameSlotReplacementContext*>(userdata);
+    return context && context->mOwner && native_window_generation == context->mOwner->nativeWindowGeneration();
+}
+
+struct OwnerResetDuringOperationContext
+{
+    VulkanInstanceGeneration* mOwner            = nullptr;
+    std::uint64_t             mWindowGeneration = 0;
+    std::size_t               mOwnerChecks      = 0;
+    std::size_t               mWindowChecks     = 0;
+    bool                      mResetSucceeded   = false;
+};
+
+bool ownerResetDuringOperationIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
+{
+    auto* context = static_cast<OwnerResetDuringOperationContext*>(userdata);
+    if (!context || context->mOwner != &generation)
+    {
+        return false;
+    }
+    ++context->mOwnerChecks;
+    if (context->mOwnerChecks == 2)
+    {
+        context->mResetSucceeded = context->mOwner->reset();
+    }
+    return true;
+}
+
+bool ownerResetDuringOperationWindowIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    auto* context = static_cast<OwnerResetDuringOperationContext*>(userdata);
+    if (!context)
+    {
+        return false;
+    }
+    ++context->mWindowChecks;
+    return native_window_generation == context->mWindowGeneration;
 }
 
 bool postPublicationMutationOwnerIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
@@ -3383,7 +3593,7 @@ struct render_vulkan_instance_test
 {
 };
 
-using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 90>;
+using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 96>;
 using render_vulkan_instance_test_object = render_vulkan_instance_test_group::object;
 render_vulkan_instance_test_group render_vulkan_instance_tests("render Vulkan instance");
 
@@ -8349,6 +8559,330 @@ void render_vulkan_instance_test_object::test<90>()
                !owner.hasSwapchainPresentationPipelineGeneration() && state.mCreateRenderPassCalls == 2 &&
                state.mDestroyRenderPassCalls == 1 && state.mCreateShaderModuleCalls == 0 &&
                state.mCreatePipelineLayoutCalls == 0 && state.mCreateGraphicsPipelineCalls == 0 && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<91>()
+{
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotParentOperationCode::OperationFailure) == 16);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor) == 17);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationTargetNotLive) == 18);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive) == 19);
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().acquireRenderPassDrawToPresentSwapchainFrameSlot(
+        std::declval<const VulkanSwapchainFrameSlotOperationRequest&>(),
+        std::declval<const VulkanSwapchainFrameClearColor&>())));
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSwapchainFrameSlotChain(state, owner, { 1280, 720 });
+    const VulkanSwapchainFrameSlotOperationRequest request = makeSwapchainFrameSlotOperationRequest(state, owner, { 1280, 720 });
+
+    const std::size_t                                      owner_checks_before  = state.mInstanceOwnerChecks;
+    const std::size_t                                      window_checks_before = state.mSurfaceWindowChecks;
+    const std::size_t                                      lookups_before       = state.mDeviceProcAddrCalls;
+    const VulkanSwapchainFrameClearColor                   invalid_color{ { 0.0f, std::numeric_limits<float>::infinity(), 0.0f, 1.0f } };
+    const VulkanSwapchainFrameSlotParentPresentationResult invalid_result =
+        owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, invalid_color);
+    const VulkanSwapchainFrameSlotParentOperationError& invalid_error = requireSwapchainFrameSlotPresentationError(invalid_result);
+    ensure("invalid draw clear input wins before render-object validation, callbacks, lookup, or acquisition",
+           invalid_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor && !invalid_error.mOperationError &&
+               state.mInstanceOwnerChecks == owner_checks_before && state.mSurfaceWindowChecks == window_checks_before &&
+               state.mDeviceProcAddrCalls == lookups_before && state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0);
+
+    const VulkanSwapchainFrameSlotParentPresentationResult target_result =
+        owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+    const VulkanSwapchainFrameSlotParentOperationError& target_error = requireSwapchainFrameSlotPresentationError(target_result);
+    ensure("draw validation reports the missing target before the missing pipeline and before callbacks",
+           target_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationTargetNotLive &&
+               !target_error.mOperationError && state.mInstanceOwnerChecks == owner_checks_before &&
+               state.mSurfaceWindowChecks == window_checks_before && state.mDeviceProcAddrCalls == lookups_before &&
+               state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0);
+
+    ensure("the exact target fixture succeeds",
+           !owner.acquireSwapchainPresentationTargetGeneration(makeSwapchainPresentationTargetRequest(state, owner, { 1280, 720 })));
+    const std::size_t                                      pipeline_owner_checks_before  = state.mInstanceOwnerChecks;
+    const std::size_t                                      pipeline_window_checks_before = state.mSurfaceWindowChecks;
+    const std::size_t                                      pipeline_lookups_before       = state.mDeviceProcAddrCalls;
+    const VulkanSwapchainFrameSlotParentPresentationResult pipeline_result =
+        owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+    const VulkanSwapchainFrameSlotParentOperationError& pipeline_error = requireSwapchainFrameSlotPresentationError(pipeline_result);
+    ensure("a missing draw pipeline stops before callbacks, dispatch lookup, fence work, or acquisition",
+           pipeline_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive &&
+               !pipeline_error.mOperationError && state.mInstanceOwnerChecks == pipeline_owner_checks_before &&
+               state.mSurfaceWindowChecks == pipeline_window_checks_before && state.mDeviceProcAddrCalls == pipeline_lookups_before &&
+               state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 && state.mBindPipelineCalls == 0 &&
+               state.mDrawCalls == 0);
+
+    ensure("the exact pipeline fixture succeeds",
+           !owner.acquireSwapchainPresentationPipelineGeneration(makeSwapchainPresentationPipelineRequest(state, owner, { 1280, 720 })));
+    ensure("the frame slot can be removed without disturbing the retained target and pipeline",
+           owner.resetSwapchainFrameSlotGeneration() && owner.hasSwapchainPresentationTargetGeneration() &&
+               owner.hasSwapchainPresentationPipelineGeneration());
+    const VulkanSwapchainFrameSlotParentPresentationResult frame_slot_result =
+        owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+    const VulkanSwapchainFrameSlotParentOperationError& frame_slot_error = requireSwapchainFrameSlotPresentationError(frame_slot_result);
+    ensure("draw validation reaches the frame slot only after accepting the exact target and pipeline",
+           frame_slot_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainFrameSlotNotLive &&
+               !frame_slot_error.mOperationError && state.mAcquireNextImageCalls == 0 && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<92>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+
+    state.mAcquiredImageIndex = 2;
+    VulkanSwapchainFrameClearColor                         mutable_color{ { 0.125f, 0.25f, 0.5f, 1.0f } };
+    ClearColorMutationContext                              mutation{ &owner, &mutable_color };
+    const VulkanSwapchainFrameSlotOperationRequest         request{ owner.nativeWindowGeneration(),
+                                                            owner.swapchainDrawableExtent(),
+                                                                    { &mutation, clearColorMutationOwnerIsCurrent },
+                                                                    { &mutation, clearColorMutationWindowIsCurrent } };
+    const VulkanSwapchainFrameSlotParentPresentationResult result =
+        owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, mutable_color);
+    const VulkanSwapchainFrameSlotPresentationSuccess& success = requireSwapchainFrameSlotPresentationSuccess(result);
+
+    const auto begin    = std::find(state.mEvents.begin(), state.mEvents.end(), Event::BeginRenderPass);
+    const auto bind     = std::find(state.mEvents.begin(), state.mEvents.end(), Event::BindPipeline);
+    const auto viewport = std::find(state.mEvents.begin(), state.mEvents.end(), Event::SetViewport);
+    const auto scissor  = std::find(state.mEvents.begin(), state.mEvents.end(), Event::SetScissor);
+    const auto draw     = std::find(state.mEvents.begin(), state.mEvents.end(), Event::Draw);
+    const auto end      = std::find(state.mEvents.begin(), state.mEvents.end(), Event::EndRenderPass);
+    ensure("the instance draw forwards the copied clear, exact render objects, and full-extent draw",
+           success.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented && success.mImageIndex == 2 &&
+               mutation.mOwnerChecks == 2 && mutable_color.mRgba == std::array<float, 4>{ 1.0f, 1.0f, 1.0f, 1.0f } &&
+               state.mRenderPassClearValue.color.float32[0] == 0.125f && state.mRenderPassClearValue.color.float32[1] == 0.25f &&
+               state.mRenderPassClearValue.color.float32[2] == 0.5f && state.mRenderPassClearValue.color.float32[3] == 1.0f &&
+               state.mOperationRenderPass == state.mPresentationRenderPass &&
+               state.mOperationFramebuffer == state.mPresentationFramebuffers[2] &&
+               state.mOperationPipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
+               state.mOperationPipeline == state.mPresentationPipeline && state.mBindPipelineCalls == 1 && state.mSetViewportCalls == 1 &&
+               state.mOperationViewport.x == 0.0f && state.mOperationViewport.y == 0.0f && state.mOperationViewport.width == 1280.0f &&
+               state.mOperationViewport.height == 720.0f && state.mOperationViewport.minDepth == 0.0f &&
+               state.mOperationViewport.maxDepth == 1.0f && state.mSetScissorCalls == 1 && state.mOperationScissor.offset.x == 0 &&
+               state.mOperationScissor.offset.y == 0 && state.mOperationScissor.extent.width == 1280 &&
+               state.mOperationScissor.extent.height == 720 && state.mDrawCalls == 1 && state.mDrawVertexCount == 3 &&
+               state.mDrawInstanceCount == 1 && state.mDrawFirstVertex == 0 && state.mDrawFirstInstance == 0 &&
+               begin != state.mEvents.end() && bind != state.mEvents.end() && viewport != state.mEvents.end() &&
+               scissor != state.mEvents.end() && draw != state.mEvents.end() && end != state.mEvents.end() && begin < bind &&
+               bind < viewport && viewport < scissor && scissor < draw && draw < end);
+
+    state.mEvents.clear();
+    state.mFrameSlotDestroyOwner          = &owner;
+    state.mPipelineDestroyOwner           = &owner;
+    state.mPresentationTargetDestroyOwner = &owner;
+    ensure("completed draw work permits target teardown while retaining the image owner",
+           owner.resetSwapchainPresentationTargetGeneration() && owner.hasSwapchainImagesGeneration() &&
+               !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+               !owner.hasSwapchainFrameSlotGeneration());
+    const auto slot_destroy        = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyCommandPool);
+    const auto pipeline_destroy    = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyPipeline);
+    const auto framebuffer_destroy = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyFramebuffer);
+    const auto render_pass_destroy = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyRenderPass);
+    ensure("draw-owner destruction remains slot, pipeline, framebuffer, then render pass",
+           slot_destroy != state.mEvents.end() && pipeline_destroy != state.mEvents.end() && framebuffer_destroy != state.mEvents.end() &&
+               render_pass_destroy != state.mEvents.end() && slot_destroy < pipeline_destroy && pipeline_destroy < framebuffer_destroy &&
+               framebuffer_destroy < render_pass_destroy && state.mFrameSlotDestroyObservationMade &&
+               state.mObservedPresentationTargetAtFrameSlotDestroy && state.mPipelineDestroyObservationMade &&
+               state.mObservedTargetAtPipelineDestroy && !state.mObservedFrameSlotAtPipelineDestroy && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<93>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+
+    PresentationPipelineReplacementContext                 replacement{ &state, &owner };
+    const VulkanSwapchainFrameSlotOperationRequest         request{ owner.nativeWindowGeneration(),
+                                                            owner.swapchainDrawableExtent(),
+                                                                    { &replacement, presentationPipelineReplacementOwnerIsCurrent },
+                                                                    { &replacement, presentationPipelineReplacementWindowIsCurrent } };
+    const VulkanSwapchainFrameSlotParentPresentationResult result =
+        owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+    const VulkanSwapchainFrameSlotParentOperationError& error = requireSwapchainFrameSlotPresentationError(result);
+    ensure("an exact-looking pipeline and frame-slot ABA is rejected after dispatch resolution and before acquisition",
+           error.mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive && !error.mOperationError &&
+               replacement.mOwnerChecks == 2 && replacement.mResetSucceeded && replacement.mReplacementSucceeded &&
+               owner.hasSwapchainPresentationTargetGeneration() && owner.hasSwapchainPresentationPipelineGeneration() &&
+               owner.hasSwapchainFrameSlotGeneration() &&
+               owner.swapchainPresentationPipelineLayout() == state.mPresentationPipelineLayout &&
+               owner.swapchainPresentationPipeline() == state.mPresentationPipeline && state.mCreateGraphicsPipelineCalls == 2 &&
+               state.mDestroyPipelineCalls == 1 && state.mCreateCommandPoolCalls == 2 && state.mDestroyCommandPoolCalls == 1 &&
+               state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 && state.mDrawCalls == 0 && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<94>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+    VulkanSwapchainFrameSlotOperationRequest request = makeSwapchainFrameSlotOperationRequest(state, owner, { 1280, 720 });
+
+    state.mAcquiredImageIndex   = 1;
+    state.mWaitForFencesResults = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
+    const VulkanSwapchainFrameSlotParentPresentationResult pending_result =
+        owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+    const VulkanSwapchainFrameSlotParentOperationError& pending_error = requireSwapchainFrameSlotPresentationError(pending_result);
+    ensure("submitted draw work retains every owner and refuses pipeline, target, and transitive parent teardown",
+           pending_error.mOperationError && pending_error.mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+               pending_error.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending &&
+               owner.hasSwapchainFrameSlotGeneration() && owner.hasSwapchainPresentationPipelineGeneration() &&
+               owner.hasSwapchainPresentationTargetGeneration() && !owner.resetSwapchainPresentationPipelineGeneration() &&
+               !owner.resetSwapchainPresentationTargetGeneration() && !owner.resetSwapchainImagesGeneration() &&
+               !owner.resetLogicalDeviceGeneration() && owner.hasLogicalDeviceGeneration() && owner.hasSwapchainConfigurationGeneration() &&
+               owner.hasSwapchainGeneration() && owner.hasSwapchainImagesGeneration() && owner.hasSwapchainPresentationTargetGeneration() &&
+               owner.hasSwapchainPresentationPipelineGeneration() && owner.hasSwapchainFrameSlotGeneration() &&
+               state.mDestroyCommandPoolCalls == 0 && state.mDestroyPipelineCalls == 0 && state.mDestroyFramebufferCalls == 0);
+
+    request.mDrawableExtent                                                  = {};
+    const VulkanSwapchainFrameSlotParentPresentationResult completion_result = owner.retrySwapchainFrameSlotPresentationCompletion(request);
+    const VulkanSwapchainFrameSlotPresentationSuccess&     completion = requireSwapchainFrameSlotPresentationSuccess(completion_result);
+    ensure("presentation completion retires the draw obligation and restores the exact teardown chain",
+           completion.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented && completion.mImageIndex == 1 &&
+               owner.swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               owner.resetSwapchainPresentationTargetGeneration() && owner.hasSwapchainImagesGeneration() &&
+               !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+               !owner.hasSwapchainFrameSlotGeneration());
+
+    ensure(
+        "the retained images can republish the draw target, pipeline, and frame slot",
+        !owner.acquireSwapchainPresentationTargetGeneration(makeSwapchainPresentationTargetRequest(state, owner, { 1280, 720 })) &&
+            !owner.acquireSwapchainPresentationPipelineGeneration(makeSwapchainPresentationPipelineRequest(state, owner, { 1280, 720 })) &&
+            !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, { 1280, 720 })));
+    state.mAcquiredImageIndex     = 2;
+    state.mEndCommandBufferResult = VK_ERROR_UNKNOWN;
+    request                       = makeSwapchainFrameSlotOperationRequest(state, owner, { 1280, 720 });
+    const VulkanSwapchainFrameSlotParentPresentationResult acquired_result =
+        owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+    const VulkanSwapchainFrameSlotParentOperationError& acquired_error = requireSwapchainFrameSlotPresentationError(acquired_result);
+    ensure("a post-draw recording failure retains its acquired image and refuses dependent teardown",
+           acquired_error.mOperationError &&
+               acquired_error.mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
+               acquired_error.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               acquired_error.mOperationError->mImageIndex == 2 && !owner.resetSwapchainPresentationPipelineGeneration() &&
+               !owner.resetSwapchainPresentationTargetGeneration() && !owner.resetSwapchainImagesGeneration() &&
+               !owner.resetLogicalDeviceGeneration() && owner.hasLogicalDeviceGeneration() && owner.hasSwapchainImagesGeneration() &&
+               owner.hasSwapchainPresentationPipelineGeneration() && owner.hasSwapchainPresentationTargetGeneration() &&
+               owner.hasSwapchainFrameSlotGeneration());
+
+    state.mEndCommandBufferResult = VK_SUCCESS;
+    request.mDrawableExtent       = {};
+    ensureSwapchainFrameSlotOperationSuccess(owner.cancelSwapchainFrameSlotPresentation(request),
+                                             VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("cancellation releases the drawn image and restores dependent teardown",
+           state.mReleaseSwapchainImagesCalls == 1 && owner.resetSwapchainPresentationTargetGeneration() &&
+               owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainPresentationTargetGeneration() &&
+               !owner.hasSwapchainPresentationPipelineGeneration() && !owner.hasSwapchainFrameSlotGeneration() && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<95>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireSwapchainFrameSlotChain(state, owner, { 1280, 720 });
+    VulkanSwapchainFrameSlotOperationRequest request = makeSwapchainFrameSlotOperationRequest(state, owner, { 1280, 720 });
+    request.mDrawableExtent                          = {};
+
+    const VulkanSwapchainFrameSlotParentPresentationResult retry_result      = owner.retrySwapchainFrameSlotPresentation(request);
+    const VulkanSwapchainFrameSlotParentOperationError&    retry_error       = requireSwapchainFrameSlotPresentationError(retry_result);
+    const VulkanSwapchainFrameSlotParentPresentationResult completion_result = owner.retrySwapchainFrameSlotPresentationCompletion(request);
+    const VulkanSwapchainFrameSlotParentOperationError&    completion_error = requireSwapchainFrameSlotPresentationError(completion_result);
+    const VulkanSwapchainFrameSlotParentOperationResult    cancel_result    = owner.cancelSwapchainFrameSlotPresentation(request);
+    const VulkanSwapchainFrameSlotParentOperationError&    cancel_error     = requireSwapchainFrameSlotOperationError(cancel_result);
+    ensure("retry, completion, and cancellation stay frame-slot-only when no target or pipeline exists",
+           !owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+               retry_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::OperationFailure && retry_error.mOperationError &&
+               retry_error.mOperationError->mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition &&
+               completion_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::OperationFailure &&
+               completion_error.mOperationError &&
+               completion_error.mOperationError->mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition &&
+               cancel_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::OperationFailure && cancel_error.mOperationError &&
+               cancel_error.mOperationError->mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<96>()
+{
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+
+        PresentationTargetReplacementContext                   replacement{ &state, &owner };
+        const VulkanSwapchainFrameSlotOperationRequest         request{ owner.nativeWindowGeneration(),
+                                                                owner.swapchainDrawableExtent(),
+                                                                        { &replacement, presentationTargetReplacementOwnerIsCurrent },
+                                                                        { &replacement, presentationTargetReplacementWindowIsCurrent } };
+        const VulkanSwapchainFrameSlotParentPresentationResult result =
+            owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+        const VulkanSwapchainFrameSlotParentOperationError& error = requireSwapchainFrameSlotPresentationError(result);
+        ensure("draw reports an exact-looking target replacement before the missing replacement pipeline",
+               error.mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationTargetNotLive && !error.mOperationError &&
+                   replacement.mOwnerChecks == 2 && replacement.mResetSucceeded && replacement.mReplacementSucceeded &&
+                   owner.hasSwapchainPresentationTargetGeneration() && !owner.hasSwapchainPresentationPipelineGeneration() &&
+                   owner.hasSwapchainFrameSlotGeneration() && state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 &&
+                   state.mDrawCalls == 0 && owner.reset());
+    }
+
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+
+        FrameSlotReplacementContext                            replacement{ &state, &owner };
+        const VulkanSwapchainFrameSlotOperationRequest         request{ owner.nativeWindowGeneration(),
+                                                                owner.swapchainDrawableExtent(),
+                                                                        { &replacement, frameSlotReplacementOwnerIsCurrent },
+                                                                        { &replacement, frameSlotReplacementWindowIsCurrent } };
+        const VulkanSwapchainFrameSlotParentPresentationResult result =
+            owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+        const VulkanSwapchainFrameSlotParentOperationError& error = requireSwapchainFrameSlotPresentationError(result);
+        ensure("draw reports an exact-looking frame-slot replacement without blaming the retained pipeline",
+               error.mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainFrameSlotNotLive && !error.mOperationError &&
+                   replacement.mOwnerChecks == 2 && replacement.mResetSucceeded && replacement.mReplacementSucceeded &&
+                   owner.hasSwapchainPresentationTargetGeneration() && owner.hasSwapchainPresentationPipelineGeneration() &&
+                   owner.hasSwapchainFrameSlotGeneration() && state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 &&
+                   state.mDrawCalls == 0 && owner.reset());
+    }
+
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+
+        OwnerResetDuringOperationContext                       reset{ &owner, owner.nativeWindowGeneration() };
+        const VulkanSwapchainFrameSlotOperationRequest         request{ owner.nativeWindowGeneration(),
+                                                                owner.swapchainDrawableExtent(),
+                                                                        { &reset, ownerResetDuringOperationIsCurrent },
+                                                                        { &reset, ownerResetDuringOperationWindowIsCurrent } };
+        const VulkanSwapchainFrameSlotParentPresentationResult result =
+            owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+        const VulkanSwapchainFrameSlotParentOperationError& error = requireSwapchainFrameSlotPresentationError(result);
+        ensure("draw detects a full owner reset after final freshness without dereferencing cleared dispatch",
+               error.mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive && !error.mOperationError &&
+                   reset.mOwnerChecks == 2 && reset.mWindowChecks == 2 && reset.mResetSucceeded && owner.instance() == VK_NULL_HANDLE &&
+                   state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 && state.mDrawCalls == 0);
+    }
 }
 
 } // namespace tut

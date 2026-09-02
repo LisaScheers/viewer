@@ -98,8 +98,10 @@ struct FakeState
     VkFormatProperties mFormatProperties{ 0,
                                           VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
                                           0 };
-    std::uint32_t                    mMaxFramebufferWidth  = 4096;
-    std::uint32_t                    mMaxFramebufferHeight = 2160;
+    std::uint32_t                   mMaxFramebufferWidth  = 4096;
+    std::uint32_t                   mMaxFramebufferHeight = 2160;
+    std::array<std::uint32_t, 2>    mMaxViewportDimensions{ 4096, 4096 };
+    std::array<float, 2>            mViewportBoundsRange{ -8192.0f, 8192.0f };
 
     std::vector<std::string> mConfigurationLookups;
     std::size_t              mCapabilitiesCalls      = 0;
@@ -172,8 +174,12 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice     
     }
     *properties            = {};
     properties->apiVersion = VK_API_VERSION_1_1;
-    properties->limits.maxFramebufferWidth  = gFakeState->mMaxFramebufferWidth;
-    properties->limits.maxFramebufferHeight = gFakeState->mMaxFramebufferHeight;
+    properties->limits.maxFramebufferWidth      = gFakeState->mMaxFramebufferWidth;
+    properties->limits.maxFramebufferHeight     = gFakeState->mMaxFramebufferHeight;
+    properties->limits.maxViewportDimensions[0] = gFakeState->mMaxViewportDimensions[0];
+    properties->limits.maxViewportDimensions[1] = gFakeState->mMaxViewportDimensions[1];
+    properties->limits.viewportBoundsRange[0]   = gFakeState->mViewportBoundsRange[0];
+    properties->limits.viewportBoundsRange[1]   = gFakeState->mViewportBoundsRange[1];
     std::strncpy(properties->deviceName, "swapchain-configuration-fake", VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1);
 }
 
@@ -539,6 +545,7 @@ void render_vulkan_swapchain_configuration_object::test<1>()
                       VulkanSwapchainConfigurationResolutionCode::SelectedFormatColorAttachmentUnsupported) == 25);
     static_assert(static_cast<std::uint8_t>(
                       VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsFramebufferLimits) == 26);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsViewportLimits) == 27);
 
     FakeState       state;
     ScopedFakeState scope(state);
@@ -1084,6 +1091,118 @@ void render_vulkan_swapchain_configuration_object::test<11>()
                error.mCode == VulkanSwapchainConfigurationResolutionCode::PresentModeEnumerationRetryLimitExceeded &&
                    error.mResult == VK_INCOMPLETE && error.mEnumerationAttempt == 4 && state.mPresentCountCalls == 4 &&
                    state.mPresentListCalls == 0);
+    }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_configuration_object::test<12>()
+{
+    const auto ensure_viewport_failure = [](const char* message, auto&& configure)
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        configure(state);
+        auto        parents = makeParents(state);
+        const auto  result  = resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 800, 600 });
+        const auto& error   = requireError(result);
+        ensure(message,
+               error.mCode == VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsViewportLimits && !error.mCommand &&
+                   error.mResult == VK_SUCCESS);
+        ensure("viewport limits reject the selected extent before format or present-mode enumeration",
+               state.mFormatCountCalls == 0 && state.mFormatListCalls == 0 && state.mFormatPropertiesCalls == 0 &&
+                   state.mPresentCountCalls == 0 && state.mPresentListCalls == 0);
+    };
+
+    ensure_viewport_failure("the viewport width dimension is checked independently",
+                            [](FakeState& state) { state.mMaxViewportDimensions[0] = 799; });
+    ensure_viewport_failure("the viewport height dimension is checked independently",
+                            [](FakeState& state) { state.mMaxViewportDimensions[1] = 599; });
+    ensure_viewport_failure("the viewport upper bound applies while framebuffer dimensions remain legal",
+                            [](FakeState& state) { state.mViewportBoundsRange[1] = 799.0f; });
+    ensure_viewport_failure("a viewport range that excludes the zero origin is rejected",
+                            [](FakeState& state) { state.mViewportBoundsRange[0] = 1.0f; });
+    ensure_viewport_failure("a NaN viewport lower bound is rejected",
+                            [](FakeState& state) { state.mViewportBoundsRange[0] = std::numeric_limits<float>::quiet_NaN(); });
+    ensure_viewport_failure("an infinite viewport upper bound is rejected",
+                            [](FakeState& state) { state.mViewportBoundsRange[1] = std::numeric_limits<float>::infinity(); });
+    ensure_viewport_failure("a reversed finite viewport range is rejected",
+                            [](FakeState& state) { state.mViewportBoundsRange = { 1.0f, -1.0f }; });
+
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        state.mMaxViewportDimensions = { 800, 800 };
+        state.mViewportBoundsRange   = { 0.0f, 800.0f };
+        auto parents                 = makeParents(state);
+        auto generation = takeGeneration(resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { 800, 800 }));
+        ensure("an exact viewport dimension and bounds boundary is admitted",
+               generation.imageExtent().width == 800 && generation.imageExtent().height == 800);
+    }
+
+    {
+        constexpr std::uint32_t maximum_extent = std::numeric_limits<std::uint32_t>::max();
+
+        FakeState       state;
+        ScopedFakeState scope(state);
+        state.mCapabilities.maxImageExtent = { maximum_extent, maximum_extent };
+        state.mMaxFramebufferWidth         = maximum_extent;
+        state.mMaxFramebufferHeight        = maximum_extent;
+        state.mMaxViewportDimensions       = { maximum_extent, maximum_extent };
+        state.mViewportBoundsRange         = { 0.0f, static_cast<float>(maximum_extent) };
+        auto parents                       = makeParents(state);
+        ensureCode(resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical, { maximum_extent, maximum_extent }),
+                   VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsViewportLimits);
+    }
+
+    {
+        constexpr std::uint32_t first_inexact_extent = (std::uint32_t{ 1 } << 24) + 1;
+
+        FakeState       state;
+        ScopedFakeState scope(state);
+        state.mCapabilities.maxImageExtent = { first_inexact_extent, first_inexact_extent };
+        state.mMaxFramebufferWidth         = first_inexact_extent;
+        state.mMaxFramebufferHeight        = first_inexact_extent;
+        state.mMaxViewportDimensions       = { first_inexact_extent, first_inexact_extent };
+        state.mViewportBoundsRange         = { 0.0f, static_cast<float>(first_inexact_extent) };
+        auto parents                       = makeParents(state);
+        ensureCode(resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical,
+                                                                 { first_inexact_extent, first_inexact_extent }),
+                   VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsViewportLimits);
+    }
+
+    {
+        constexpr std::uint32_t first_scissor_overflow_extent = static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) + 1;
+
+        FakeState       state;
+        ScopedFakeState scope(state);
+        state.mCapabilities.maxImageExtent = { first_scissor_overflow_extent, first_scissor_overflow_extent };
+        state.mMaxFramebufferWidth         = first_scissor_overflow_extent;
+        state.mMaxFramebufferHeight        = first_scissor_overflow_extent;
+        state.mMaxViewportDimensions       = { first_scissor_overflow_extent, first_scissor_overflow_extent };
+        state.mViewportBoundsRange         = { 0.0f, static_cast<float>(first_scissor_overflow_extent) };
+        auto parents                       = makeParents(state);
+        ensureCode(resolveVulkanSwapchainConfigurationGeneration(parents.mPhysical, parents.mLogical,
+                                                                 { first_scissor_overflow_extent, first_scissor_overflow_extent }),
+                   VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsViewportLimits);
+    }
+
+    {
+        constexpr std::uint32_t largest_exact_scissor_extent = static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) - 127;
+
+        FakeState       state;
+        ScopedFakeState scope(state);
+        state.mCapabilities.maxImageExtent = { largest_exact_scissor_extent, largest_exact_scissor_extent };
+        state.mMaxFramebufferWidth         = largest_exact_scissor_extent;
+        state.mMaxFramebufferHeight        = largest_exact_scissor_extent;
+        state.mMaxViewportDimensions       = { largest_exact_scissor_extent, largest_exact_scissor_extent };
+        state.mViewportBoundsRange         = { 0.0f, static_cast<float>(largest_exact_scissor_extent) };
+        auto parents                       = makeParents(state);
+        auto generation                    = takeGeneration(resolveVulkanSwapchainConfigurationGeneration(
+            parents.mPhysical, parents.mLogical, { largest_exact_scissor_extent, largest_exact_scissor_extent }));
+        ensure("the largest exactly representable signed-safe extent is admitted at its float boundary",
+               generation.imageExtent().width == largest_exact_scissor_extent &&
+                   generation.imageExtent().height == largest_exact_scissor_extent);
     }
 }
 
