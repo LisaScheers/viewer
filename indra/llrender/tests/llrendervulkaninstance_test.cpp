@@ -108,6 +108,7 @@ enum class MissingCommand : std::uint8_t
     BindBufferMemory,
     MapMemory,
     UnmapMemory,
+    FlushMappedMemoryRanges,
     CmdCopyImageToBuffer
 };
 
@@ -160,7 +161,10 @@ enum class Event : std::uint8_t
     MapMemory,
     UnmapMemory,
     DestroyBuffer,
-    FreeMemory
+    FreeMemory,
+    FlushMappedMemoryRanges,
+    DestroyUploadSourceBuffer,
+    FreeUploadSourceMemory
 };
 
 enum class ReadbackResetReentryPoint : std::uint8_t
@@ -253,7 +257,10 @@ struct FakeState
     VkPipeline                    mPresentationPipeline       = fakeHandle<VkPipeline>(0xc201);
     VkBuffer                      mReadbackBuffer             = fakeHandle<VkBuffer>(0xd001);
     VkDeviceMemory                mReadbackMemory             = fakeHandle<VkDeviceMemory>(0xd002);
+    VkBuffer                      mUploadSourceBuffer         = fakeHandle<VkBuffer>(0xd101);
+    VkDeviceMemory                mUploadSourceMemory         = fakeHandle<VkDeviceMemory>(0xd102);
     std::array<std::byte, 4>      mReadbackMappedStorage{};
+    VulkanUploadSourceBytes       mUploadSourceMappedStorage{};
     std::vector<std::byte>        mReadbackObservationStorage;
     std::vector<Event>            mEvents;
     std::vector<std::string>      mEnabledExtensions;
@@ -317,6 +324,7 @@ struct FakeState
     bool                            mObservedSwapchainAtDeviceDestroy       = false;
     bool                            mObservedSwapchainImagesAtDeviceDestroy = false;
     bool                            mObservedFrameSlotAtDeviceDestroy       = false;
+    bool                            mObservedUploadSourceAtDeviceDestroy    = false;
     std::size_t                     mSwapchainCapabilitiesCalls             = 0;
     std::size_t                     mSwapchainFormatCountCalls              = 0;
     std::size_t                     mSwapchainFormatListCalls               = 0;
@@ -376,13 +384,19 @@ struct FakeState
 
     VkPhysicalDeviceMemoryProperties mMemoryProperties{};
     VkMemoryRequirements             mReadbackMemoryRequirements{};
+    VkMemoryRequirements             mUploadSourceMemoryRequirements{};
     VkResult                         mBufferCreateResult               = VK_SUCCESS;
     VkResult                         mMemoryAllocateResult             = VK_SUCCESS;
     VkResult                         mBufferBindResult                 = VK_SUCCESS;
     VkResult                         mMemoryMapResult                  = VK_SUCCESS;
+    VkResult                         mMemoryFlushResult                = VK_SUCCESS;
     bool                             mNullReadbackBuffer               = false;
     bool                             mNullReadbackMemory               = false;
     bool                             mNullReadbackMapping              = false;
+    bool                             mNullUploadSourceBuffer           = false;
+    bool                             mNullUploadSourceMemory           = false;
+    bool                             mNullUploadSourceMapping          = false;
+    bool                             mNextMemoryIsUploadSource         = false;
     std::size_t                      mMemoryPropertiesCalls            = 0;
     std::size_t                      mCreateBufferCalls                = 0;
     std::size_t                      mDestroyBufferCalls               = 0;
@@ -392,14 +406,25 @@ struct FakeState
     std::size_t                      mBindBufferMemoryCalls            = 0;
     std::size_t                      mMapMemoryCalls                   = 0;
     std::size_t                      mUnmapMemoryCalls                 = 0;
+    std::size_t                      mFlushMappedMemoryRangesCalls     = 0;
     VkBufferCreateInfo               mReadbackBufferCreateInfo{};
+    VkBufferCreateInfo               mUploadSourceBufferCreateInfo{};
     VkMemoryAllocateInfo             mReadbackMemoryAllocateInfo{};
+    VkMemoryAllocateInfo             mUploadSourceMemoryAllocateInfo{};
     VkBuffer                         mReadbackBoundBuffer = VK_NULL_HANDLE;
     VkDeviceMemory                   mReadbackBoundMemory = VK_NULL_HANDLE;
     VkDeviceSize                     mReadbackBindOffset  = std::numeric_limits<VkDeviceSize>::max();
+    VkBuffer                         mUploadSourceBoundBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory                   mUploadSourceBoundMemory = VK_NULL_HANDLE;
+    VkDeviceSize                     mUploadSourceBindOffset  = std::numeric_limits<VkDeviceSize>::max();
     VkDeviceMemory                   mMappedMemory        = VK_NULL_HANDLE;
     VkDeviceSize                     mMappedOffset        = std::numeric_limits<VkDeviceSize>::max();
     VkDeviceSize                     mMappedSize          = 0;
+    std::vector<VkBuffer>            mDestroyedBuffers;
+    std::vector<VkDeviceMemory>      mFreedMemories;
+    std::vector<VkMappedMemoryRange> mFlushedMemoryRanges;
+    std::vector<VkBuffer>            mCreatedBuffers;
+    std::vector<VkDeviceMemory>      mAllocatedMemories;
 
     VkResult                        mRenderPassCreateResult           = VK_SUCCESS;
     VkResult                        mFramebufferCreateResult          = VK_SUCCESS;
@@ -589,6 +614,9 @@ struct FakeState
         mReadbackMemoryRequirements.size               = 4 * 1024 * 1024;
         mReadbackMemoryRequirements.alignment          = 256;
         mReadbackMemoryRequirements.memoryTypeBits     = 1;
+        mUploadSourceMemoryRequirements.size           = 256;
+        mUploadSourceMemoryRequirements.alignment      = 16;
+        mUploadSourceMemoryRequirements.memoryTypeBits = 1;
     }
 };
 
@@ -960,6 +988,7 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyDevice(VkDevice device, const VkAllocation
         gFakeState->mObservedSwapchainAtDeviceDestroy       = gFakeState->mDeviceDestroyOwner->hasSwapchainGeneration();
         gFakeState->mObservedSwapchainImagesAtDeviceDestroy = gFakeState->mDeviceDestroyOwner->hasSwapchainImagesGeneration();
         gFakeState->mObservedFrameSlotAtDeviceDestroy       = gFakeState->mDeviceDestroyOwner->hasSwapchainFrameSlotGeneration();
+        gFakeState->mObservedUploadSourceAtDeviceDestroy    = gFakeState->mDeviceDestroyOwner->hasUploadSourceGeneration();
     }
     gFakeState->mEvents.push_back(Event::DestroyDevice);
 }
@@ -1849,28 +1878,58 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice                  device
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gFakeState->mCreateBufferCalls;
-    gFakeState->mReadbackBufferCreateInfo = *create_info;
     gFakeState->mEvents.push_back(Event::CreateBuffer);
-    *buffer = gFakeState->mNullReadbackBuffer ? VK_NULL_HANDLE : gFakeState->mReadbackBuffer;
+    const bool upload_source =
+        create_info->size == VULKAN_UPLOAD_SOURCE_BYTE_COUNT && create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (upload_source)
+    {
+        gFakeState->mUploadSourceBufferCreateInfo = *create_info;
+        *buffer                                   = gFakeState->mNullUploadSourceBuffer ? VK_NULL_HANDLE : gFakeState->mUploadSourceBuffer;
+    }
+    else
+    {
+        gFakeState->mReadbackBufferCreateInfo = *create_info;
+        *buffer                               = gFakeState->mNullReadbackBuffer ? VK_NULL_HANDLE : gFakeState->mReadbackBuffer;
+    }
+    if (gFakeState->mBufferCreateResult == VK_SUCCESS && *buffer != VK_NULL_HANDLE)
+    {
+        gFakeState->mCreatedBuffers.push_back(*buffer);
+    }
     return gFakeState->mBufferCreateResult;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAllocationCallbacks*) noexcept
 {
-    if (gFakeState && device == gFakeState->mDevice && buffer == gFakeState->mReadbackBuffer)
+    if (gFakeState && device == gFakeState->mDevice &&
+        std::find(gFakeState->mCreatedBuffers.begin(), gFakeState->mCreatedBuffers.end(), buffer) != gFakeState->mCreatedBuffers.end())
     {
         ++gFakeState->mDestroyBufferCalls;
+        gFakeState->mDestroyedBuffers.push_back(buffer);
         gFakeState->mEvents.push_back(Event::DestroyBuffer);
+        if (buffer != gFakeState->mReadbackBuffer)
+        {
+            gFakeState->mEvents.push_back(Event::DestroyUploadSourceBuffer);
+        }
     }
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer, VkMemoryRequirements* requirements) noexcept
 {
-    if (gFakeState && device == gFakeState->mDevice && buffer == gFakeState->mReadbackBuffer && requirements)
+    if (gFakeState && device == gFakeState->mDevice && requirements &&
+        std::find(gFakeState->mCreatedBuffers.begin(), gFakeState->mCreatedBuffers.end(), buffer) != gFakeState->mCreatedBuffers.end())
     {
         ++gFakeState->mGetBufferMemoryRequirementsCalls;
-        *requirements      = gFakeState->mReadbackMemoryRequirements;
-        requirements->size = std::max(requirements->size, gFakeState->mReadbackBufferCreateInfo.size);
+        gFakeState->mNextMemoryIsUploadSource = buffer == gFakeState->mUploadSourceBuffer;
+        if (gFakeState->mNextMemoryIsUploadSource)
+        {
+            *requirements      = gFakeState->mUploadSourceMemoryRequirements;
+            requirements->size = std::max(requirements->size, gFakeState->mUploadSourceBufferCreateInfo.size);
+        }
+        else
+        {
+            *requirements      = gFakeState->mReadbackMemoryRequirements;
+            requirements->size = std::max(requirements->size, gFakeState->mReadbackBufferCreateInfo.size);
+        }
     }
 }
 
@@ -1884,18 +1943,39 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice                    de
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gFakeState->mAllocateMemoryCalls;
-    gFakeState->mReadbackMemoryAllocateInfo = *allocate_info;
     gFakeState->mEvents.push_back(Event::AllocateMemory);
-    *memory = gFakeState->mNullReadbackMemory ? VK_NULL_HANDLE : gFakeState->mReadbackMemory;
+    const bool upload_source              = gFakeState->mNextMemoryIsUploadSource;
+    gFakeState->mNextMemoryIsUploadSource = false;
+    if (upload_source)
+    {
+        gFakeState->mUploadSourceMemoryAllocateInfo = *allocate_info;
+        *memory = gFakeState->mNullUploadSourceMemory ? VK_NULL_HANDLE : gFakeState->mUploadSourceMemory;
+    }
+    else
+    {
+        gFakeState->mReadbackMemoryAllocateInfo = *allocate_info;
+        *memory                                 = gFakeState->mNullReadbackMemory ? VK_NULL_HANDLE : gFakeState->mReadbackMemory;
+    }
+    if (gFakeState->mMemoryAllocateResult == VK_SUCCESS && *memory != VK_NULL_HANDLE)
+    {
+        gFakeState->mAllocatedMemories.push_back(*memory);
+    }
     return gFakeState->mMemoryAllocateResult;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks*) noexcept
 {
-    if (gFakeState && device == gFakeState->mDevice && memory == gFakeState->mReadbackMemory)
+    if (gFakeState && device == gFakeState->mDevice &&
+        std::find(gFakeState->mAllocatedMemories.begin(), gFakeState->mAllocatedMemories.end(), memory) !=
+            gFakeState->mAllocatedMemories.end())
     {
         ++gFakeState->mFreeMemoryCalls;
+        gFakeState->mFreedMemories.push_back(memory);
         gFakeState->mEvents.push_back(Event::FreeMemory);
+        if (memory != gFakeState->mReadbackMemory)
+        {
+            gFakeState->mEvents.push_back(Event::FreeUploadSourceMemory);
+        }
     }
 }
 
@@ -1904,21 +1984,37 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice       device,
                                                     VkDeviceMemory memory,
                                                     VkDeviceSize   memory_offset) noexcept
 {
-    if (!gFakeState || device != gFakeState->mDevice || buffer != gFakeState->mReadbackBuffer || memory != gFakeState->mReadbackMemory)
+    if (!gFakeState || device != gFakeState->mDevice ||
+        !((buffer == gFakeState->mReadbackBuffer && memory == gFakeState->mReadbackMemory) ||
+          (buffer != gFakeState->mReadbackBuffer && memory != gFakeState->mReadbackMemory &&
+           std::find(gFakeState->mCreatedBuffers.begin(), gFakeState->mCreatedBuffers.end(), buffer) != gFakeState->mCreatedBuffers.end() &&
+           std::find(gFakeState->mAllocatedMemories.begin(), gFakeState->mAllocatedMemories.end(), memory) !=
+               gFakeState->mAllocatedMemories.end())))
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gFakeState->mBindBufferMemoryCalls;
-    gFakeState->mReadbackBoundBuffer = buffer;
-    gFakeState->mReadbackBoundMemory = memory;
-    gFakeState->mReadbackBindOffset  = memory_offset;
+    if (buffer == gFakeState->mUploadSourceBuffer)
+    {
+        gFakeState->mUploadSourceBoundBuffer = buffer;
+        gFakeState->mUploadSourceBoundMemory = memory;
+        gFakeState->mUploadSourceBindOffset  = memory_offset;
+    }
+    else
+    {
+        gFakeState->mReadbackBoundBuffer = buffer;
+        gFakeState->mReadbackBoundMemory = memory;
+        gFakeState->mReadbackBindOffset  = memory_offset;
+    }
     return gFakeState->mBufferBindResult;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
     fakeMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags, void** data) noexcept
 {
-    if (!gFakeState || device != gFakeState->mDevice || memory != gFakeState->mReadbackMemory || !data)
+    if (!gFakeState || device != gFakeState->mDevice || !data ||
+        std::find(gFakeState->mAllocatedMemories.begin(), gFakeState->mAllocatedMemories.end(), memory) ==
+            gFakeState->mAllocatedMemories.end())
     {
         return VK_ERROR_MEMORY_MAP_FAILED;
     }
@@ -1927,20 +2023,46 @@ VKAPI_ATTR VkResult VKAPI_CALL
     gFakeState->mMappedOffset = offset;
     gFakeState->mMappedSize   = size;
     gFakeState->mEvents.push_back(Event::MapMemory);
-    *data = gFakeState->mNullReadbackMapping
-                ? nullptr
-                : (gFakeState->mReadbackObservationStorage.empty() ? gFakeState->mReadbackMappedStorage.data()
-                                                                   : gFakeState->mReadbackObservationStorage.data());
+    if (memory == gFakeState->mUploadSourceMemory)
+    {
+        *data = gFakeState->mNullUploadSourceMapping ? nullptr : gFakeState->mUploadSourceMappedStorage.data();
+    }
+    else
+    {
+        *data = gFakeState->mNullReadbackMapping
+                    ? nullptr
+                    : (gFakeState->mReadbackObservationStorage.empty() ? gFakeState->mReadbackMappedStorage.data()
+                                                                       : gFakeState->mReadbackObservationStorage.data());
+    }
     return gFakeState->mMemoryMapResult;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice device, VkDeviceMemory memory) noexcept
 {
-    if (gFakeState && device == gFakeState->mDevice && memory == gFakeState->mReadbackMemory)
+    if (gFakeState && device == gFakeState->mDevice &&
+        std::find(gFakeState->mAllocatedMemories.begin(), gFakeState->mAllocatedMemories.end(), memory) !=
+            gFakeState->mAllocatedMemories.end())
     {
         ++gFakeState->mUnmapMemoryCalls;
         gFakeState->mEvents.push_back(Event::UnmapMemory);
     }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeFlushMappedMemoryRanges(VkDevice                   device,
+                                                           std::uint32_t              memory_range_count,
+                                                           const VkMappedMemoryRange* memory_ranges) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || memory_range_count != 1 || !memory_ranges ||
+        std::find(gFakeState->mAllocatedMemories.begin(), gFakeState->mAllocatedMemories.end(), memory_ranges[0].memory) ==
+            gFakeState->mAllocatedMemories.end() ||
+        memory_ranges[0].memory == gFakeState->mReadbackMemory)
+    {
+        return VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    ++gFakeState->mFlushMappedMemoryRangesCalls;
+    gFakeState->mFlushedMemoryRanges.push_back(memory_ranges[0]);
+    gFakeState->mEvents.push_back(Event::FlushMappedMemoryRanges);
+    return gFakeState->mMemoryFlushResult;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
@@ -2147,6 +2269,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     if (std::strcmp(name, "vkUnmapMemory") == 0)
     {
         return gFakeState->mMissing == MissingCommand::UnmapMemory ? nullptr : eraseFunctionType(fakeUnmapMemory);
+    }
+    if (std::strcmp(name, "vkFlushMappedMemoryRanges") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::FlushMappedMemoryRanges ? nullptr : eraseFunctionType(fakeFlushMappedMemoryRanges);
     }
     return nullptr;
 }
@@ -2358,6 +2484,24 @@ VulkanLogicalDeviceRequest makeLogicalDeviceRequest(FakeState& state, VulkanInst
 {
     state.mExpectedInstanceOwner = &owner;
     return { 42, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
+}
+
+VulkanUploadSourceDescription makeUploadSourceDescription() noexcept
+{
+    VulkanUploadSourceDescription description{ { 7, 3 } };
+    for (std::size_t index = 0; index < description.mBytes.size(); ++index)
+    {
+        description.mBytes[index] = static_cast<std::uint8_t>(index * 5 + 1);
+    }
+    return description;
+}
+
+VulkanUploadSourceRequest makeUploadSourceRequest(FakeState&                    state,
+                                                  VulkanInstanceGeneration&     owner,
+                                                  VulkanUploadSourceDescription description = makeUploadSourceDescription()) noexcept
+{
+    state.mExpectedInstanceOwner = &owner;
+    return { 42, description, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
 }
 
 VulkanSwapchainConfigurationRequest makeSwapchainConfigurationRequest(FakeState&                state,
@@ -3456,6 +3600,17 @@ void ensureLogicalDeviceCode(const VulkanLogicalDeviceAcquireResult& result, Vul
     tut::ensure("the exact logical-device error is reported", requireLogicalDeviceError(result).mCode == code);
 }
 
+const VulkanUploadSourceAcquireError& requireUploadSourceError(const VulkanUploadSourceAcquireResult& result)
+{
+    tut::ensure("upload-source acquisition returns an error", result.has_value());
+    return *result;
+}
+
+void ensureUploadSourceCode(const VulkanUploadSourceAcquireResult& result, VulkanUploadSourceAcquireCode code)
+{
+    tut::ensure("the exact upload-source error is reported", requireUploadSourceError(result).mCode == code);
+}
+
 const VulkanSwapchainConfigurationAcquireError& requireSwapchainConfigurationError(const VulkanSwapchainConfigurationAcquireResult& result)
 {
     tut::ensure("swapchain-configuration acquisition returns an error", result.has_value());
@@ -3610,6 +3765,12 @@ void acquireLogicalChain(FakeState& state, VulkanInstanceGeneration& owner)
     tut::ensure("the logical-device fixture succeeds", !owner.acquireLogicalDeviceGeneration(makeLogicalDeviceRequest(state, owner)));
 }
 
+void acquireUploadSourceChain(FakeState& state, VulkanInstanceGeneration& owner)
+{
+    acquireLogicalChain(state, owner);
+    tut::ensure("the upload-source fixture succeeds", !owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner)));
+}
+
 void acquireConfigurationChain(FakeState& state, VulkanInstanceGeneration& owner, VkExtent2D drawable_extent = { 800, 600 })
 {
     acquireLogicalChain(state, owner);
@@ -3646,6 +3807,25 @@ void acquireCompleteSwapchainChain(FakeState& state, VulkanInstanceGeneration& o
     tut::ensure("the complete-chain readback fixture succeeds",
                 !owner.acquireSwapchainReadbackGeneration(makeSwapchainReadbackRequest(state, owner, drawable_extent)));
     tut::ensure("the complete-chain frame-slot fixture succeeds",
+                !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, drawable_extent)));
+}
+
+void acquireCompleteSwapchainChildren(FakeState& state, VulkanInstanceGeneration& owner, VkExtent2D drawable_extent = { 800, 600 })
+{
+    tut::ensure("the child-chain configuration fixture succeeds",
+                !owner.acquireSwapchainConfigurationGeneration(makeSwapchainConfigurationRequest(state, owner, drawable_extent)));
+    tut::ensure("the child-chain swapchain fixture succeeds",
+                !owner.acquireSwapchainGeneration(makeSwapchainRequest(state, owner, drawable_extent)));
+    tut::ensure("the child-chain images fixture succeeds",
+                !owner.acquireSwapchainImagesGeneration(makeSwapchainImagesRequest(state, owner, drawable_extent)));
+    tut::ensure("the child-chain presentation-target fixture succeeds",
+                !owner.acquireSwapchainPresentationTargetGeneration(makeSwapchainPresentationTargetRequest(state, owner, drawable_extent)));
+    tut::ensure(
+        "the child-chain presentation-pipeline fixture succeeds",
+        !owner.acquireSwapchainPresentationPipelineGeneration(makeSwapchainPresentationPipelineRequest(state, owner, drawable_extent)));
+    tut::ensure("the child-chain readback fixture succeeds",
+                !owner.acquireSwapchainReadbackGeneration(makeSwapchainReadbackRequest(state, owner, drawable_extent)));
+    tut::ensure("the child-chain frame-slot fixture succeeds",
                 !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, drawable_extent)));
 }
 
@@ -3943,6 +4123,88 @@ bool readbackOperationAbaWindowIsCurrent(void* userdata, std::uint64_t native_wi
     return true;
 }
 
+struct UploadSourceLogicalAbaContext
+{
+    VulkanInstanceGeneration* mOwner       = nullptr;
+    std::size_t               mOwnerChecks = 0;
+    bool                      mReset       = false;
+    bool                      mReacquired  = false;
+};
+
+bool uploadSourceLogicalAbaOwnerIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
+{
+    auto* context = static_cast<UploadSourceLogicalAbaContext*>(userdata);
+    if (!context || !context->mOwner || context->mOwner != &generation)
+    {
+        return false;
+    }
+    ++context->mOwnerChecks;
+    if (context->mOwnerChecks == 1)
+    {
+        context->mReset = context->mOwner->resetLogicalDeviceGeneration();
+        if (context->mReset)
+        {
+            const VulkanLogicalDeviceRequest request{ context->mOwner->nativeWindowGeneration(),
+                                                      { context->mOwner, exactMutationOwnerIsCurrent },
+                                                      { context->mOwner, exactMutationWindowIsCurrent } };
+            context->mReacquired = !context->mOwner->acquireLogicalDeviceGeneration(request);
+        }
+    }
+    return true;
+}
+
+bool uploadSourceLogicalAbaWindowIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto* context = static_cast<const UploadSourceLogicalAbaContext*>(userdata);
+    return context && context->mOwner && native_window_generation == context->mOwner->nativeWindowGeneration();
+}
+
+struct UploadSourcePublicationContext
+{
+    FakeState*                    mState = nullptr;
+    VulkanInstanceGeneration*     mOwner = nullptr;
+    VulkanUploadSourceDescription mReplacementDescription;
+    VkBuffer                      mReplacementBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory                mReplacementMemory = VK_NULL_HANDLE;
+    std::size_t                   mOwnerChecks       = 0;
+    std::size_t                   mWindowChecks      = 0;
+    bool                          mAttempted         = false;
+    bool                          mPublished         = false;
+};
+
+bool uploadSourcePublicationOwnerIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
+{
+    auto* context = static_cast<UploadSourcePublicationContext*>(userdata);
+    if (!context || !context->mState || !context->mOwner || context->mOwner != &generation)
+    {
+        return false;
+    }
+    ++context->mOwnerChecks;
+    if (context->mOwnerChecks == 2 && !context->mAttempted)
+    {
+        context->mAttempted                  = true;
+        context->mState->mUploadSourceBuffer = context->mReplacementBuffer;
+        context->mState->mUploadSourceMemory = context->mReplacementMemory;
+        const VulkanUploadSourceRequest request{ context->mOwner->nativeWindowGeneration(),
+                                                 context->mReplacementDescription,
+                                                 { context->mOwner, exactMutationOwnerIsCurrent },
+                                                 { context->mOwner, exactMutationWindowIsCurrent } };
+        context->mPublished = !context->mOwner->acquireUploadSourceGeneration(request);
+    }
+    return true;
+}
+
+bool uploadSourcePublicationWindowIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    auto* context = static_cast<UploadSourcePublicationContext*>(userdata);
+    if (!context || !context->mOwner || native_window_generation != context->mOwner->nativeWindowGeneration())
+    {
+        return false;
+    }
+    ++context->mWindowChecks;
+    return true;
+}
+
 void emitValidationMessage(FakeState& state, const char* message)
 {
     tut::ensure("the validation callback was retained", state.mValidationCallback != nullptr && state.mValidationUserdata != nullptr);
@@ -3962,7 +4224,7 @@ struct render_vulkan_instance_test
 {
 };
 
-using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 105>;
+using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 110>;
 using render_vulkan_instance_test_object = render_vulkan_instance_test_group::object;
 render_vulkan_instance_test_group render_vulkan_instance_tests("render Vulkan instance");
 
@@ -9742,6 +10004,296 @@ void render_vulkan_instance_test_object::test<105>()
                state.mCopyImageToBufferCalls == 1 && state.mUnmapMemoryCalls == 0 && state.mDestroyBufferCalls == 0 &&
                state.mFreeMemoryCalls == 0 && moved.resetSwapchainImagesGeneration() && state.mUnmapMemoryCalls == 1 &&
                state.mDestroyBufferCalls == 1 && state.mFreeMemoryCalls == 1 && moved.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<106>()
+{
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().hasUploadSourceGeneration()));
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().uploadSourceResourceHandle()));
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().uploadSourceContentIdentity()));
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().uploadSourceBuffer()));
+    static_assert(noexcept(std::declval<const VulkanInstanceGeneration&>().uploadSourceMemory()));
+    static_assert(noexcept(
+        std::declval<VulkanInstanceGeneration&>().acquireUploadSourceGeneration(std::declval<const VulkanUploadSourceRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().resetUploadSourceGeneration()));
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("an absent upload source exposes only empty metadata",
+           !owner.hasUploadSourceGeneration() && !owner.uploadSourceResourceHandle() && owner.uploadSourceContentIdentity() == 0 &&
+               owner.uploadSourceBuffer() == VK_NULL_HANDLE && owner.uploadSourceMemory() == VK_NULL_HANDLE &&
+               owner.uploadSourceByteCount() == 0 && owner.uploadSourceAllocationSize() == 0 && owner.uploadSourceMemoryTypeIndex() == 0 &&
+               owner.uploadSourceMemoryPropertyFlags() == 0 && !owner.uploadSourceIsCoherent());
+    ensureUploadSourceCode(owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner)),
+                           VulkanUploadSourceAcquireCode::SurfaceNotLive);
+
+    acquireLogicalChain(state, owner);
+    VulkanUploadSourceRequest request = makeUploadSourceRequest(state, owner);
+    request.mInstanceOwnerCheck       = {};
+    ensureUploadSourceCode(owner.acquireUploadSourceGeneration(request), VulkanUploadSourceAcquireCode::InvalidInstanceOwnerCheck);
+    request                        = makeUploadSourceRequest(state, owner);
+    request.mWindowGenerationCheck = {};
+    ensureUploadSourceCode(owner.acquireUploadSourceGeneration(request), VulkanUploadSourceAcquireCode::InvalidWindowGenerationCheck);
+    request                         = makeUploadSourceRequest(state, owner);
+    request.mNativeWindowGeneration = 0;
+    ensureUploadSourceCode(owner.acquireUploadSourceGeneration(request), VulkanUploadSourceAcquireCode::InvalidNativeWindowGeneration);
+    request                         = makeUploadSourceRequest(state, owner);
+    request.mNativeWindowGeneration = 41;
+    ensureUploadSourceCode(owner.acquireUploadSourceGeneration(request), VulkanUploadSourceAcquireCode::NativeWindowGenerationMismatch);
+
+    request                     = makeUploadSourceRequest(state, owner);
+    state.mInstanceOwnerCurrent = false;
+    ensureUploadSourceCode(owner.acquireUploadSourceGeneration(request), VulkanUploadSourceAcquireCode::StaleInstanceOwner);
+    state.mInstanceOwnerCurrent = true;
+    state.mSurfaceWindowCurrent = false;
+    ensureUploadSourceCode(owner.acquireUploadSourceGeneration(request), VulkanUploadSourceAcquireCode::StaleWindowGeneration);
+    state.mSurfaceWindowCurrent = true;
+
+    request                                                          = makeUploadSourceRequest(state, owner);
+    request.mDescription.mHandle                                     = {};
+    const VulkanUploadSourceAcquireResult invalid_description_result = owner.acquireUploadSourceGeneration(request);
+    const VulkanUploadSourceAcquireError& invalid_description        = requireUploadSourceError(invalid_description_result);
+    ensure("the core remains the one description-validation authority without native allocation",
+           invalid_description.mCode == VulkanUploadSourceAcquireCode::ResolutionFailure && invalid_description.mResolutionError &&
+               invalid_description.mResolutionError->mCode == VulkanUploadSourceResolutionCode::InvalidDescription &&
+               state.mCreateBufferCalls == 0 && state.mAllocateMemoryCalls == 0);
+
+    const VulkanUploadSourceDescription description = makeUploadSourceDescription();
+    request                                         = makeUploadSourceRequest(state, owner, description);
+    ensure("one exact immutable source publishes", !owner.acquireUploadSourceGeneration(request));
+    ensure(
+        "the aggregate exposes the authenticated source identity and allocation metadata",
+        owner.hasUploadSourceGeneration() && owner.uploadSourceResourceHandle() == description.mHandle &&
+            owner.uploadSourceContentIdentity() != 0 && owner.uploadSourceBuffer() == state.mUploadSourceBuffer &&
+            owner.uploadSourceMemory() == state.mUploadSourceMemory && owner.uploadSourceByteCount() == VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+            owner.uploadSourceAllocationSize() == state.mUploadSourceMemoryRequirements.size && owner.uploadSourceMemoryTypeIndex() == 0 &&
+            owner.uploadSourceMemoryPropertyFlags() == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) &&
+            owner.uploadSourceIsCoherent());
+    ensure("publication used one exclusive transfer source and copied the exact 48 bytes before unmapping",
+           state.mCreateBufferCalls == 1 && state.mUploadSourceBufferCreateInfo.sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &&
+               state.mUploadSourceBufferCreateInfo.size == VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+               state.mUploadSourceBufferCreateInfo.usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT &&
+               state.mUploadSourceBufferCreateInfo.sharingMode == VK_SHARING_MODE_EXCLUSIVE && state.mAllocateMemoryCalls == 1 &&
+               state.mUploadSourceMemoryAllocateInfo.allocationSize == state.mUploadSourceMemoryRequirements.size &&
+               state.mUploadSourceBoundBuffer == state.mUploadSourceBuffer && state.mUploadSourceBoundMemory == state.mUploadSourceMemory &&
+               state.mUploadSourceBindOffset == 0 && state.mMapMemoryCalls == 1 && state.mUnmapMemoryCalls == 1 &&
+               state.mUploadSourceMappedStorage == description.mBytes && state.mFlushMappedMemoryRangesCalls == 0 &&
+               state.mQueueSubmitCalls == 0);
+
+    const std::size_t create_calls = state.mCreateBufferCalls;
+    ensureUploadSourceCode(owner.acquireUploadSourceGeneration(request), VulkanUploadSourceAcquireCode::UploadSourceAlreadyOwned);
+    ensure("duplicate ownership is rejected before callbacks or native creation",
+           state.mCreateBufferCalls == create_calls && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<107>()
+{
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireLogicalChain(state, owner);
+        state.mFailInstanceOwnerCheck = state.mInstanceOwnerChecks + 2;
+
+        const VulkanUploadSourceAcquireResult result = owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner));
+        ensureUploadSourceCode(result, VulkanUploadSourceAcquireCode::StaleInstanceOwner);
+        ensure("post-resolution freshness rolls the complete unpublished candidate back",
+               !owner.hasUploadSourceGeneration() && state.mCreateBufferCalls == 1 && state.mAllocateMemoryCalls == 1 &&
+                   state.mMapMemoryCalls == 1 && state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 &&
+                   state.mFreeMemoryCalls == 1 && state.mQueueSubmitCalls == 0);
+
+        state.mFailInstanceOwnerCheck = 0;
+        ensure("the logical-device parent remains reusable after freshness rollback",
+               !owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner)) && owner.hasUploadSourceGeneration() &&
+                   state.mCreateBufferCalls == 2 && state.mAllocateMemoryCalls == 2 && owner.reset());
+    }
+
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireLogicalChain(state, owner);
+
+        const VulkanUploadSourceAcquireResult result =
+            VulkanInstanceDetail::acquireUploadSource(owner, makeUploadSourceRequest(state, owner), failAllocation);
+        ensureUploadSourceCode(result, VulkanUploadSourceAcquireCode::AllocationFailure);
+        ensure("a parent allocation failure destroys the fully resolved native candidate without publication",
+               !owner.hasUploadSourceGeneration() && state.mCreateBufferCalls == 1 && state.mAllocateMemoryCalls == 1 &&
+                   state.mMapMemoryCalls == 1 && state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 &&
+                   state.mFreeMemoryCalls == 1 && state.mQueueSubmitCalls == 0);
+        ensure("allocation rollback leaves the exact parent reusable",
+               !owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner)) && owner.hasUploadSourceGeneration() &&
+                   owner.reset());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<108>()
+{
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireLogicalChain(state, owner);
+
+        UploadSourceLogicalAbaContext   context{ &owner };
+        const VulkanUploadSourceRequest request{ owner.nativeWindowGeneration(),
+                                                 makeUploadSourceDescription(),
+                                                 { &context, uploadSourceLogicalAbaOwnerIsCurrent },
+                                                 { &context, uploadSourceLogicalAbaWindowIsCurrent } };
+        ensureUploadSourceCode(owner.acquireUploadSourceGeneration(request), VulkanUploadSourceAcquireCode::LogicalDeviceNotLive);
+        ensure("the ownership epoch rejects a same-handle logical-device ABA before native source creation",
+               context.mOwnerChecks == 1 && context.mReset && context.mReacquired && owner.hasLogicalDeviceGeneration() &&
+                   owner.logicalDevice() == state.mDevice && !owner.hasUploadSourceGeneration() && state.mCreateBufferCalls == 0);
+        ensure("the replacement logical generation accepts a freshly authenticated request",
+               !owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner)) && owner.reset());
+    }
+
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireLogicalChain(state, owner);
+        const VkBuffer       original_buffer = state.mUploadSourceBuffer;
+        const VkDeviceMemory original_memory = state.mUploadSourceMemory;
+
+        VulkanUploadSourceDescription replacement_description = makeUploadSourceDescription();
+        replacement_description.mHandle                       = { 9, 4 };
+        for (std::uint8_t& byte : replacement_description.mBytes)
+        {
+            byte ^= 0xa5;
+        }
+        UploadSourcePublicationContext  context{ &state, &owner, replacement_description, fakeHandle<VkBuffer>(0xd111),
+                                                fakeHandle<VkDeviceMemory>(0xd112) };
+        const VulkanUploadSourceRequest request{ owner.nativeWindowGeneration(),
+                                                 makeUploadSourceDescription(),
+                                                 { &context, uploadSourcePublicationOwnerIsCurrent },
+                                                 { &context, uploadSourcePublicationWindowIsCurrent } };
+        ensureUploadSourceCode(owner.acquireUploadSourceGeneration(request), VulkanUploadSourceAcquireCode::UploadSourceAlreadyOwned);
+        ensure("a competing exact publication wins without being overwritten by the older candidate",
+               context.mAttempted && context.mPublished && context.mOwnerChecks == 2 && context.mWindowChecks == 1 &&
+                   owner.hasUploadSourceGeneration() && owner.uploadSourceResourceHandle() == replacement_description.mHandle &&
+                   owner.uploadSourceBuffer() == context.mReplacementBuffer && owner.uploadSourceMemory() == context.mReplacementMemory &&
+                   owner.uploadSourceContentIdentity() != 0 && state.mUploadSourceMappedStorage == replacement_description.mBytes);
+        ensure("the losing candidate alone is rolled back and no queue work enters publication",
+               state.mCreateBufferCalls == 2 && state.mAllocateMemoryCalls == 2 && state.mMapMemoryCalls == 2 &&
+                   state.mUnmapMemoryCalls == 2 && state.mDestroyedBuffers.size() == 1 &&
+                   state.mDestroyedBuffers.front() == original_buffer && state.mFreedMemories.size() == 1 &&
+                   state.mFreedMemories.front() == original_memory && state.mQueueSubmitCalls == 0 && owner.reset());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<109>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireUploadSourceChain(state, owner);
+    acquireCompleteSwapchainChildren(state, owner);
+
+    const LLRenderContract::BufferHandle resource_handle  = owner.uploadSourceResourceHandle();
+    const std::uint64_t                  content_identity = owner.uploadSourceContentIdentity();
+    const VkBuffer                       buffer           = owner.uploadSourceBuffer();
+    const VkDeviceMemory                 memory           = owner.uploadSourceMemory();
+    const VkDeviceSize                   allocation_size  = owner.uploadSourceAllocationSize();
+    const std::uint32_t                  memory_type      = owner.uploadSourceMemoryTypeIndex();
+    const VkMemoryPropertyFlags          memory_flags     = owner.uploadSourceMemoryPropertyFlags();
+    const bool                           coherent         = owner.uploadSourceIsCoherent();
+    const VulkanUploadSourceBytes        uploaded_bytes   = state.mUploadSourceMappedStorage;
+    const std::size_t                    create_calls     = state.mCreateBufferCalls;
+    state.mDestroyedBuffers.clear();
+    state.mFreedMemories.clear();
+
+    ensureSwapchainChainRebuildOutcome(owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1280, 720 })),
+                                       VulkanSwapchainChainRebuildOutcome::Ready);
+    ensure("a changed-extent swapchain rebuild preserves the exact device-scoped upload generation",
+           owner.hasUploadSourceGeneration() && owner.uploadSourceResourceHandle() == resource_handle &&
+               owner.uploadSourceContentIdentity() == content_identity && content_identity != 0 && owner.uploadSourceBuffer() == buffer &&
+               owner.uploadSourceMemory() == memory && owner.uploadSourceByteCount() == VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+               owner.uploadSourceAllocationSize() == allocation_size && owner.uploadSourceMemoryTypeIndex() == memory_type &&
+               owner.uploadSourceMemoryPropertyFlags() == memory_flags && state.mUploadSourceMappedStorage == uploaded_bytes);
+    ensure("rebuild creates only its replacement readback buffer and never retires or resubmits the upload source",
+           state.mCreateBufferCalls == create_calls + 1 &&
+               std::find(state.mDestroyedBuffers.begin(), state.mDestroyedBuffers.end(), buffer) == state.mDestroyedBuffers.end() &&
+               std::find(state.mFreedMemories.begin(), state.mFreedMemories.end(), memory) == state.mFreedMemories.end() &&
+               state.mQueueSubmitCalls == 0);
+
+    state.mDestroyedBuffers.clear();
+    state.mFreedMemories.clear();
+    state.mSwapchainCreateResult = VK_ERROR_OUT_OF_HOST_MEMORY;
+    const VulkanSwapchainChainRebuildResult failed_rebuild_result =
+        owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1440, 810 }));
+    const VulkanSwapchainChainRebuildError& failed_rebuild = requireSwapchainChainRebuildError(failed_rebuild_result);
+    ensure("the forced rebuild failure is retained at the exact swapchain phase",
+           failed_rebuild.mCode == VulkanSwapchainChainRebuildCode::ChildFailure &&
+               failed_rebuild.mPhase == VulkanSwapchainChainRebuildPhase::Swapchain &&
+               std::holds_alternative<VulkanSwapchainAcquireError>(failed_rebuild.mChildError));
+    ensure("failed rebuild rollback preserves every exact upload-source identity and allocation field",
+           owner.hasUploadSourceGeneration() && owner.uploadSourceResourceHandle() == resource_handle &&
+               owner.uploadSourceContentIdentity() == content_identity && owner.uploadSourceBuffer() == buffer &&
+               owner.uploadSourceMemory() == memory && owner.uploadSourceByteCount() == VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+               owner.uploadSourceAllocationSize() == allocation_size && owner.uploadSourceMemoryTypeIndex() == memory_type &&
+               owner.uploadSourceMemoryPropertyFlags() == memory_flags && owner.uploadSourceIsCoherent() == coherent &&
+               state.mUploadSourceMappedStorage == uploaded_bytes &&
+               std::find(state.mDestroyedBuffers.begin(), state.mDestroyedBuffers.end(), buffer) == state.mDestroyedBuffers.end() &&
+               std::find(state.mFreedMemories.begin(), state.mFreedMemories.end(), memory) == state.mFreedMemories.end() &&
+               state.mQueueSubmitCalls == 0);
+    ensure("the failed-rebuild fixture remains ordinarily tear-downable", owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<110>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireUploadSourceChain(state, owner);
+    acquireCompleteSwapchainChildren(state, owner);
+
+    ensure("direct upload reset preserves the complete live drawable-dependent sibling chain",
+           owner.resetUploadSourceGeneration() && !owner.hasUploadSourceGeneration() && owner.hasLogicalDeviceGeneration() &&
+               owner.hasSwapchainConfigurationGeneration() && owner.hasSwapchainGeneration() && owner.hasSwapchainImagesGeneration() &&
+               owner.hasSwapchainPresentationTargetGeneration() && owner.hasSwapchainPresentationPipelineGeneration() &&
+               owner.hasSwapchainReadbackGeneration() && owner.hasSwapchainFrameSlotGeneration() &&
+               owner.swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable && state.mDestroyBufferCalls == 1 &&
+               state.mFreeMemoryCalls == 1);
+    ensure("the reset upload slot can publish a fresh epoch",
+           !owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner)) && owner.hasUploadSourceGeneration());
+
+    const LLRenderContract::BufferHandle resource_handle  = owner.uploadSourceResourceHandle();
+    const std::uint64_t                  content_identity = owner.uploadSourceContentIdentity();
+    const VkBuffer                       buffer           = owner.uploadSourceBuffer();
+    const VkDeviceMemory                 memory           = owner.uploadSourceMemory();
+    VulkanInstanceGeneration             moved(std::move(owner));
+    ensure("aggregate move transfers the complete upload owner and empties every source getter",
+           owner.instance() == VK_NULL_HANDLE && !owner.hasUploadSourceGeneration() && !owner.uploadSourceResourceHandle() &&
+               owner.uploadSourceContentIdentity() == 0 && owner.uploadSourceBuffer() == VK_NULL_HANDLE &&
+               owner.uploadSourceMemory() == VK_NULL_HANDLE && moved.hasUploadSourceGeneration() &&
+               moved.uploadSourceResourceHandle() == resource_handle && moved.uploadSourceContentIdentity() == content_identity &&
+               moved.uploadSourceBuffer() == buffer && moved.uploadSourceMemory() == memory);
+
+    state.mDeviceDestroyOwner = &moved;
+    state.mEvents.clear();
+    ensure("logical reset retires the whole drawable chain, upload source, and device", moved.resetLogicalDeviceGeneration());
+    const auto upload_buffer_destroy = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyUploadSourceBuffer);
+    const auto upload_memory_free    = std::find(state.mEvents.begin(), state.mEvents.end(), Event::FreeUploadSourceMemory);
+    const auto device_destroy        = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyDevice);
+    ensure("the immutable source buffer and memory retire in order before their logical-device parent",
+           upload_buffer_destroy != state.mEvents.end() && upload_memory_free != state.mEvents.end() &&
+               device_destroy != state.mEvents.end() && upload_buffer_destroy < upload_memory_free && upload_memory_free < device_destroy &&
+               state.mDeviceDestroyObservationMade && !state.mObservedUploadSourceAtDeviceDestroy && !moved.hasUploadSourceGeneration() &&
+               !moved.hasLogicalDeviceGeneration() && !moved.hasSwapchainConfigurationGeneration() && !moved.hasSwapchainGeneration() &&
+               !moved.hasSwapchainImagesGeneration() && moved.hasPresentationDeviceGeneration() && moved.hasSurfaceGeneration() &&
+               state.mQueueSubmitCalls == 0 && moved.reset());
 }
 
 } // namespace tut

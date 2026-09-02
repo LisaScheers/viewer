@@ -19,6 +19,7 @@
 #include "llrendervulkanglobaldispatch.h"
 #include "llrendervulkanlogicaldevice.h"
 #include "llrendervulkanphysicaldevice.h"
+#include "llrendervulkanuploadsource.h"
 #include "llrendervulkanswapchain.h"
 #include "llrendervulkanswapchainconfiguration.h"
 #include "llrendervulkanswapchainframeslot.h"
@@ -267,6 +268,43 @@ struct VulkanLogicalDeviceAcquireError
 };
 
 using VulkanLogicalDeviceAcquireResult = std::optional<VulkanLogicalDeviceAcquireError>;
+
+struct VulkanUploadSourceRequest
+{
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent and native-window lifetime changes during acquisition.
+    std::uint64_t                 mNativeWindowGeneration = 0;
+    VulkanUploadSourceDescription mDescription;
+    VulkanInstanceOwnerCheck      mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck   mWindowGenerationCheck;
+};
+
+enum class VulkanUploadSourceAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    UploadSourceAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanUploadSourceAcquireError
+{
+    VulkanUploadSourceAcquireCode                    mCode = VulkanUploadSourceAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanUploadSourceResolutionError> mResolutionError;
+
+    friend constexpr bool operator==(const VulkanUploadSourceAcquireError&, const VulkanUploadSourceAcquireError&) = default;
+};
+
+using VulkanUploadSourceAcquireResult = std::optional<VulkanUploadSourceAcquireError>;
 
 struct VulkanSwapchainConfigurationRequest
 {
@@ -740,6 +778,16 @@ public:
     std::span<const std::string_view> enabledDeviceExtensions() const noexcept;
     bool                              swapchainMaintenance1Enabled() const noexcept;
     bool                              portabilitySubsetEnabled() const noexcept;
+    bool                              hasUploadSourceGeneration() const noexcept;
+    LLRenderContract::BufferHandle    uploadSourceResourceHandle() const noexcept;
+    std::uint64_t                     uploadSourceContentIdentity() const noexcept;
+    VkBuffer                          uploadSourceBuffer() const noexcept;
+    VkDeviceMemory                    uploadSourceMemory() const noexcept;
+    VkDeviceSize                      uploadSourceByteCount() const noexcept;
+    VkDeviceSize                      uploadSourceAllocationSize() const noexcept;
+    std::uint32_t                     uploadSourceMemoryTypeIndex() const noexcept;
+    VkMemoryPropertyFlags             uploadSourceMemoryPropertyFlags() const noexcept;
+    bool                              uploadSourceIsCoherent() const noexcept;
     bool                              hasSwapchainConfigurationGeneration() const noexcept;
     VkExtent2D                        swapchainDrawableExtent() const noexcept;
     VkSurfaceCapabilitiesKHR          swapchainSurfaceCapabilities() const noexcept;
@@ -794,6 +842,7 @@ public:
     VulkanSurfaceAcquireResult                acquireSurfaceGeneration(const VulkanSurfaceRequest& request) noexcept;
     VulkanPresentationDeviceAcquireResult     acquirePresentationDeviceGeneration(const VulkanPresentationDeviceRequest& request) noexcept;
     VulkanLogicalDeviceAcquireResult          acquireLogicalDeviceGeneration(const VulkanLogicalDeviceRequest& request) noexcept;
+    VulkanUploadSourceAcquireResult           acquireUploadSourceGeneration(const VulkanUploadSourceRequest& request) noexcept;
     VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfigurationGeneration(
         const VulkanSwapchainConfigurationRequest& request) noexcept;
     VulkanSwapchainAcquireResult       acquireSwapchainGeneration(const VulkanSwapchainRequest& request) noexcept;
@@ -830,7 +879,9 @@ public:
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentOperationResult retrySwapchainFrameSlotCancellationCompletion(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
-    // Callers externally serialize these resets. Image teardown retires the
+    // Callers externally serialize these resets. The upload source is a
+    // logical-device child independent of drawable and swapchain lifetime.
+    // Image teardown retires the
     // frame slot, readback destination, presentation pipeline, and presentation
     // target in that order. Direct readback reset preserves every presentation
     // sibling, but refuses while the frame slot retains it for an observation;
@@ -845,6 +896,7 @@ public:
     bool resetSwapchainImagesGeneration() noexcept;
     bool resetSwapchainGeneration() noexcept;
     bool resetSwapchainConfigurationGeneration() noexcept;
+    bool resetUploadSourceGeneration() noexcept;
     bool resetLogicalDeviceGeneration() noexcept;
     bool resetPresentationDeviceGeneration() noexcept;
     bool resetSurfaceGeneration() noexcept;
@@ -869,6 +921,11 @@ private:
                              PFN_vkDestroyDebugUtilsMessengerEXT destroy_debug_messenger) noexcept;
 
     void noteOwnershipTransition() noexcept { ++mOwnershipTransitionEpoch; }
+    void noteUploadSourceTransition() noexcept
+    {
+        ++mUploadSourceEpoch;
+        noteOwnershipTransition();
+    }
     void noteSwapchainPresentationTargetTransition() noexcept
     {
         ++mSwapchainPresentationTargetEpoch;
@@ -903,6 +960,7 @@ private:
     std::unique_ptr<VulkanSurfaceGeneration>                mSurfaceGeneration;
     std::unique_ptr<VulkanPhysicalDeviceGeneration>         mPresentationDeviceGeneration;
     std::unique_ptr<VulkanLogicalDeviceGeneration>          mLogicalDeviceGeneration;
+    std::unique_ptr<VulkanUploadSourceGeneration>                  mUploadSourceGeneration;
     std::unique_ptr<VulkanSwapchainConfigurationGeneration>    mSwapchainConfigurationGeneration;
     std::unique_ptr<VulkanSwapchainGeneration>                 mSwapchainGeneration;
     std::unique_ptr<VulkanSwapchainImagesGeneration>               mSwapchainImagesGeneration;
@@ -910,6 +968,7 @@ private:
     std::unique_ptr<VulkanSwapchainPresentationPipelineGeneration> mSwapchainPresentationPipelineGeneration;
     std::unique_ptr<VulkanSwapchainReadbackGeneration>             mSwapchainReadbackGeneration;
     std::unique_ptr<VulkanSwapchainFrameSlotGeneration>            mSwapchainFrameSlotGeneration;
+    std::uint64_t                                                  mUploadSourceEpoch                  = 0;
     std::uint64_t                                                  mSwapchainPresentationTargetEpoch   = 0;
     std::uint64_t                                                  mSwapchainPresentationPipelineEpoch = 0;
     std::uint64_t                                                  mSwapchainReadbackEpoch             = 0;
@@ -942,6 +1001,10 @@ namespace VulkanInstanceDetail
     VulkanLogicalDeviceAcquireResult acquireLogicalDevice(VulkanInstanceGeneration&         instance_generation,
                                                           const VulkanLogicalDeviceRequest& request,
                                                           AllocationCheckpoint              allocation_checkpoint) noexcept;
+
+    VulkanUploadSourceAcquireResult acquireUploadSource(VulkanInstanceGeneration&        instance_generation,
+                                                        const VulkanUploadSourceRequest& request,
+                                                        AllocationCheckpoint             allocation_checkpoint) noexcept;
 
     VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfiguration(VulkanInstanceGeneration&                  instance_generation,
                                                                             const VulkanSwapchainConfigurationRequest& request,

@@ -287,6 +287,32 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       INTEGRATION_TEST_llrendervulkanlogicaldevice
       PRIVATE VK_NO_PROTOTYPES)
 
+  add_library(llrendervulkanuploadsource STATIC
+      vulkan/llrendervulkanuploadsource.cpp
+      vulkan/llrendervulkanuploadsource.h)
+  target_include_directories(llrendervulkanuploadsource
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanuploadsource SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanuploadsource
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanuploadsource
+      PUBLIC
+          llrendervulkanlogicaldevice
+          llrendercontract)
+  set_target_properties(llrendervulkanuploadsource PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanuploadsource_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanuploadsource
+      ""
+      "llrendervulkanuploadsource;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanuploadsource
+      PRIVATE VK_NO_PROTOTYPES)
+
   add_library(llrendervulkanswapchainconfiguration STATIC
       vulkan/llrendervulkanswapchainconfiguration.cpp
       vulkan/llrendervulkanswapchainconfiguration.h)
@@ -476,6 +502,7 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       PUBLIC
           llrendervulkanglobaldispatch
           llrendervulkanlogicaldevice
+          llrendervulkanuploadsource
           llrendervulkanphysicaldevice
           llrendervulkanswapchain
           llrendervulkanswapchainimages

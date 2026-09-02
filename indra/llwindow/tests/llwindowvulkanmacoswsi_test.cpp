@@ -18,6 +18,7 @@
 #include "llgl.h"
 #include "llrendervulkanglobaldispatch.h"
 #include "llrendervulkaninstance.h"
+#include "lltextureuploaddiagnostic.h"
 #include "llwindow.h"
 #include "llwindowmacosxvulkan.h"
 #include "lltut.h"
@@ -26,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -292,6 +294,67 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("logical-device acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("logical-device acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    auto*                     mutable_instance_generation = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
+    FrameSlotOperationContext operation_context{ owner, instance_generation };
+
+    const LLRenderContract::TextureUploadFixture upload_fixture = LLRenderContract::makeTextureUploadFixture();
+    static_assert(sizeof(upload_fixture.mScreenTriangle) == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT);
+    LLRenderVulkan::VulkanUploadSourceDescription upload_source_description;
+    upload_source_description.mHandle = LLRenderContract::StreamingUploadHandles{}.mScreenTriangle;
+    std::memcpy(upload_source_description.mBytes.data(), upload_fixture.mScreenTriangle.data(), upload_source_description.mBytes.size());
+
+    LLRenderVulkan::VulkanUploadSourceRequest upload_source_request;
+    upload_source_request.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
+    upload_source_request.mDescription            = upload_source_description;
+    upload_source_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    upload_source_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+
+    const F64  upload_source_backing_scale = owner->backingScale();
+    const auto upload_source_error         = mutable_instance_generation->acquireUploadSourceGeneration(upload_source_request);
+    ensure("the exact logical-device chain acquires the 48-byte texture-fixture upload source", !upload_source_error.has_value());
+    ensure("the immutable upload source publishes exact resource and allocation metadata",
+           instance_generation->hasUploadSourceGeneration() &&
+               instance_generation->uploadSourceResourceHandle() == upload_source_description.mHandle &&
+               instance_generation->uploadSourceContentIdentity() != 0 && instance_generation->uploadSourceBuffer() != VK_NULL_HANDLE &&
+               instance_generation->uploadSourceMemory() != VK_NULL_HANDLE &&
+               instance_generation->uploadSourceByteCount() == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+               instance_generation->uploadSourceAllocationSize() >= instance_generation->uploadSourceByteCount() &&
+               (instance_generation->uploadSourceMemoryPropertyFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 &&
+               instance_generation->uploadSourceIsCoherent() ==
+                   ((instance_generation->uploadSourceMemoryPropertyFlags() & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0));
+    ensure_equals("upload-source acquisition emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("upload-source acquisition preserves the private Cocoa owner and exact drawable geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == upload_source_backing_scale &&
+               owner->drawableWidth() == BACKING_WIDTH && owner->drawableHeight() == BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("upload-source acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("upload-source acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const LLRenderContract::BufferHandle retained_upload_source_handle       = instance_generation->uploadSourceResourceHandle();
+    const std::uint64_t                  retained_upload_source_identity     = instance_generation->uploadSourceContentIdentity();
+    const VkBuffer                       retained_upload_source_buffer       = instance_generation->uploadSourceBuffer();
+    const VkDeviceMemory                 retained_upload_source_memory       = instance_generation->uploadSourceMemory();
+    const VkDeviceSize                   retained_upload_source_bytes        = instance_generation->uploadSourceByteCount();
+    const VkDeviceSize                   retained_upload_source_allocation   = instance_generation->uploadSourceAllocationSize();
+    const std::uint32_t                  retained_upload_source_memory_type  = instance_generation->uploadSourceMemoryTypeIndex();
+    const VkMemoryPropertyFlags          retained_upload_source_memory_flags = instance_generation->uploadSourceMemoryPropertyFlags();
+    const bool                           retained_upload_source_coherent     = instance_generation->uploadSourceIsCoherent();
+    const auto                           upload_source_retained              = [&]() noexcept
+    {
+        return instance_generation->hasUploadSourceGeneration() &&
+               instance_generation->uploadSourceResourceHandle() == retained_upload_source_handle &&
+               instance_generation->uploadSourceContentIdentity() == retained_upload_source_identity &&
+               instance_generation->uploadSourceBuffer() == retained_upload_source_buffer &&
+               instance_generation->uploadSourceMemory() == retained_upload_source_memory &&
+               instance_generation->uploadSourceByteCount() == retained_upload_source_bytes &&
+               instance_generation->uploadSourceAllocationSize() == retained_upload_source_allocation &&
+               instance_generation->uploadSourceMemoryTypeIndex() == retained_upload_source_memory_type &&
+               instance_generation->uploadSourceMemoryPropertyFlags() == retained_upload_source_memory_flags &&
+               instance_generation->uploadSourceIsCoherent() == retained_upload_source_coherent;
+    };
+
     const auto swapchain_configuration_error = owner->acquireSwapchainConfigurationGeneration();
     ensure("the exact logical-device chain selects one swapchain configuration", !swapchain_configuration_error.has_value());
     ensure("the instance parent owns one swapchain-configuration generation", instance_generation->hasSwapchainConfigurationGeneration());
@@ -431,8 +494,6 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("frame-slot acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("frame-slot acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
-    auto*                     mutable_instance_generation = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
-    FrameSlotOperationContext operation_context{ owner, instance_generation };
     LLRenderVulkan::VulkanSwapchainFrameSlotOperationRequest operation_request;
     operation_request.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
     operation_request.mDrawableExtent         = drawable_extent;
@@ -495,6 +556,7 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->swapchainFramePresentationReadySemaphore() == initial_presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == initial_submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == initial_present_completion_fence);
+    ensure("the initial observed draw retains the exact immutable upload-source owner, handles, and identity", upload_source_retained());
     ensure_equals("the initial observed draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
     ensure("the initial observed draw preserves the private Cocoa owner and exact Vulkan generation",
@@ -532,6 +594,7 @@ void window_vulkan_macos_wsi_object::test<1>()
            instance_generation->surface() == retained_surface && instance_generation->physicalDevice() == retained_physical_device &&
                instance_generation->logicalDevice() == retained_logical_device &&
                instance_generation->presentationQueue() == retained_queue);
+    ensure("same-surface rebuild retains the exact immutable upload-source owner, handles, and identity", upload_source_retained());
     resolved_image_count = instance_generation->resolvedSwapchainImageCount();
     ensure("the rebuilt MoltenVK swapchain publishes a complete nonempty image and frame-slot chain",
            resolved_image_count != 0 && instance_generation->swapchain() != VK_NULL_HANDLE &&
@@ -626,6 +689,7 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
+    ensure("the rebuilt observed draw retains the exact immutable upload-source owner, handles, and identity", upload_source_retained());
     ensure_equals("the rebuilt observed draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
     ensure("the rebuilt observed draw preserves the private Cocoa owner and exact changed geometry",
@@ -635,6 +699,39 @@ void window_vulkan_macos_wsi_object::test<1>()
                LLWindow::instanceCount() == initial_window_count);
     ensure("the rebuilt observed draw creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("the rebuilt observed draw leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    ensure("the native smoke independently resets the upload source while the swapchain chain is reusable",
+           mutable_instance_generation->resetUploadSourceGeneration());
+    ensure("explicit upload-source reset removes its owner, identity, buffer, memory, and allocation metadata",
+           !instance_generation->hasUploadSourceGeneration() &&
+               instance_generation->uploadSourceResourceHandle() == LLRenderContract::BufferHandle{} &&
+               instance_generation->uploadSourceContentIdentity() == 0 && instance_generation->uploadSourceBuffer() == VK_NULL_HANDLE &&
+               instance_generation->uploadSourceMemory() == VK_NULL_HANDLE && instance_generation->uploadSourceByteCount() == 0 &&
+               instance_generation->uploadSourceAllocationSize() == 0 && instance_generation->uploadSourceMemoryTypeIndex() == 0 &&
+               instance_generation->uploadSourceMemoryPropertyFlags() == 0 && !instance_generation->uploadSourceIsCoherent());
+    ensure("upload-source reset leaves the complete presentation and observation chain live",
+           instance_generation->hasSurfaceGeneration() && instance_generation->surface() != VK_NULL_HANDLE &&
+               instance_generation->hasPresentationDeviceGeneration() && instance_generation->physicalDevice() != VK_NULL_HANDLE &&
+               instance_generation->hasLogicalDeviceGeneration() && instance_generation->logicalDevice() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
+               instance_generation->swapchain() != VK_NULL_HANDLE && instance_generation->hasSwapchainImagesGeneration() &&
+               instance_generation->resolvedSwapchainImageCount() == resolved_image_count &&
+               instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainPresentationPipelineGeneration() &&
+               instance_generation->swapchainPresentationPipeline() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainReadbackGeneration() && instance_generation->swapchainReadbackBuffer() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainFrameSlotGeneration() &&
+               instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure_equals("upload-source destruction emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("upload-source reset preserves the private Cocoa owner and exact changed geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == rebuilt_draw_backing_scale &&
+               owner->drawableWidth() == REBUILT_BACKING_WIDTH && owner->drawableHeight() == REBUILT_BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("upload-source reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("upload-source reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     ensure("the native smoke explicitly resets the frame slot before swapchain images", owner->resetSwapchainFrameSlotGeneration());
     ensure("explicit frame-slot reset removes all six owned handles",
