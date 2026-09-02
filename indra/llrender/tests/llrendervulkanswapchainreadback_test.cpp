@@ -30,6 +30,65 @@
 #include <variant>
 #include <vector>
 
+namespace LLRenderVulkan
+{
+
+struct VulkanSwapchainReadbackGenerationTestAccess
+{
+    static bool poison(VulkanSwapchainReadbackGeneration& generation) noexcept { return generation.poisonForPresentationObservation(); }
+
+    static std::optional<VulkanSwapchainReadbackObservation> classify(const VulkanSwapchainReadbackGeneration& generation) noexcept
+    {
+        return generation.classifyPresentationObservation();
+    }
+
+    static void setMappedData(VulkanSwapchainReadbackGeneration& generation, void* mapped_data) noexcept
+    {
+        generation.mMappedData = mapped_data;
+    }
+
+    static void setBuffer(VulkanSwapchainReadbackGeneration& generation, VkBuffer buffer) noexcept { generation.mBuffer = buffer; }
+
+    static void setMemory(VulkanSwapchainReadbackGeneration& generation, VkDeviceMemory memory) noexcept { generation.mMemory = memory; }
+
+    static void setImageFormat(VulkanSwapchainReadbackGeneration& generation, VkFormat format) noexcept
+    {
+        generation.mImageFormat = format;
+    }
+
+    static void setImageExtent(VulkanSwapchainReadbackGeneration& generation, VkExtent2D extent) noexcept
+    {
+        generation.mImageExtent = extent;
+    }
+
+    static void setImageCount(VulkanSwapchainReadbackGeneration& generation, std::uint32_t image_count) noexcept
+    {
+        generation.mImageCount = image_count;
+    }
+
+    static void setRowBytes(VulkanSwapchainReadbackGeneration& generation, VkDeviceSize row_bytes) noexcept
+    {
+        generation.mRowBytes = row_bytes;
+    }
+
+    static void setByteCount(VulkanSwapchainReadbackGeneration& generation, VkDeviceSize byte_count) noexcept
+    {
+        generation.mByteCount = byte_count;
+    }
+
+    static void setAllocationSize(VulkanSwapchainReadbackGeneration& generation, VkDeviceSize allocation_size) noexcept
+    {
+        generation.mAllocationSize = allocation_size;
+    }
+
+    static void setMemoryPropertyFlags(VulkanSwapchainReadbackGeneration& generation, VkMemoryPropertyFlags flags) noexcept
+    {
+        generation.mMemoryPropertyFlags = flags;
+    }
+};
+
+} // namespace LLRenderVulkan
+
 namespace
 {
 using namespace LLRenderVulkan;
@@ -623,7 +682,7 @@ struct Parents
     VulkanSwapchainImagesGeneration        mImages;
 };
 
-Parents makeParents(FakeState& state)
+Parents makeParents(FakeState& state, VkExtent2D drawable_extent = { 1280, 720 })
 {
     auto physical_result = resolveVulkanPhysicalDeviceGeneration({ fakeGetInstanceProcAddr, state.mInstance, state.mSurface });
     tut::ensure("the physical-device fixture resolves", std::holds_alternative<VulkanPhysicalDeviceGeneration>(physical_result));
@@ -633,7 +692,7 @@ Parents makeParents(FakeState& state)
     tut::ensure("the logical-device fixture resolves", std::holds_alternative<VulkanLogicalDeviceGeneration>(logical_result));
     auto logical = std::get<VulkanLogicalDeviceGeneration>(std::move(logical_result));
 
-    auto configuration_result = resolveVulkanSwapchainConfigurationGeneration(physical, logical, { 1280, 720 });
+    auto configuration_result = resolveVulkanSwapchainConfigurationGeneration(physical, logical, drawable_extent);
     tut::ensure("the configuration fixture resolves", std::holds_alternative<VulkanSwapchainConfigurationGeneration>(configuration_result));
     auto configuration = std::get<VulkanSwapchainConfigurationGeneration>(std::move(configuration_result));
 
@@ -673,6 +732,33 @@ VulkanSwapchainImagesGeneration takeImages(VulkanSwapchainImagesResolutionResult
     tut::ensure("images resolution returns a generation", std::holds_alternative<VulkanSwapchainImagesGeneration>(result));
     return std::get<VulkanSwapchainImagesGeneration>(std::move(result));
 }
+
+struct ObservationFixture
+{
+    explicit ObservationFixture(VkFormat format = VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D extent = { 5, 1 }, VkDeviceSize tail_bytes = 4) :
+        mStorage(static_cast<std::size_t>(extent.width) * static_cast<std::size_t>(extent.height) * 4 +
+                     static_cast<std::size_t>(tail_bytes),
+                 0xa5),
+        mScope(mState)
+    {
+        mState.mCapabilities.minImageExtent = { 1, 1 };
+        mState.mFormats[0].format           = format;
+        mState.mRequirements.size           = static_cast<VkDeviceSize>(mStorage.size());
+        mState.mRequirements.alignment      = 4;
+        mState.mMapOutput                   = mStorage.data();
+        mParents.emplace(makeParents(mState, extent));
+        mReadback.emplace(takeReadback(resolveVulkanSwapchainReadbackGeneration(
+            mParents->mPhysical, mParents->mLogical, mParents->mConfiguration, mParents->mSwapchain, mParents->mImages)));
+    }
+
+    VulkanSwapchainReadbackGeneration& readback() noexcept { return *mReadback; }
+
+    FakeState                                        mState;
+    std::vector<std::uint8_t>                        mStorage;
+    ScopedFakeState                                  mScope;
+    std::optional<Parents>                           mParents;
+    std::optional<VulkanSwapchainReadbackGeneration> mReadback;
+};
 
 } // namespace
 
@@ -1140,6 +1226,128 @@ void render_vulkan_swapchain_readback_object::test<8>()
                !readback.createdFor(parents.mPhysical, parents.mLogical, parents.mConfiguration, parents.mSwapchain, second_images));
         readback.reset();
     }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_readback_object::test<9>()
+{
+    const auto run_format = [](VkFormat format, const std::array<std::uint8_t, 20>& pixels)
+    {
+        ObservationFixture fixture(format);
+        std::copy(pixels.begin(), pixels.end(), fixture.mStorage.begin());
+
+        const auto observation = VulkanSwapchainReadbackGenerationTestAccess::classify(fixture.readback());
+        ensure("classification returns one bounded observation", observation.has_value());
+        const VulkanSwapchainReadbackObservation expected{ format, { 5, 1 }, 5, 1, 1, 3 };
+        ensure("RGBA and BGRA bytes are canonicalized into exact categories", *observation == expected);
+        ensure("the category counts sum to the exact total",
+               observation->mGreenPixelCount + observation->mRedPixelCount + observation->mUnexpectedPixelCount ==
+                   observation->mTotalPixelCount);
+        ensure("classification leaves the allocation tail unchanged",
+               std::all_of(fixture.mStorage.begin() + 20, fixture.mStorage.end(), [](std::uint8_t byte) { return byte == 0xa5; }));
+    };
+
+    run_format(VK_FORMAT_R8G8B8A8_UNORM, { 0, 255, 0, 255, 255, 0, 0, 255, 0x11, 0x22, 0x33, 0x44, 1, 2, 3, 255, 0, 255, 0, 254 });
+    run_format(VK_FORMAT_B8G8R8A8_UNORM, { 0, 255, 0, 255, 0, 0, 255, 255, 0x11, 0x22, 0x33, 0x44, 3, 2, 1, 255, 0, 255, 0, 254 });
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_readback_object::test<10>()
+{
+    ObservationFixture fixture;
+    const auto         instance_lookups = fixture.mState.mInstanceLookups;
+    const auto         device_lookups   = fixture.mState.mDeviceLookups;
+    const auto         buffer_records   = fixture.mState.mBufferRecords.size();
+    const auto         map_records      = fixture.mState.mMapSizes.size();
+
+    ensure("poison accepts the exact coherent mapped layout", VulkanSwapchainReadbackGenerationTestAccess::poison(fixture.readback()));
+    constexpr std::array<std::uint8_t, 4> sentinel{ 0x11, 0x22, 0x33, 0x44 };
+    bool                                  exact_poison = true;
+    for (std::size_t offset = 0; offset < 20; ++offset)
+    {
+        exact_poison = exact_poison && fixture.mStorage[offset] == sentinel[offset % sentinel.size()];
+    }
+    ensure("poison writes the repeating sentinel through exactly byteCount", exact_poison);
+    ensure("poison preserves every allocation-tail byte",
+           std::all_of(fixture.mStorage.begin() + 20, fixture.mStorage.end(), [](std::uint8_t byte) { return byte == 0xa5; }));
+
+    const auto observation = VulkanSwapchainReadbackGenerationTestAccess::classify(fixture.readback());
+    ensure("sentinel pixels are all unexpected",
+           observation == VulkanSwapchainReadbackObservation{ VK_FORMAT_R8G8B8A8_UNORM, { 5, 1 }, 5, 0, 0, 5 });
+    ensure("host observation resolves or invokes no native command",
+           fixture.mState.mInstanceLookups == instance_lookups && fixture.mState.mDeviceLookups == device_lookups &&
+               fixture.mState.mBufferRecords.size() == buffer_records && fixture.mState.mMapSizes.size() == map_records &&
+               fixture.mState.mReadbackTeardownOrder.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_readback_object::test<11>()
+{
+    const auto reject_without_access = [](const char* message, auto corrupt)
+    {
+        ObservationFixture fixture(VK_FORMAT_R8G8B8A8_UNORM, { 2, 1 });
+        const auto         before = fixture.mStorage;
+        VulkanSwapchainReadbackGenerationTestAccess::setMappedData(fixture.readback(), reinterpret_cast<void*>(1));
+        corrupt(fixture.readback());
+        const bool poison_rejected   = !VulkanSwapchainReadbackGenerationTestAccess::poison(fixture.readback());
+        const bool classify_rejected = !VulkanSwapchainReadbackGenerationTestAccess::classify(fixture.readback()).has_value();
+        ensure(message, poison_rejected && classify_rejected && fixture.mStorage == before);
+        VulkanSwapchainReadbackGenerationTestAccess::setMappedData(fixture.readback(), fixture.mStorage.data());
+    };
+
+    reject_without_access("a null mapping rejects observation before access",
+                          [](auto& generation) { VulkanSwapchainReadbackGenerationTestAccess::setMappedData(generation, nullptr); });
+    reject_without_access("a null buffer rejects observation before access",
+                          [](auto& generation) { VulkanSwapchainReadbackGenerationTestAccess::setBuffer(generation, VK_NULL_HANDLE); });
+    reject_without_access("a null memory allocation rejects observation before access",
+                          [](auto& generation) { VulkanSwapchainReadbackGenerationTestAccess::setMemory(generation, VK_NULL_HANDLE); });
+    reject_without_access("an unadmitted format rejects observation before access", [](auto& generation)
+                          { VulkanSwapchainReadbackGenerationTestAccess::setImageFormat(generation, VK_FORMAT_A8B8G8R8_UNORM_PACK32); });
+    reject_without_access("a zero extent rejects observation before access",
+                          [](auto& generation) { VulkanSwapchainReadbackGenerationTestAccess::setImageExtent(generation, { 0, 1 }); });
+    reject_without_access("a row mismatch rejects observation before access",
+                          [](auto& generation) { VulkanSwapchainReadbackGenerationTestAccess::setRowBytes(generation, 9); });
+    reject_without_access("a byte-count mismatch rejects observation before access",
+                          [](auto& generation) { VulkanSwapchainReadbackGenerationTestAccess::setByteCount(generation, 9); });
+    reject_without_access("a short allocation rejects observation before access",
+                          [](auto& generation) { VulkanSwapchainReadbackGenerationTestAccess::setAllocationSize(generation, 7); });
+    reject_without_access("a zero image count rejects observation before access",
+                          [](auto& generation) { VulkanSwapchainReadbackGenerationTestAccess::setImageCount(generation, 0); });
+    reject_without_access(
+        "non-coherent memory rejects observation before access", [](auto& generation)
+        { VulkanSwapchainReadbackGenerationTestAccess::setMemoryPropertyFlags(generation, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT); });
+    reject_without_access("an overflowing extent rejects observation before access",
+                          [](auto& generation)
+                          {
+                              VulkanSwapchainReadbackGenerationTestAccess::setImageExtent(
+                                  generation, { std::numeric_limits<std::uint32_t>::max(), std::numeric_limits<std::uint32_t>::max() });
+                          });
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_readback_object::test<12>()
+{
+    ObservationFixture fixture;
+    ensure("a live owner can be poisoned before a non-active move",
+           VulkanSwapchainReadbackGenerationTestAccess::poison(fixture.readback()));
+
+    auto moved = std::move(fixture.readback());
+    ensure("a move disarms observation on the source",
+           !VulkanSwapchainReadbackGenerationTestAccess::poison(fixture.readback()) &&
+               !VulkanSwapchainReadbackGenerationTestAccess::classify(fixture.readback()).has_value());
+    ensure("a move preserves bounded observation on the destination",
+           VulkanSwapchainReadbackGenerationTestAccess::classify(moved) ==
+               VulkanSwapchainReadbackObservation{ VK_FORMAT_R8G8B8A8_UNORM, { 5, 1 }, 5, 0, 0, 5 });
+
+    moved.reset();
+    ensure("reset disarms observation and remains safe to repeat",
+           !VulkanSwapchainReadbackGenerationTestAccess::poison(moved) &&
+               !VulkanSwapchainReadbackGenerationTestAccess::classify(moved).has_value());
+    moved.reset();
 }
 
 } // namespace tut

@@ -28,6 +28,9 @@
 namespace LLRenderVulkan
 {
 
+class VulkanSwapchainFrameSlotGeneration;
+struct VulkanSwapchainReadbackGenerationTestAccess;
+
 enum class VulkanSwapchainReadbackCommand : std::uint8_t
 {
     GetPhysicalDeviceMemoryProperties,
@@ -75,6 +78,25 @@ struct VulkanSwapchainReadbackResolutionError
                                      const VulkanSwapchainReadbackResolutionError&) = default;
 };
 
+struct VulkanSwapchainReadbackObservation
+{
+    VkFormat      mImageFormat = VK_FORMAT_UNDEFINED;
+    VkExtent2D    mImageExtent{};
+    std::uint64_t mTotalPixelCount      = 0;
+    std::uint64_t mGreenPixelCount      = 0;
+    std::uint64_t mRedPixelCount        = 0;
+    std::uint64_t mUnexpectedPixelCount = 0;
+
+    friend constexpr bool operator==(const VulkanSwapchainReadbackObservation& left,
+                                     const VulkanSwapchainReadbackObservation& right) noexcept
+    {
+        return left.mImageFormat == right.mImageFormat && left.mImageExtent.width == right.mImageExtent.width &&
+               left.mImageExtent.height == right.mImageExtent.height && left.mTotalPixelCount == right.mTotalPixelCount &&
+               left.mGreenPixelCount == right.mGreenPixelCount && left.mRedPixelCount == right.mRedPixelCount &&
+               left.mUnexpectedPixelCount == right.mUnexpectedPixelCount;
+    }
+};
+
 // This generation owns one transfer-destination buffer, one separate memory
 // allocation, and one whole-allocation persistent mapping. Its exact physical
 // device, logical device, configuration, swapchain, and image generations must
@@ -110,7 +132,15 @@ public:
     void reset() noexcept;
 
 private:
+    friend class VulkanSwapchainFrameSlotGeneration;
     friend struct VulkanSwapchainReadbackGenerationFactory;
+    friend struct VulkanSwapchainReadbackGenerationTestAccess;
+
+    // The frame slot calls these only after prior GPU use has retired, and
+    // classifies only after the copy submission fence has signaled.
+    bool                                              hasValidPresentationObservationLayout() const noexcept;
+    bool                                              poisonForPresentationObservation() noexcept;
+    std::optional<VulkanSwapchainReadbackObservation> classifyPresentationObservation() const noexcept;
 
     VulkanSwapchainReadbackGeneration(const VulkanPhysicalDeviceGeneration&         physical_device_generation,
                                       const VulkanLogicalDeviceGeneration&          logical_device_generation,

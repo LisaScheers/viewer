@@ -47,7 +47,8 @@ namespace
         RetryCancellationCompletion,
         ExecuteAcquireClearToPresent,
         ExecuteAcquireRenderPassClearToPresent,
-        ExecuteAcquireRenderPassDrawToPresent
+        ExecuteAcquireRenderPassDrawToPresent,
+        ExecuteAcquireRenderPassDrawReadbackToPresent
     };
 
     using SwapchainFrameSlotParentResult = std::variant<VulkanSwapchainFrameSlotParentOperationError, VulkanSwapchainFrameSlotDisposition,
@@ -59,7 +60,8 @@ namespace
                operation == SwapchainFrameSlotParentOperation::ExecuteAcquireToPresent ||
                operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent ||
                operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassClearToPresent ||
-               operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent;
+               operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent ||
+               operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent;
     }
 
     bool validClearColor(const VulkanSwapchainFrameClearColor& clear_color) noexcept
@@ -865,6 +867,10 @@ struct VulkanInstanceGenerationFactory
         const VulkanSwapchainFrameSlotOperationRequest& request,
         const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
 
+    static VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
+        VulkanInstanceGeneration&                       instance_generation,
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+
     static VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation(
         VulkanInstanceGeneration&                       instance_generation,
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
@@ -1470,6 +1476,12 @@ VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGeneration::acqui
     return VulkanInstanceGenerationFactory::acquireRenderPassDrawToPresentSwapchainFrameSlot(*this, request, clear_color);
 }
 
+VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGeneration::acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
+    const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
+{
+    return VulkanInstanceGenerationFactory::acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(*this, request);
+}
+
 VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGeneration::retrySwapchainFrameSlotPresentation(
     const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
 {
@@ -1500,6 +1512,11 @@ bool VulkanInstanceGeneration::resetSwapchainFrameSlotGeneration() noexcept
     {
         return false;
     }
+    if (mSwapchainFrameSlotGeneration && mSwapchainReadbackGeneration &&
+        mSwapchainFrameSlotGeneration->retainsReadbackGeneration(*mSwapchainReadbackGeneration))
+    {
+        return false;
+    }
     if (mSwapchainFrameSlotGeneration && !frameSlotDispositionAllowsReset(mSwapchainFrameSlotGeneration->disposition()))
     {
         return false;
@@ -1515,6 +1532,11 @@ bool VulkanInstanceGeneration::resetSwapchainFrameSlotGeneration() noexcept
 bool VulkanInstanceGeneration::resetSwapchainReadbackGeneration() noexcept
 {
     if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
+    if (mSwapchainReadbackGeneration && mSwapchainFrameSlotGeneration &&
+        mSwapchainFrameSlotGeneration->retainsReadbackGeneration(*mSwapchainReadbackGeneration))
     {
         return false;
     }
@@ -3888,12 +3910,15 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     SwapchainFrameSlotParentOperation               operation,
     std::optional<VulkanSwapchainFrameClearColor>   clear_color) noexcept
 {
-    const bool render_pass_clear =
-        operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassClearToPresent;
-    const bool render_pass_draw      = operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent;
-    const bool render_pass_operation = render_pass_clear || render_pass_draw;
-    if ((operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent || render_pass_operation) &&
-        (!clear_color || !validClearColor(*clear_color)))
+    const bool render_pass_clear         = operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassClearToPresent;
+    const bool render_pass_draw_readback = operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent;
+    const bool render_pass_draw =
+        operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent || render_pass_draw_readback;
+    const bool render_pass_operation       = render_pass_clear || render_pass_draw;
+    const bool caller_clear_color_required = operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent ||
+                                             render_pass_clear ||
+                                             operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent;
+    if (caller_clear_color_required && (!clear_color || !validClearColor(*clear_color)))
     {
         return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor);
     }
@@ -3948,6 +3973,19 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
             instance_generation.mSwapchainImagesGeneration->imageFormat() == VK_FORMAT_UNDEFINED)
         {
             return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainImagesNotLive);
+        }
+        if (render_pass_draw_readback)
+        {
+            const auto* readback = instance_generation.mSwapchainReadbackGeneration.get();
+            if (!readback || readback->buffer() == VK_NULL_HANDLE || readback->memory() == VK_NULL_HANDLE || !readback->isMapped() ||
+                !readback->createdFor(*instance_generation.mPresentationDeviceGeneration,
+                                      *instance_generation.mLogicalDeviceGeneration,
+                                      *instance_generation.mSwapchainConfigurationGeneration,
+                                      *instance_generation.mSwapchainGeneration,
+                                      *instance_generation.mSwapchainImagesGeneration))
+            {
+                return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainReadbackNotLive);
+            }
         }
         if (render_pass_operation)
         {
@@ -4035,7 +4073,9 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     const auto* images_generation    = instance_generation.mSwapchainImagesGeneration.get();
     const auto* presentation_target   = render_pass_operation ? instance_generation.mSwapchainPresentationTargetGeneration.get() : nullptr;
     const auto* presentation_pipeline = render_pass_draw ? instance_generation.mSwapchainPresentationPipelineGeneration.get() : nullptr;
-    auto*       frame_slot           = instance_generation.mSwapchainFrameSlotGeneration.get();
+    auto*       readback            = instance_generation.mSwapchainReadbackGeneration.get();
+    auto*       frame_slot          = instance_generation.mSwapchainFrameSlotGeneration.get();
+    const bool  readback_required   = render_pass_draw_readback || (readback && frame_slot->retainsReadbackGeneration(*readback));
 
     const PFN_vkGetInstanceProcAddr get_instance_proc_addr           = global_dispatch->getInstanceProcAddr();
     const VkInstance                instance                         = instance_generation.mInstance;
@@ -4054,6 +4094,7 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     const VkFormat                  image_format                     = images_generation->imageFormat();
     const std::uint64_t             presentation_target_epoch        = instance_generation.mSwapchainPresentationTargetEpoch;
     const std::uint64_t             presentation_pipeline_epoch      = instance_generation.mSwapchainPresentationPipelineEpoch;
+    const std::uint64_t             readback_epoch                   = instance_generation.mSwapchainReadbackEpoch;
     const std::uint64_t             frame_slot_epoch                 = instance_generation.mSwapchainFrameSlotEpoch;
     const VkRenderPass              render_pass = presentation_target ? presentation_target->renderPass() : VK_NULL_HANDLE;
     const std::uint32_t             framebuffer_count = presentation_target ? presentation_target->framebufferCount() : 0;
@@ -4061,6 +4102,17 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     const VkExtent2D                target_image_extent = presentation_target ? presentation_target->imageExtent() : VkExtent2D{};
     const VkPipelineLayout          pipeline_layout     = presentation_pipeline ? presentation_pipeline->pipelineLayout() : VK_NULL_HANDLE;
     const VkPipeline                pipeline            = presentation_pipeline ? presentation_pipeline->pipeline() : VK_NULL_HANDLE;
+    const VkBuffer                  readback_buffer      = readback_required ? readback->buffer() : VK_NULL_HANDLE;
+    const VkDeviceMemory            readback_memory      = readback_required ? readback->memory() : VK_NULL_HANDLE;
+    const bool                      readback_mapped      = readback_required && readback->isMapped();
+    const VkFormat                  readback_format      = readback_required ? readback->imageFormat() : VK_FORMAT_UNDEFINED;
+    const VkExtent2D                readback_extent      = readback_required ? readback->imageExtent() : VkExtent2D{};
+    const std::uint32_t             readback_image_count = readback_required ? readback->imageCount() : 0;
+    const VkDeviceSize              readback_row_bytes   = readback_required ? readback->rowBytes() : 0;
+    const VkDeviceSize              readback_byte_count  = readback_required ? readback->byteCount() : 0;
+    const VkDeviceSize              readback_allocation_size       = readback_required ? readback->allocationSize() : 0;
+    const std::uint32_t             readback_memory_type_index     = readback_required ? readback->memoryTypeIndex() : 0;
+    const VkMemoryPropertyFlags     readback_memory_property_flags = readback_required ? readback->memoryPropertyFlags() : 0;
     const VkCommandPool             command_pool                     = frame_slot->commandPool();
     const VkCommandBuffer           command_buffer                   = frame_slot->commandBuffer();
     const VkSemaphore               image_available_semaphore        = frame_slot->imageAvailableSemaphore();
@@ -4152,6 +4204,32 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     {
         return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive);
     }
+    const auto exact_readback = [&]() noexcept
+    {
+        if (!readback_required)
+        {
+            return true;
+        }
+        return instance_generation.mSwapchainReadbackEpoch == readback_epoch &&
+               instance_generation.mSwapchainReadbackGeneration.get() == readback && readback && readback->buffer() == readback_buffer &&
+               readback_buffer != VK_NULL_HANDLE && readback->memory() == readback_memory && readback_memory != VK_NULL_HANDLE &&
+               readback->isMapped() == readback_mapped && readback_mapped && readback->imageFormat() == readback_format &&
+               readback_format == image_format && readback->imageExtent().width == readback_extent.width &&
+               readback->imageExtent().height == readback_extent.height && readback_extent.width == configuration->imageExtent().width &&
+               readback_extent.height == configuration->imageExtent().height && readback->imageCount() == readback_image_count &&
+               readback_image_count == image_count && readback->rowBytes() == readback_row_bytes && readback_row_bytes != 0 &&
+               readback->byteCount() == readback_byte_count && readback_byte_count != 0 &&
+               readback->allocationSize() == readback_allocation_size && readback_allocation_size >= readback_byte_count &&
+               readback->memoryTypeIndex() == readback_memory_type_index &&
+               readback->memoryPropertyFlags() == readback_memory_property_flags &&
+               (readback_memory_property_flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                   (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) &&
+               readback->createdFor(*selection, *logical_device, *configuration, *swapchain_generation, *images_generation);
+    };
+    if (!exact_readback())
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainReadbackNotLive);
+    }
     const auto exact_frame_slot = [&]() noexcept
     {
         return instance_generation.mSwapchainFrameSlotEpoch == frame_slot_epoch &&
@@ -4170,7 +4248,18 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     if (startsNewSwapchainFrameSlotWork(operation))
     {
         VulkanSwapchainFrameSlotOperationResult resolution;
-        if (render_pass_draw)
+        if (render_pass_draw_readback)
+        {
+            resolution = frame_slot->resolveRenderPassDrawReadbackPresentationDispatch(*selection,
+                                                                                       *logical_device,
+                                                                                       *configuration,
+                                                                                       *swapchain_generation,
+                                                                                       *images_generation,
+                                                                                       *presentation_target,
+                                                                                       *presentation_pipeline,
+                                                                                       *readback);
+        }
+        else if (render_pass_draw)
         {
             resolution = frame_slot->resolveRenderPassDrawPresentationDispatch(*logical_device,
                                                                                *configuration,
@@ -4266,12 +4355,15 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
         }
         if (!exact_presentation_target())
         {
-            return swapchainFrameSlotOperationFailure(
-                VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationTargetNotLive);
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationTargetNotLive);
         }
         if (!exact_presentation_pipeline())
         {
             return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive);
+        }
+        if (!exact_readback())
+        {
+            return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainReadbackNotLive);
         }
         if (!exact_frame_slot())
         {
@@ -4287,6 +4379,7 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
         operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent ||
         operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassClearToPresent ||
         operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent ||
+        operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent ||
         operation == SwapchainFrameSlotParentOperation::RetryPresentation ||
         operation == SwapchainFrameSlotParentOperation::RetryPresentationCompletion)
     {
@@ -4304,6 +4397,9 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
                 break;
             case SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent:
                 result = frame_slot->executeAcquireRenderPassDrawToPresent(*presentation_target, *presentation_pipeline, *clear_color);
+                break;
+            case SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent:
+                result = frame_slot->executeAcquireRenderPassDrawReadbackToPresent(*presentation_target, *presentation_pipeline, *readback);
                 break;
             case SwapchainFrameSlotParentOperation::RetryPresentation:
                 result = frame_slot->retryPresentation();
@@ -4437,6 +4533,21 @@ VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGenerationFactory
                                   request,
                                   SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent,
                                   normalized_clear_color);
+    if (const auto* error = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<VulkanSwapchainFrameSlotPresentationSuccess>(result);
+}
+
+VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGenerationFactory::acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
+    VulkanInstanceGeneration&                       instance_generation,
+    const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
+{
+    const SwapchainFrameSlotParentResult result =
+        operateSwapchainFrameSlot(instance_generation,
+                                  request,
+                                  SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent);
     if (const auto* error = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&result))
     {
         return *error;

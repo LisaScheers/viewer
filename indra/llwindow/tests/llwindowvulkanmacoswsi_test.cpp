@@ -44,10 +44,8 @@ constexpr U32  REBUILT_BACKING_WIDTH      = 1440;
 constexpr U32  REBUILT_BACKING_HEIGHT     = 810;
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_CLEAR_ONE{ { 0.125f, 0.25f, 0.5f, 1.0f } };
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_CLEAR_TWO{ { 0.75f, 0.125f, 0.375f, 1.0f } };
-constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_DRAW_CLEAR{ { 0.1875f, 0.5625f, 0.8125f, 1.0f } };
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_CLEAR_ONE{ { 0.0625f, 0.625f, 0.25f, 1.0f } };
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_CLEAR_TWO{ { 0.875f, 0.375f, 0.0625f, 1.0f } };
-constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_DRAW_CLEAR{ { 0.3125f, 0.75f, 0.125f, 1.0f } };
 
 static_assert(INITIAL_CLEAR_ONE != INITIAL_CLEAR_TWO && INITIAL_CLEAR_ONE != REBUILT_CLEAR_ONE &&
               INITIAL_CLEAR_ONE != REBUILT_CLEAR_TWO && INITIAL_CLEAR_TWO != REBUILT_CLEAR_ONE &&
@@ -96,6 +94,24 @@ VkCompositeAlphaFlagBitsKHR expectedCompositeAlpha(VkCompositeAlphaFlagsKHR supp
     return static_cast<VkCompositeAlphaFlagBitsKHR>(0);
 }
 
+struct FrameSlotOperationContext
+{
+    const LLWindowMacOSXVulkan*                     mWindow     = nullptr;
+    const LLRenderVulkan::VulkanInstanceGeneration* mGeneration = nullptr;
+};
+
+bool frameSlotInstanceOwnerIsCurrent(void* userdata, const LLRenderVulkan::VulkanInstanceGeneration& generation) noexcept
+{
+    const auto& context = *static_cast<const FrameSlotOperationContext*>(userdata);
+    return context.mWindow && context.mGeneration == &generation && context.mWindow->instanceGeneration() == context.mGeneration;
+}
+
+bool frameSlotWindowGenerationIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto& context = *static_cast<const FrameSlotOperationContext*>(userdata);
+    return context.mWindow && context.mWindow->isGenerationCurrent(native_window_generation);
+}
+
 bool presentationCompleted(const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result,
                            std::uint32_t                                                           image_count) noexcept
 {
@@ -103,6 +119,33 @@ bool presentationCompleted(const LLRenderVulkan::VulkanSwapchainFrameSlotParentP
     return success && success->mImageIndex && *success->mImageIndex < image_count &&
            (success->mOutcome == LLRenderVulkan::VulkanSwapchainFrameSlotPresentationOutcome::Presented ||
             success->mOutcome == LLRenderVulkan::VulkanSwapchainFrameSlotPresentationOutcome::Suboptimal);
+}
+
+bool presentationObserved(const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result,
+                          std::uint32_t                                                           image_count,
+                          VkFormat                                                                image_format,
+                          VkExtent2D                                                              image_extent,
+                          VkFormat                                                                readback_format,
+                          VkExtent2D                                                              readback_extent) noexcept
+{
+    const auto* success = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>(&result);
+    if (!presentationCompleted(result, image_count) || !success->mObservation || image_format != readback_format ||
+        image_extent.width != readback_extent.width || image_extent.height != readback_extent.height || image_extent.width == 0 ||
+        image_extent.height == 0 ||
+        static_cast<std::uint64_t>(image_extent.height) >
+            std::numeric_limits<std::uint64_t>::max() / static_cast<std::uint64_t>(image_extent.width))
+    {
+        return false;
+    }
+
+    const std::uint64_t expected_pixel_count =
+        static_cast<std::uint64_t>(image_extent.width) * static_cast<std::uint64_t>(image_extent.height);
+    const auto& observation = *success->mObservation;
+    return observation.mImageFormat == image_format && observation.mImageFormat == readback_format &&
+           observation.mImageExtent.width == image_extent.width && observation.mImageExtent.height == image_extent.height &&
+           observation.mImageExtent.width == readback_extent.width && observation.mImageExtent.height == readback_extent.height &&
+           observation.mTotalPixelCount == expected_pixel_count && observation.mGreenPixelCount == expected_pixel_count &&
+           observation.mRedPixelCount == 0 && observation.mUnexpectedPixelCount == 0;
 }
 
 } // namespace
@@ -388,11 +431,23 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("frame-slot acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("frame-slot acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    auto*                     mutable_instance_generation = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
+    FrameSlotOperationContext operation_context{ owner, instance_generation };
+    LLRenderVulkan::VulkanSwapchainFrameSlotOperationRequest operation_request;
+    operation_request.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
+    operation_request.mDrawableExtent         = drawable_extent;
+    operation_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    operation_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+
+    const std::uint32_t initial_resolved_image_count = resolved_image_count;
+    const VkFormat      initial_readback_format      = instance_generation->swapchainReadbackImageFormat();
+    const VkExtent2D    initial_readback_extent      = instance_generation->swapchainReadbackImageExtent();
+
     const VkSemaphore initial_image_available          = instance_generation->swapchainFrameImageAvailableSemaphore();
     const VkSemaphore initial_presentation_ready       = instance_generation->swapchainFramePresentationReadySemaphore();
     const VkFence     initial_submission_fence         = instance_generation->swapchainFrameSubmissionFence();
     const VkFence     initial_present_completion_fence = instance_generation->swapchainFramePresentCompletionFence();
-    const auto initial_first_presentation = owner->acquireClearToPresentSwapchainFrameSlot(INITIAL_CLEAR_ONE);
+    const auto        initial_first_presentation       = owner->acquireClearToPresentSwapchainFrameSlot(INITIAL_CLEAR_ONE);
     ensure("the initial Metal swapchain submits and presents one legacy transfer-clear cycle",
            presentationCompleted(initial_first_presentation, resolved_image_count) &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
@@ -423,27 +478,34 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure_equals("the initial render-pass clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     const F64  initial_draw_backing_scale = owner->backingScale();
-    const auto initial_draw_presentation  = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(INITIAL_DRAW_CLEAR);
-    ensure("the complete initial target-pipeline-slot chain submits and presents one diagnostic draw",
-           presentationCompleted(initial_draw_presentation, resolved_image_count) &&
+    const auto initial_draw_readback_presentation =
+        mutable_instance_generation->acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(operation_request);
+    ensure("the complete initial target-pipeline-slot chain authenticates one detached green draw-readback observation",
+           image_extent.width == BACKING_WIDTH && image_extent.height == BACKING_HEIGHT &&
+               presentationObserved(initial_draw_readback_presentation,
+                                    initial_resolved_image_count,
+                                    surface_format.format,
+                                    image_extent,
+                                    initial_readback_format,
+                                    initial_readback_extent) &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                !instance_generation->swapchainFrameAcquiredImageIndex());
-    ensure("the initial diagnostic draw retains all four synchronization handles",
+    ensure("the initial observed draw retains all four synchronization handles",
            instance_generation->swapchainFrameImageAvailableSemaphore() == initial_image_available &&
                instance_generation->swapchainFramePresentationReadySemaphore() == initial_presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == initial_submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == initial_present_completion_fence);
-    ensure_equals("the initial diagnostic draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+    ensure_equals("the initial observed draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
-    ensure("the initial diagnostic draw preserves the private Cocoa owner and exact Vulkan generation",
+    ensure("the initial observed draw preserves the private Cocoa owner and exact Vulkan generation",
            owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
                owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == initial_draw_backing_scale &&
                owner->drawableWidth() == BACKING_WIDTH && owner->drawableHeight() == BACKING_HEIGHT &&
                LLWindow::instanceCount() == initial_window_count);
-    ensure("the initial diagnostic draw creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the initial diagnostic draw leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure("the initial observed draw creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the initial observed draw leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
-    const VkSurfaceKHR    retained_surface         = instance_generation->surface();
+    const VkSurfaceKHR     retained_surface         = instance_generation->surface();
     const VkPhysicalDevice retained_physical_device = instance_generation->physicalDevice();
     const VkDevice         retained_logical_device  = instance_generation->logicalDevice();
     const VkQueue          retained_queue           = instance_generation->presentationQueue();
@@ -465,6 +527,7 @@ void window_vulkan_macos_wsi_object::test<1>()
            rebuilt_drawable_extent.width == REBUILT_BACKING_WIDTH && rebuilt_drawable_extent.height == REBUILT_BACKING_HEIGHT &&
                owner->drawableWidth() == rebuilt_drawable_extent.width && owner->drawableHeight() == rebuilt_drawable_extent.height &&
                instance_generation->swapchainImageUsage() == expected_image_usage);
+    operation_request.mDrawableExtent = rebuilt_drawable_extent;
     ensure("same-surface rebuild retains every older Vulkan parent and borrowed queue",
            instance_generation->surface() == retained_surface && instance_generation->physicalDevice() == retained_physical_device &&
                instance_generation->logicalDevice() == retained_logical_device &&
@@ -499,6 +562,13 @@ void window_vulkan_macos_wsi_object::test<1>()
                (instance_generation->swapchainReadbackMemoryPropertyFlags() &
                 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
                    (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+    ensure("the initial draw-readback observation remains detached after changed-extent rebuild",
+           presentationObserved(initial_draw_readback_presentation,
+                                initial_resolved_image_count,
+                                surface_format.format,
+                                image_extent,
+                                initial_readback_format,
+                                initial_readback_extent));
     ensure_equals("changed-extent rebuild emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
     ensure("changed-extent rebuild creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
@@ -539,25 +609,32 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure_equals("the rebuilt render-pass clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     const F64  rebuilt_draw_backing_scale = owner->backingScale();
-    const auto rebuilt_draw_presentation  = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(REBUILT_DRAW_CLEAR);
-    ensure("the rebuilt target-pipeline-slot chain submits and presents one diagnostic draw at the changed extent",
-           presentationCompleted(rebuilt_draw_presentation, resolved_image_count) &&
+    const auto rebuilt_draw_readback_presentation =
+        mutable_instance_generation->acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(operation_request);
+    ensure("the rebuilt target-pipeline-slot chain authenticates one green draw-readback observation at the changed extent",
+           rebuilt_image_extent.width == REBUILT_BACKING_WIDTH && rebuilt_image_extent.height == REBUILT_BACKING_HEIGHT &&
+               presentationObserved(rebuilt_draw_readback_presentation,
+                                    resolved_image_count,
+                                    instance_generation->swapchainSurfaceFormat().format,
+                                    rebuilt_image_extent,
+                                    instance_generation->swapchainReadbackImageFormat(),
+                                    instance_generation->swapchainReadbackImageExtent()) &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                !instance_generation->swapchainFrameAcquiredImageIndex());
-    ensure("the rebuilt diagnostic draw retains all four synchronization handles",
+    ensure("the rebuilt observed draw retains all four synchronization handles",
            instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
                instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
-    ensure_equals("the rebuilt diagnostic draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+    ensure_equals("the rebuilt observed draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
-    ensure("the rebuilt diagnostic draw preserves the private Cocoa owner and exact changed geometry",
+    ensure("the rebuilt observed draw preserves the private Cocoa owner and exact changed geometry",
            owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
                owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == rebuilt_draw_backing_scale &&
                owner->drawableWidth() == REBUILT_BACKING_WIDTH && owner->drawableHeight() == REBUILT_BACKING_HEIGHT &&
                LLWindow::instanceCount() == initial_window_count);
-    ensure("the rebuilt diagnostic draw creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the rebuilt diagnostic draw leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure("the rebuilt observed draw creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the rebuilt observed draw leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     ensure("the native smoke explicitly resets the frame slot before swapchain images", owner->resetSwapchainFrameSlotGeneration());
     ensure("explicit frame-slot reset removes all six owned handles",

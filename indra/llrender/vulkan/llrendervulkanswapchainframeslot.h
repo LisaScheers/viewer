@@ -17,6 +17,7 @@
 #define LL_LLRENDERVULKANSWAPCHAINFRAMESLOT_H
 
 #include "llrendervulkanswapchainimages.h"
+#include "llrendervulkanswapchainreadback.h"
 
 #include <vulkan/vulkan.h>
 
@@ -59,7 +60,8 @@ enum class VulkanSwapchainFrameSlotCommand : std::uint8_t
     CmdBindPipeline,
     CmdSetViewport,
     CmdSetScissor,
-    CmdDraw
+    CmdDraw,
+    CmdCopyImageToBuffer
 };
 
 enum class VulkanSwapchainFrameSlotResolutionCode : std::uint8_t
@@ -124,7 +126,8 @@ enum class VulkanSwapchainFrameSlotOperationCode : std::uint8_t
     CommandFailure,
     InvalidClearColor,
     InvalidSwapchainPresentationTargetGeneration,
-    InvalidSwapchainPresentationPipelineGeneration
+    InvalidSwapchainPresentationPipelineGeneration,
+    InvalidSwapchainReadbackGeneration
 };
 
 struct VulkanSwapchainFrameClearColor
@@ -159,8 +162,9 @@ enum class VulkanSwapchainFrameSlotPresentationOutcome : std::uint8_t
 
 struct VulkanSwapchainFrameSlotPresentationSuccess
 {
-    VulkanSwapchainFrameSlotPresentationOutcome mOutcome = VulkanSwapchainFrameSlotPresentationOutcome::Presented;
-    std::optional<std::uint32_t>                 mImageIndex;
+    VulkanSwapchainFrameSlotPresentationOutcome       mOutcome = VulkanSwapchainFrameSlotPresentationOutcome::Presented;
+    std::optional<std::uint32_t>                      mImageIndex;
+    std::optional<VulkanSwapchainReadbackObservation> mObservation;
 
     friend constexpr bool operator==(const VulkanSwapchainFrameSlotPresentationSuccess&,
                                      const VulkanSwapchainFrameSlotPresentationSuccess&) = default;
@@ -178,7 +182,9 @@ using VulkanSwapchainFrameSlotPresentationResult =
 // operation may still use a fence or semaphore and no image may remain acquired.
 // A presentation target bound for render-pass recording, and an optional
 // presentation pipeline bound for drawing, must also outlive this slot and be
-// reset only after the slot.
+// reset only after the slot. A readback generation retained for an active
+// observation must not be moved, reset, or destroyed until this slot releases
+// it, as reported by retainsReadbackGeneration().
 class VulkanSwapchainFrameSlotGeneration
 {
 public:
@@ -243,6 +249,16 @@ public:
         const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
         const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation) noexcept;
 
+    VulkanSwapchainFrameSlotOperationResult resolveRenderPassDrawReadbackPresentationDispatch(
+        const VulkanPhysicalDeviceGeneration&                physical_device_generation,
+        const VulkanLogicalDeviceGeneration&                 logical_device_generation,
+        const VulkanSwapchainConfigurationGeneration&        configuration_generation,
+        const VulkanSwapchainGeneration&                     swapchain_generation,
+        const VulkanSwapchainImagesGeneration&               images_generation,
+        const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
+        const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
+        const VulkanSwapchainReadbackGeneration&             readback_generation) noexcept;
+
     // Acquires one image with VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS,
     // transitions it from undefined to present source, submits, presents, and
     // retires both fences. A post-acquire error retains the exact image and
@@ -257,8 +273,17 @@ public:
         const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
         const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
         const VulkanSwapchainFrameClearColor&                clear_color) noexcept;
+    VulkanSwapchainFrameSlotPresentationResult executeAcquireRenderPassDrawReadbackToPresent(
+        const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
+        const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
+        VulkanSwapchainReadbackGeneration&                   readback_generation) noexcept;
     VulkanSwapchainFrameSlotPresentationResult retryPresentation() noexcept;
     VulkanSwapchainFrameSlotPresentationResult retryPresentationCompletion() noexcept;
+
+    bool retainsReadbackGeneration(const VulkanSwapchainReadbackGeneration& readback_generation) const noexcept
+    {
+        return mActiveReadbackGeneration == &readback_generation;
+    }
 
     // Cancellation consumes the outstanding binary-semaphore payload with a
     // fence-backed empty submission, retires every reset fence, then releases
@@ -294,7 +319,8 @@ private:
         LayoutOnly,
         TransferClear,
         RenderPassClear,
-        RenderPassDraw
+        RenderPassDraw,
+        RenderPassDrawReadback
     };
 
     VulkanSwapchainFrameSlotOperationResult resolvePresentationDispatch(
@@ -303,69 +329,85 @@ private:
         const VulkanSwapchainGeneration&                     swapchain_generation,
         const VulkanSwapchainImagesGeneration&               images_generation,
         RecordingMode                                        recording_mode,
+        const VulkanPhysicalDeviceGeneration*                physical_device_generation,
         const VulkanSwapchainPresentationTargetGeneration*   presentation_target_generation,
-        const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation) noexcept;
+        const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation,
+        const VulkanSwapchainReadbackGeneration*             readback_generation) noexcept;
     VulkanSwapchainFrameSlotPresentationResult executeAcquireToPresent(
         RecordingMode                                        recording_mode,
         const VulkanSwapchainFrameClearColor*                clear_color,
         const VulkanSwapchainPresentationTargetGeneration*   presentation_target_generation,
-        const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation) noexcept;
+        const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation,
+        VulkanSwapchainReadbackGeneration*                   readback_generation) noexcept;
 
-    const VulkanLogicalDeviceGeneration*              mLogicalDeviceGeneration       = nullptr;
-    const VulkanSwapchainConfigurationGeneration*     mConfigurationGeneration       = nullptr;
-    const VulkanSwapchainGeneration*                  mSwapchainGeneration           = nullptr;
-    PFN_vkGetInstanceProcAddr                         mGetInstanceProcAddr            = nullptr;
-    VkInstance                                        mInstance                       = VK_NULL_HANDLE;
-    VkSurfaceKHR                                      mSurface                        = VK_NULL_HANDLE;
-    VkPhysicalDevice                                  mPhysicalDevice                 = VK_NULL_HANDLE;
-    std::uint32_t                                     mPhysicalDeviceIndex            = 0;
-    VkDevice                                          mDevice                         = VK_NULL_HANDLE;
-    VkQueue                                           mQueue                          = VK_NULL_HANDLE;
-    std::uint32_t                                     mQueueFamilyIndex               = VK_QUEUE_FAMILY_IGNORED;
-    std::uint32_t                                     mQueueIndex                     = 0;
-    VkExtent2D                                        mDrawableExtent{};
-    VkSwapchainKHR                                    mSwapchain                      = VK_NULL_HANDLE;
-    VkFormat                                          mImageFormat                    = VK_FORMAT_UNDEFINED;
-    std::uint32_t                                     mImageCount                     = 0;
-    const VulkanSwapchainImagesGeneration*            mImagesGeneration               = nullptr;
-    const VulkanSwapchainPresentationTargetGeneration* mPresentationTargetGeneration = nullptr;
-    const VulkanSwapchainPresentationPipelineGeneration* mPresentationPipelineGeneration       = nullptr;
-    VkPipelineLayout                                     mPresentationPipelineLayout           = VK_NULL_HANDLE;
-    VkPipeline                                           mPresentationPipeline                 = VK_NULL_HANDLE;
-    VkCommandPool                          mCommandPool                         = VK_NULL_HANDLE;
-    VkCommandBuffer                        mCommandBuffer                       = VK_NULL_HANDLE;
-    VkSemaphore                            mImageAvailableSemaphore             = VK_NULL_HANDLE;
-    VkSemaphore                            mPresentationReadySemaphore           = VK_NULL_HANDLE;
-    VkFence                                mSubmissionFence                     = VK_NULL_HANDLE;
-    VkFence                                mPresentCompletionFence               = VK_NULL_HANDLE;
-    PFN_vkDestroyCommandPool               mDestroyCommandPool                  = nullptr;
-    PFN_vkDestroySemaphore                 mDestroySemaphore                    = nullptr;
-    PFN_vkDestroyFence                     mDestroyFence                        = nullptr;
-    PFN_vkWaitForFences                    mWaitForFences                       = nullptr;
-    PFN_vkResetCommandBuffer               mResetCommandBuffer                  = nullptr;
-    PFN_vkBeginCommandBuffer               mBeginCommandBuffer                  = nullptr;
-    PFN_vkEndCommandBuffer                 mEndCommandBuffer                    = nullptr;
-    PFN_vkResetFences                      mResetFences                         = nullptr;
-    PFN_vkQueueSubmit                      mQueueSubmit                         = nullptr;
-    PFN_vkAcquireNextImageKHR              mAcquireNextImage                    = nullptr;
-    PFN_vkCmdPipelineBarrier               mCmdPipelineBarrier                  = nullptr;
-    PFN_vkCmdClearColorImage               mCmdClearColorImage                  = nullptr;
-    PFN_vkCmdBeginRenderPass               mCmdBeginRenderPass                  = nullptr;
-    PFN_vkCmdEndRenderPass                 mCmdEndRenderPass                    = nullptr;
-    PFN_vkCmdBindPipeline                                mCmdBindPipeline                      = nullptr;
-    PFN_vkCmdSetViewport                                 mCmdSetViewport                       = nullptr;
-    PFN_vkCmdSetScissor                                  mCmdSetScissor                        = nullptr;
-    PFN_vkCmdDraw                                        mCmdDraw                              = nullptr;
-    PFN_vkQueuePresentKHR                  mQueuePresent                        = nullptr;
-    PFN_vkReleaseSwapchainImagesKHR        mReleaseSwapchainImages              = nullptr;
-    VulkanSwapchainFrameSlotDisposition    mDisposition                         = VulkanSwapchainFrameSlotDisposition::Reusable;
-    bool                                   mPendingSubmissionReportedDeviceLost = false;
-    bool                                   mSubmissionFenceSignaled              = true;
-    bool                                   mPresentCompletionFenceSignaled       = true;
-    std::optional<std::uint32_t>           mAcquiredImageIndex;
-    VulkanSwapchainFrameSlotPresentationOutcome mPendingPresentationOutcome =
-        VulkanSwapchainFrameSlotPresentationOutcome::Presented;
-    VkResult mPendingPresentResult = VK_SUCCESS;
+    bool activeReadbackMatchesSnapshot() const noexcept;
+    void clearActiveReadback() noexcept;
+
+    const VulkanLogicalDeviceGeneration*                 mLogicalDeviceGeneration = nullptr;
+    const VulkanSwapchainConfigurationGeneration*        mConfigurationGeneration = nullptr;
+    const VulkanSwapchainGeneration*                     mSwapchainGeneration     = nullptr;
+    PFN_vkGetInstanceProcAddr                            mGetInstanceProcAddr     = nullptr;
+    VkInstance                                           mInstance                = VK_NULL_HANDLE;
+    VkSurfaceKHR                                         mSurface                 = VK_NULL_HANDLE;
+    VkPhysicalDevice                                     mPhysicalDevice          = VK_NULL_HANDLE;
+    std::uint32_t                                        mPhysicalDeviceIndex     = 0;
+    VkDevice                                             mDevice                  = VK_NULL_HANDLE;
+    VkQueue                                              mQueue                   = VK_NULL_HANDLE;
+    std::uint32_t                                        mQueueFamilyIndex        = VK_QUEUE_FAMILY_IGNORED;
+    std::uint32_t                                        mQueueIndex              = 0;
+    VkExtent2D                                           mDrawableExtent{};
+    VkExtent2D                                           mImageExtent{};
+    VkSwapchainKHR                                       mSwapchain                        = VK_NULL_HANDLE;
+    VkFormat                                             mImageFormat                      = VK_FORMAT_UNDEFINED;
+    std::uint32_t                                        mImageCount                       = 0;
+    const VulkanSwapchainImagesGeneration*               mImagesGeneration                 = nullptr;
+    const VulkanSwapchainPresentationTargetGeneration*   mPresentationTargetGeneration     = nullptr;
+    const VulkanSwapchainPresentationPipelineGeneration* mPresentationPipelineGeneration   = nullptr;
+    VkPipelineLayout                                     mPresentationPipelineLayout       = VK_NULL_HANDLE;
+    VkPipeline                                           mPresentationPipeline             = VK_NULL_HANDLE;
+    VkCommandPool                                        mCommandPool                      = VK_NULL_HANDLE;
+    VkCommandBuffer                                      mCommandBuffer                    = VK_NULL_HANDLE;
+    VkSemaphore                                          mImageAvailableSemaphore          = VK_NULL_HANDLE;
+    VkSemaphore                                          mPresentationReadySemaphore       = VK_NULL_HANDLE;
+    VkFence                                              mSubmissionFence                  = VK_NULL_HANDLE;
+    VkFence                                              mPresentCompletionFence           = VK_NULL_HANDLE;
+    PFN_vkDestroyCommandPool                             mDestroyCommandPool               = nullptr;
+    PFN_vkDestroySemaphore                               mDestroySemaphore                 = nullptr;
+    PFN_vkDestroyFence                                   mDestroyFence                     = nullptr;
+    PFN_vkWaitForFences                                  mWaitForFences                    = nullptr;
+    PFN_vkResetCommandBuffer                             mResetCommandBuffer               = nullptr;
+    PFN_vkBeginCommandBuffer                             mBeginCommandBuffer               = nullptr;
+    PFN_vkEndCommandBuffer                               mEndCommandBuffer                 = nullptr;
+    PFN_vkResetFences                                    mResetFences                      = nullptr;
+    PFN_vkQueueSubmit                                    mQueueSubmit                      = nullptr;
+    PFN_vkAcquireNextImageKHR                            mAcquireNextImage                 = nullptr;
+    PFN_vkCmdPipelineBarrier                             mCmdPipelineBarrier               = nullptr;
+    PFN_vkCmdClearColorImage                             mCmdClearColorImage               = nullptr;
+    PFN_vkCmdBeginRenderPass                             mCmdBeginRenderPass               = nullptr;
+    PFN_vkCmdEndRenderPass                               mCmdEndRenderPass                 = nullptr;
+    PFN_vkCmdBindPipeline                                mCmdBindPipeline                  = nullptr;
+    PFN_vkCmdSetViewport                                 mCmdSetViewport                   = nullptr;
+    PFN_vkCmdSetScissor                                  mCmdSetScissor                    = nullptr;
+    PFN_vkCmdDraw                                        mCmdDraw                          = nullptr;
+    PFN_vkCmdCopyImageToBuffer                           mCmdCopyImageToBuffer             = nullptr;
+    PFN_vkQueuePresentKHR                                mQueuePresent                     = nullptr;
+    PFN_vkReleaseSwapchainImagesKHR                      mReleaseSwapchainImages           = nullptr;
+    const VulkanPhysicalDeviceGeneration*                mReadbackPhysicalDeviceGeneration = nullptr;
+    const VulkanSwapchainReadbackGeneration*             mResolvedReadbackGeneration       = nullptr;
+    VulkanSwapchainReadbackGeneration*                   mActiveReadbackGeneration         = nullptr;
+    VkBuffer                                             mActiveReadbackBuffer             = VK_NULL_HANDLE;
+    VkFormat                                             mActiveReadbackImageFormat        = VK_FORMAT_UNDEFINED;
+    VkExtent2D                                           mActiveReadbackImageExtent{};
+    VkDeviceSize                                         mActiveReadbackRowBytes         = 0;
+    VkDeviceSize                                         mActiveReadbackByteCount        = 0;
+    bool                                                 mReadbackClassificationEligible = false;
+    VulkanSwapchainFrameSlotDisposition                  mDisposition                    = VulkanSwapchainFrameSlotDisposition::Reusable;
+    bool                                                 mPendingSubmissionReportedDeviceLost = false;
+    bool                                                 mSubmissionFenceSignaled             = true;
+    bool                                                 mPresentCompletionFenceSignaled      = true;
+    std::optional<std::uint32_t>                         mAcquiredImageIndex;
+    VulkanSwapchainFrameSlotPresentationOutcome mPendingPresentationOutcome = VulkanSwapchainFrameSlotPresentationOutcome::Presented;
+    VkResult                                    mPendingPresentResult       = VK_SUCCESS;
 
     enum class CancellationPhase : std::uint8_t
     {

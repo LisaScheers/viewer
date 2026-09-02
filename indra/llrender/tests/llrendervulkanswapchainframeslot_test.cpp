@@ -75,7 +75,8 @@ enum class MissingCommand : std::uint8_t
     CmdBindPipeline,
     CmdSetViewport,
     CmdSetScissor,
-    CmdDraw
+    CmdDraw,
+    CmdCopyImageToBuffer
 };
 
 struct FenceWaitRecord
@@ -132,14 +133,25 @@ struct AcquireRecord
 
 struct BarrierRecord
 {
-    VkCommandBuffer       mCommandBuffer = VK_NULL_HANDLE;
-    VkPipelineStageFlags  mSourceStage   = 0;
-    VkPipelineStageFlags  mDestinationStage = 0;
-    VkDependencyFlags     mDependencyFlags = 0;
+    VkCommandBuffer       mCommandBuffer      = VK_NULL_HANDLE;
+    VkPipelineStageFlags  mSourceStage        = 0;
+    VkPipelineStageFlags  mDestinationStage   = 0;
+    VkDependencyFlags     mDependencyFlags    = 0;
     std::uint32_t         mMemoryBarrierCount = 0;
     std::uint32_t         mBufferBarrierCount = 0;
-    std::uint32_t         mImageBarrierCount = 0;
+    std::uint32_t         mImageBarrierCount  = 0;
+    VkBufferMemoryBarrier mBufferBarrier{};
     VkImageMemoryBarrier  mImageBarrier{};
+};
+
+struct CopyImageToBufferRecord
+{
+    VkCommandBuffer   mCommandBuffer = VK_NULL_HANDLE;
+    VkImage           mImage         = VK_NULL_HANDLE;
+    VkImageLayout     mImageLayout   = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkBuffer          mBuffer        = VK_NULL_HANDLE;
+    std::uint32_t     mRegionCount   = 0;
+    VkBufferImageCopy mRegion{};
 };
 
 struct ClearColorRecord
@@ -256,6 +268,9 @@ struct FakeState
     VkFence         mFenceOutput          = fakeHandle<VkFence>(0x9300);
     VkPipelineLayout mPipelineLayoutOutput = fakeHandle<VkPipelineLayout>(0xc000);
     VkPipeline       mPipelineOutput       = fakeHandle<VkPipeline>(0xc300);
+    VkBuffer         mReadbackBufferOutput = fakeHandle<VkBuffer>(0xd000);
+    VkDeviceMemory   mReadbackMemoryOutput = fakeHandle<VkDeviceMemory>(0xd100);
+    VkDeviceSize     mReadbackBufferSize   = 0;
     std::size_t      mNextShaderModule     = 0;
 
     VkSemaphore presentationReadySemaphore() const noexcept { return fakeHandle<VkSemaphore>(0x9201); }
@@ -281,6 +296,18 @@ struct FakeState
     VulkanSwapchainPresentationPipelineGeneration* mResetPresentationPipelineOnAcquire    = nullptr;
     VulkanSwapchainPresentationPipelineGeneration* mResetPresentationPipelineOnDrawLookup = nullptr;
     VulkanSwapchainFrameClearColor*                mClearColorToMutateOnAcquire           = nullptr;
+    VulkanSwapchainReadbackGeneration*             mResetReadbackOnAcquire                = nullptr;
+    VulkanSwapchainFrameSlotGeneration*            mResetFrameSlotOnPriorWait             = nullptr;
+    VulkanSwapchainFrameSlotGeneration*            mExpectedRetentionSlot                 = nullptr;
+    VulkanSwapchainReadbackGeneration*             mExpectedRetainedReadback              = nullptr;
+    std::size_t                                    mRetentionChecks                       = 0;
+    std::size_t                                    mRetentionFailures                     = 0;
+    std::vector<std::uint8_t>                      mReadbackBytes;
+    std::vector<std::uint8_t>                      mFinalFenceBytes;
+    std::size_t                                    mFinalFenceWrites                = 0;
+    std::size_t                                    mSentinelChecks                  = 0;
+    bool                                           mWriteReadbackOnFinalFence       = false;
+    bool                                           mRequireSentinelBeforeFinalWrite = false;
 
     std::vector<std::string>                 mEvents;
     std::vector<VkDevice>                    mMutationDevices;
@@ -300,13 +327,14 @@ struct FakeState
     std::vector<QueueSubmitRecord>           mQueueSubmits;
     std::vector<AcquireRecord>               mAcquires;
     std::vector<BarrierRecord>               mBarriers;
-    std::vector<ClearColorRecord>             mClears;
-    std::vector<RenderPassBeginRecord>         mRenderPassBegins;
-    std::vector<VkCommandBuffer>               mEndedRenderPassBuffers;
-    std::vector<BindPipelineRecord>            mPipelineBinds;
-    std::vector<ViewportRecord>                mViewports;
-    std::vector<ScissorRecord>                 mScissors;
-    std::vector<DrawRecord>                    mDraws;
+    std::vector<ClearColorRecord>            mClears;
+    std::vector<RenderPassBeginRecord>       mRenderPassBegins;
+    std::vector<VkCommandBuffer>             mEndedRenderPassBuffers;
+    std::vector<BindPipelineRecord>          mPipelineBinds;
+    std::vector<ViewportRecord>              mViewports;
+    std::vector<ScissorRecord>               mScissors;
+    std::vector<DrawRecord>                  mDraws;
+    std::vector<CopyImageToBufferRecord>     mCopies;
     std::vector<PresentRecord>               mPresents;
     std::vector<ReleaseRecord>               mReleases;
 
@@ -350,6 +378,7 @@ struct FakeState
         mViewports.clear();
         mScissors.clear();
         mDraws.clear();
+        mCopies.clear();
         mPresents.clear();
         mReleases.clear();
         mNextWaitResult = 0;
@@ -361,6 +390,17 @@ struct FakeState
         mResetPresentationPipelineOnAcquire    = nullptr;
         mResetPresentationPipelineOnDrawLookup = nullptr;
         mClearColorToMutateOnAcquire           = nullptr;
+        mResetReadbackOnAcquire                = nullptr;
+        mResetFrameSlotOnPriorWait             = nullptr;
+        mExpectedRetentionSlot                 = nullptr;
+        mExpectedRetainedReadback              = nullptr;
+        mRetentionChecks                       = 0;
+        mRetentionFailures                     = 0;
+        mFinalFenceBytes.clear();
+        mFinalFenceWrites                = 0;
+        mSentinelChecks                  = 0;
+        mWriteReadbackOnFinalFence       = false;
+        mRequireSentinelBeforeFinalWrite = false;
     }
 };
 
@@ -744,6 +784,94 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyPipeline(VkDevice, VkPipeline, const VkAll
 {
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceMemoryProperties(VkPhysicalDevice                  physical_device,
+                                                                 VkPhysicalDeviceMemoryProperties* properties) noexcept
+{
+    if (!gFakeState || physical_device != gFakeState->mPhysicalDevice || !properties)
+    {
+        return;
+    }
+    *properties                              = {};
+    properties->memoryTypeCount              = 1;
+    properties->memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    properties->memoryTypes[0].heapIndex     = 0;
+    properties->memoryHeapCount              = 1;
+    properties->memoryHeaps[0].size          = VkDeviceSize{ 1 } << 30;
+    properties->memoryHeaps[0].flags         = 0;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice                  device,
+                                                const VkBufferCreateInfo* create_info,
+                                                const VkAllocationCallbacks*,
+                                                VkBuffer* buffer) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !create_info || !buffer || create_info->size == 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    gFakeState->mReadbackBufferSize = create_info->size;
+    *buffer                         = gFakeState->mReadbackBufferOutput;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice, VkBuffer, const VkAllocationCallbacks*) noexcept
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer, VkMemoryRequirements* requirements) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || buffer != gFakeState->mReadbackBufferOutput || !requirements)
+    {
+        return;
+    }
+    requirements->size           = gFakeState->mReadbackBufferSize;
+    requirements->alignment      = 4;
+    requirements->memoryTypeBits = 1;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice                    device,
+                                                  const VkMemoryAllocateInfo* allocate_info,
+                                                  const VkAllocationCallbacks*,
+                                                  VkDeviceMemory* memory) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !allocate_info || !memory ||
+        allocate_info->allocationSize != gFakeState->mReadbackBufferSize)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    gFakeState->mReadbackBytes.assign(static_cast<std::size_t>(allocate_info->allocationSize), 0xa5);
+    *memory = gFakeState->mReadbackMemoryOutput;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice, VkDeviceMemory, const VkAllocationCallbacks*) noexcept
+{
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset) noexcept
+{
+    return gFakeState && device == gFakeState->mDevice && buffer == gFakeState->mReadbackBufferOutput &&
+                   memory == gFakeState->mReadbackMemoryOutput && offset == 0
+               ? VK_SUCCESS
+               : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+    fakeMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize, VkMemoryMapFlags flags, void** data) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || memory != gFakeState->mReadbackMemoryOutput || offset != 0 || flags != 0 || !data ||
+        gFakeState->mReadbackBytes.empty())
+    {
+        return VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    *data = gFakeState->mReadbackBytes.data();
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice, VkDeviceMemory) noexcept
+{
+}
+
 const std::vector<std::string>& expectedDeviceLookups()
 {
     static const std::vector<std::string> names{ "vkCreateCommandPool", "vkDestroyCommandPool", "vkAllocateCommandBuffers",
@@ -796,6 +924,28 @@ const std::vector<std::string>& expectedRenderPassDrawPresentationLookups()
                                                  "vkCmdBindPipeline",     "vkCmdSetViewport",
                                                  "vkCmdSetScissor",       "vkCmdDraw",
                                                  "vkQueuePresentKHR",     "vkReleaseSwapchainImagesKHR" };
+    return names;
+}
+
+const std::vector<std::string>& expectedRenderPassDrawReadbackPresentationLookups()
+{
+    static const std::vector<std::string> names{ "vkWaitForFences",
+                                                 "vkResetCommandBuffer",
+                                                 "vkBeginCommandBuffer",
+                                                 "vkEndCommandBuffer",
+                                                 "vkResetFences",
+                                                 "vkQueueSubmit",
+                                                 "vkAcquireNextImageKHR",
+                                                 "vkCmdPipelineBarrier",
+                                                 "vkCmdBeginRenderPass",
+                                                 "vkCmdEndRenderPass",
+                                                 "vkCmdBindPipeline",
+                                                 "vkCmdSetViewport",
+                                                 "vkCmdSetScissor",
+                                                 "vkCmdDraw",
+                                                 "vkCmdCopyImageToBuffer",
+                                                 "vkQueuePresentKHR",
+                                                 "vkReleaseSwapchainImagesKHR" };
     return names;
 }
 
@@ -916,13 +1066,42 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeWaitForFences(VkDevice device, std::uint32_t 
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     gFakeState->mEvents.emplace_back("wait fence");
-    gFakeState->mFenceWaits.push_back(
-        { device, fence_count, fences[0], fence_count > 1 ? fences[1] : VK_NULL_HANDLE, wait_all, timeout });
+    gFakeState->mFenceWaits.push_back({ device, fence_count, fences[0], fence_count > 1 ? fences[1] : VK_NULL_HANDLE, wait_all, timeout });
+    if (gFakeState->mExpectedRetentionSlot && gFakeState->mExpectedRetainedReadback)
+    {
+        ++gFakeState->mRetentionChecks;
+        if (!gFakeState->mExpectedRetentionSlot->retainsReadbackGeneration(*gFakeState->mExpectedRetainedReadback))
+        {
+            ++gFakeState->mRetentionFailures;
+        }
+    }
+    VkResult result = VK_SUCCESS;
     if (gFakeState->mNextWaitResult < gFakeState->mWaitResults.size())
     {
-        return gFakeState->mWaitResults[gFakeState->mNextWaitResult++];
+        result = gFakeState->mWaitResults[gFakeState->mNextWaitResult++];
     }
-    return VK_SUCCESS;
+    if (result == VK_SUCCESS && fence_count == 2 && gFakeState->mPresents.empty() && gFakeState->mResetFrameSlotOnPriorWait)
+    {
+        gFakeState->mResetFrameSlotOnPriorWait->reset();
+        gFakeState->mResetFrameSlotOnPriorWait = nullptr;
+    }
+    if (result == VK_SUCCESS && fence_count == 2 && !gFakeState->mPresents.empty() && gFakeState->mWriteReadbackOnFinalFence)
+    {
+        constexpr std::array<std::uint8_t, 4> sentinel{ 0x11, 0x22, 0x33, 0x44 };
+        bool                                  exact_sentinel = true;
+        for (std::size_t index = 0; index < gFakeState->mReadbackBytes.size(); ++index)
+        {
+            exact_sentinel = exact_sentinel && gFakeState->mReadbackBytes[index] == sentinel[index % sentinel.size()];
+        }
+        if (gFakeState->mRequireSentinelBeforeFinalWrite && exact_sentinel)
+        {
+            ++gFakeState->mSentinelChecks;
+        }
+        const std::size_t copy_size = std::min(gFakeState->mReadbackBytes.size(), gFakeState->mFinalFenceBytes.size());
+        std::copy_n(gFakeState->mFinalFenceBytes.begin(), copy_size, gFakeState->mReadbackBytes.begin());
+        ++gFakeState->mFinalFenceWrites;
+    }
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeResetCommandBuffer(VkCommandBuffer command_buffer, VkCommandBufferResetFlags flags) noexcept
@@ -1026,23 +1205,38 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice device, VkSwapchain
         *gFakeState->mClearColorToMutateOnAcquire = VulkanSwapchainFrameClearColor{ { 1.0f, 0.0f, 1.0f, 0.0f } };
         gFakeState->mClearColorToMutateOnAcquire  = nullptr;
     }
+    if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && gFakeState->mResetReadbackOnAcquire)
+    {
+        gFakeState->mResetReadbackOnAcquire->reset();
+        gFakeState->mResetReadbackOnAcquire = nullptr;
+    }
     return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer command_buffer, VkPipelineStageFlags source_stage,
-                                                   VkPipelineStageFlags destination_stage, VkDependencyFlags dependency_flags,
-                                                   std::uint32_t memory_barrier_count, const VkMemoryBarrier*,
-                                                   std::uint32_t buffer_barrier_count, const VkBufferMemoryBarrier*,
-                                                   std::uint32_t image_barrier_count,
-                                                   const VkImageMemoryBarrier* image_barriers) noexcept
+                                                  VkPipelineStageFlags destination_stage, VkDependencyFlags dependency_flags,
+                                                  std::uint32_t memory_barrier_count, const VkMemoryBarrier*,
+                                                  std::uint32_t buffer_barrier_count, const VkBufferMemoryBarrier* buffer_barriers,
+                                                  std::uint32_t image_barrier_count, const VkImageMemoryBarrier* image_barriers) noexcept
 {
     if (!gFakeState)
     {
         return;
     }
     gFakeState->mEvents.emplace_back("pipeline barrier");
-    BarrierRecord record{ command_buffer, source_stage, destination_stage, dependency_flags, memory_barrier_count,
-                          buffer_barrier_count, image_barrier_count, {} };
+    BarrierRecord record{ command_buffer,
+                          source_stage,
+                          destination_stage,
+                          dependency_flags,
+                          memory_barrier_count,
+                          buffer_barrier_count,
+                          image_barrier_count,
+                          {},
+                          {} };
+    if (buffer_barrier_count && buffer_barriers)
+    {
+        record.mBufferBarrier = buffer_barriers[0];
+    }
     if (image_barrier_count && image_barriers)
     {
         record.mImageBarrier = image_barriers[0];
@@ -1050,12 +1244,32 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer command_buffer
     gFakeState->mBarriers.push_back(record);
 }
 
-VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer             command_buffer,
-                                                   VkImage                     image,
-                                                   VkImageLayout               image_layout,
-                                                   const VkClearColorValue*     color,
-                                                   std::uint32_t                range_count,
-                                                   const VkImageSubresourceRange* ranges) noexcept
+VKAPI_ATTR void VKAPI_CALL fakeCmdCopyImageToBuffer(VkCommandBuffer          command_buffer,
+                                                    VkImage                  image,
+                                                    VkImageLayout            image_layout,
+                                                    VkBuffer                 buffer,
+                                                    std::uint32_t            region_count,
+                                                    const VkBufferImageCopy* regions) noexcept
+{
+    if (!gFakeState)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("copy image to buffer");
+    CopyImageToBufferRecord record{ command_buffer, image, image_layout, buffer, region_count, {} };
+    if (region_count && regions)
+    {
+        record.mRegion = regions[0];
+    }
+    gFakeState->mCopies.push_back(record);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer                command_buffer,
+                                                  VkImage                        image,
+                                                  VkImageLayout                  image_layout,
+                                                  const VkClearColorValue*       color,
+                                                  std::uint32_t                  range_count,
+                                                  const VkImageSubresourceRange* ranges) noexcept
 {
     if (!gFakeState || !color)
     {
@@ -1192,6 +1406,14 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device,
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     gFakeState->mEvents.emplace_back("release image");
+    if (gFakeState->mExpectedRetentionSlot && gFakeState->mExpectedRetainedReadback)
+    {
+        ++gFakeState->mRetentionChecks;
+        if (!gFakeState->mExpectedRetentionSlot->retainsReadbackGeneration(*gFakeState->mExpectedRetainedReadback))
+        {
+            ++gFakeState->mRetentionFailures;
+        }
+    }
     gFakeState->mReleases.push_back({ device, *release_info, release_info->pImageIndices[0] });
     const std::size_t call = gFakeState->mNextReleaseResult++;
     return call < gFakeState->mReleaseResults.size() ? gFakeState->mReleaseResults[call] : VK_SUCCESS;
@@ -1233,6 +1455,22 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeCreateGraphicsPipelines);
     if (std::strcmp(name, "vkDestroyPipeline") == 0)
         return eraseFunctionType(fakeDestroyPipeline);
+    if (std::strcmp(name, "vkCreateBuffer") == 0)
+        return eraseFunctionType(fakeCreateBuffer);
+    if (std::strcmp(name, "vkDestroyBuffer") == 0)
+        return eraseFunctionType(fakeDestroyBuffer);
+    if (std::strcmp(name, "vkGetBufferMemoryRequirements") == 0)
+        return eraseFunctionType(fakeGetBufferMemoryRequirements);
+    if (std::strcmp(name, "vkAllocateMemory") == 0)
+        return eraseFunctionType(fakeAllocateMemory);
+    if (std::strcmp(name, "vkFreeMemory") == 0)
+        return eraseFunctionType(fakeFreeMemory);
+    if (std::strcmp(name, "vkBindBufferMemory") == 0)
+        return eraseFunctionType(fakeBindBufferMemory);
+    if (std::strcmp(name, "vkMapMemory") == 0)
+        return eraseFunctionType(fakeMapMemory);
+    if (std::strcmp(name, "vkUnmapMemory") == 0)
+        return eraseFunctionType(fakeUnmapMemory);
 
     gFakeState->mDeviceLookups.emplace_back(name);
     if (std::strcmp(name, "vkCreateCommandPool") == 0)
@@ -1288,6 +1526,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         }
         return missing ? nullptr : eraseFunctionType(fakeCmdDraw);
     }
+    if (std::strcmp(name, "vkCmdCopyImageToBuffer") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::CmdCopyImageToBuffer ? nullptr : eraseFunctionType(fakeCmdCopyImageToBuffer);
     if (std::strcmp(name, "vkQueuePresentKHR") == 0)
         return gFakeState->mMissingCommand == MissingCommand::QueuePresent ? nullptr : eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
@@ -1330,6 +1570,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeGetSurfaceFormats);
     if (std::strcmp(name, "vkGetPhysicalDeviceSurfacePresentModesKHR") == 0)
         return eraseFunctionType(fakeGetSurfacePresentModes);
+    if (std::strcmp(name, "vkGetPhysicalDeviceMemoryProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceMemoryProperties);
 
     gFakeState->mInstanceLookups.emplace_back(name);
     if (std::strcmp(name, "vkGetDeviceProcAddr") == 0)
@@ -1419,6 +1661,16 @@ VulkanSwapchainPresentationPipelineGeneration makePresentationPipeline(
     return std::get<VulkanSwapchainPresentationPipelineGeneration>(std::move(result));
 }
 
+VulkanSwapchainReadbackGeneration makeReadback(Parents& parents, FakeState& state)
+{
+    auto result = resolveVulkanSwapchainReadbackGeneration(parents.mPhysical, parents.mLogical, parents.mConfiguration, parents.mSwapchain,
+                                                           parents.mImages);
+    tut::ensure("the readback fixture resolves", std::holds_alternative<VulkanSwapchainReadbackGeneration>(result));
+    auto readback = std::get<VulkanSwapchainReadbackGeneration>(std::move(result));
+    state.clearFrameRecords();
+    return readback;
+}
+
 void ensureOnlyExactDevice(const FakeState& state)
 {
     tut::ensure("every frame-slot mutation uses the exact logical device",
@@ -1484,8 +1736,19 @@ VulkanSwapchainFrameSlotOperationResult resolveRenderPassDrawPresentation(
                                                                 parents.mImages, presentation_target, presentation_pipeline);
 }
 
-const VulkanSwapchainFrameSlotPresentationSuccess& requirePresentationSuccess(
-    const VulkanSwapchainFrameSlotPresentationResult& result)
+VulkanSwapchainFrameSlotOperationResult resolveRenderPassDrawReadbackPresentation(
+    VulkanSwapchainFrameSlotGeneration&                  generation,
+    Parents&                                             parents,
+    const VulkanSwapchainPresentationTargetGeneration&   presentation_target,
+    const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline,
+    const VulkanSwapchainReadbackGeneration&             readback)
+{
+    return generation.resolveRenderPassDrawReadbackPresentationDispatch(parents.mPhysical, parents.mLogical, parents.mConfiguration,
+                                                                        parents.mSwapchain, parents.mImages, presentation_target,
+                                                                        presentation_pipeline, readback);
+}
+
+const VulkanSwapchainFrameSlotPresentationSuccess& requirePresentationSuccess(const VulkanSwapchainFrameSlotPresentationResult& result)
 {
     const auto* success = std::get_if<VulkanSwapchainFrameSlotPresentationSuccess>(&result);
     tut::ensure("frame-slot presentation returns typed success", success != nullptr);
@@ -1499,6 +1762,59 @@ const VulkanSwapchainFrameSlotOperationError& requirePresentationError(const Vul
     return *error;
 }
 
+struct DrawReadbackFixture
+{
+    FakeState                                     mState;
+    ScopedFakeState                               mScope;
+    Parents                                       mParents;
+    VulkanSwapchainPresentationTargetGeneration   mTarget;
+    VulkanSwapchainPresentationPipelineGeneration mPipeline;
+    VulkanSwapchainReadbackGeneration             mReadback;
+    VulkanSwapchainFrameSlotGeneration            mSlot;
+
+    DrawReadbackFixture() :
+        mScope(mState),
+        mParents(makeParents(mState)),
+        mTarget(makePresentationTarget(mParents)),
+        mPipeline(makePresentationPipeline(mParents, mTarget)),
+        mReadback(makeReadback(mParents, mState)),
+        mSlot(takeGeneration(resolveSlot(mParents)))
+    {
+        mState.clearFrameRecords();
+    }
+
+    VulkanSwapchainFrameSlotOperationResult resolve()
+    {
+        return resolveRenderPassDrawReadbackPresentation(mSlot, mParents, mTarget, mPipeline, mReadback);
+    }
+
+    void configureFinalGreen()
+    {
+        mState.mFinalFenceBytes.resize(static_cast<std::size_t>(mReadback.byteCount()));
+        for (std::size_t offset = 0; offset < mState.mFinalFenceBytes.size(); offset += 4)
+        {
+            mState.mFinalFenceBytes[offset]     = 0;
+            mState.mFinalFenceBytes[offset + 1] = 255;
+            mState.mFinalFenceBytes[offset + 2] = 0;
+            mState.mFinalFenceBytes[offset + 3] = 255;
+        }
+        mState.mWriteReadbackOnFinalFence = true;
+    }
+};
+
+bool hasExactReadbackSentinel(const std::vector<std::uint8_t>& bytes)
+{
+    constexpr std::array<std::uint8_t, 4> sentinel{ 0x11, 0x22, 0x33, 0x44 };
+    for (std::size_t index = 0; index < bytes.size(); ++index)
+    {
+        if (bytes[index] != sentinel[index % sentinel.size()])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 namespace tut
@@ -1508,7 +1824,7 @@ struct render_vulkan_swapchain_frame_slot_test
 {
 };
 
-using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test, 40>;
+using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test, 52>;
 using render_vulkan_swapchain_frame_slot_object = render_vulkan_swapchain_frame_slot_group::object;
 render_vulkan_swapchain_frame_slot_group render_vulkan_swapchain_frame_slot_tests("render Vulkan swapchain frame slot");
 
@@ -3770,6 +4086,366 @@ void render_vulkan_swapchain_frame_slot_object::test<40>()
                        VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2 } &&
                    generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
     }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<41>()
+{
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdCopyImageToBuffer) == 25);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration) == 12);
+    static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().resolveRenderPassDrawReadbackPresentationDispatch(
+        std::declval<const VulkanPhysicalDeviceGeneration&>(), std::declval<const VulkanLogicalDeviceGeneration&>(),
+        std::declval<const VulkanSwapchainConfigurationGeneration&>(), std::declval<const VulkanSwapchainGeneration&>(),
+        std::declval<const VulkanSwapchainImagesGeneration&>(), std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
+        std::declval<const VulkanSwapchainPresentationPipelineGeneration&>(), std::declval<const VulkanSwapchainReadbackGeneration&>())));
+    static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeAcquireRenderPassDrawReadbackToPresent(
+        std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
+        std::declval<const VulkanSwapchainPresentationPipelineGeneration&>(),
+        std::declval<VulkanSwapchainReadbackGeneration&>())));
+    static_assert(noexcept(std::declval<const VulkanSwapchainFrameSlotGeneration&>().retainsReadbackGeneration(
+        std::declval<const VulkanSwapchainReadbackGeneration&>())));
+
+    DrawReadbackFixture fixture;
+    fixture.mState.mMissingCommand = MissingCommand::CmdCopyImageToBuffer;
+    const auto missing             = fixture.resolve();
+    ensureOperationError(missing, VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand,
+                         VulkanSwapchainFrameSlotDisposition::Reusable, VulkanSwapchainFrameSlotCommand::CmdCopyImageToBuffer);
+    ensure("a missing copy command stops before any frame-native command",
+           fixture.mState.mEvents.empty() && fixture.mState.mAcquires.empty() && fixture.mState.mCopies.empty() &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && !fixture.mState.mDeviceLookups.empty() &&
+               fixture.mState.mDeviceLookups.back() == "vkCmdCopyImageToBuffer");
+
+    fixture.mState.mMissingCommand = MissingCommand::None;
+    fixture.mState.clearFrameRecords();
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("the observation dispatch resolves every command transactionally",
+           fixture.mState.mDeviceLookups == expectedRenderPassDrawReadbackPresentationLookups() && fixture.mState.mEvents.empty() &&
+               fixture.mState.mAcquires.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<42>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mAcquireIndices = { 1 };
+    fixture.configureFinalGreen();
+    fixture.mState.mRequireSentinelBeforeFinalWrite = true;
+
+    const auto  result = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto& success = requirePresentationSuccess(result);
+    const std::uint64_t pixel_count =
+        static_cast<std::uint64_t>(fixture.mReadback.imageExtent().width) * fixture.mReadback.imageExtent().height;
+    ensure("the completed copy returns one exact all-green observation",
+           success.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented && success.mImageIndex == 1 &&
+               success.mObservation == VulkanSwapchainReadbackObservation{ fixture.mReadback.imageFormat(), fixture.mReadback.imageExtent(),
+                                                                           pixel_count, pixel_count, 0, 0 } &&
+               fixture.mState.mFinalFenceWrites == 1 && fixture.mState.mSentinelChecks == 1 &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+
+    ensure("the render pass uses the fixed opaque-red coverage clear",
+           fixture.mState.mRenderPassBegins.size() == 1 && fixture.mState.mRenderPassBegins[0].mHadClearValues &&
+               fixture.mState.mRenderPassBegins[0].mClearValue.color.float32[0] == 1.0f &&
+               fixture.mState.mRenderPassBegins[0].mClearValue.color.float32[1] == 0.0f &&
+               fixture.mState.mRenderPassBegins[0].mClearValue.color.float32[2] == 0.0f &&
+               fixture.mState.mRenderPassBegins[0].mClearValue.color.float32[3] == 1.0f);
+    ensure("the readback path records all five exact synchronization barriers", fixture.mState.mBarriers.size() == 5);
+    const auto& image_to_transfer = fixture.mState.mBarriers[1];
+    const auto& host_to_transfer  = fixture.mState.mBarriers[2];
+    const auto& transfer_to_host  = fixture.mState.mBarriers[3];
+    const auto& image_to_present  = fixture.mState.mBarriers[4];
+    ensure("color-attachment writes become transfer reads",
+           image_to_transfer.mSourceStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &&
+               image_to_transfer.mDestinationStage == VK_PIPELINE_STAGE_TRANSFER_BIT &&
+               image_to_transfer.mImageBarrier.srcAccessMask == VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT &&
+               image_to_transfer.mImageBarrier.dstAccessMask == VK_ACCESS_TRANSFER_READ_BIT &&
+               image_to_transfer.mImageBarrier.oldLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+               image_to_transfer.mImageBarrier.newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    ensure("host poison writes become exact-range transfer writes",
+           host_to_transfer.mSourceStage == VK_PIPELINE_STAGE_HOST_BIT &&
+               host_to_transfer.mDestinationStage == VK_PIPELINE_STAGE_TRANSFER_BIT && host_to_transfer.mBufferBarrierCount == 1 &&
+               host_to_transfer.mImageBarrierCount == 0 && host_to_transfer.mBufferBarrier.srcAccessMask == VK_ACCESS_HOST_WRITE_BIT &&
+               host_to_transfer.mBufferBarrier.dstAccessMask == VK_ACCESS_TRANSFER_WRITE_BIT &&
+               host_to_transfer.mBufferBarrier.buffer == fixture.mReadback.buffer() && host_to_transfer.mBufferBarrier.offset == 0 &&
+               host_to_transfer.mBufferBarrier.size == fixture.mReadback.byteCount());
+    ensure("the full tightly packed color image is copied into offset zero",
+           fixture.mState.mCopies.size() == 1 && fixture.mState.mCopies[0].mImage == fixture.mState.images()[1] &&
+               fixture.mState.mCopies[0].mImageLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
+               fixture.mState.mCopies[0].mBuffer == fixture.mReadback.buffer() && fixture.mState.mCopies[0].mRegionCount == 1 &&
+               fixture.mState.mCopies[0].mRegion.bufferOffset == 0 && fixture.mState.mCopies[0].mRegion.bufferRowLength == 0 &&
+               fixture.mState.mCopies[0].mRegion.bufferImageHeight == 0 &&
+               fixture.mState.mCopies[0].mRegion.imageSubresource.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+               fixture.mState.mCopies[0].mRegion.imageSubresource.mipLevel == 0 &&
+               fixture.mState.mCopies[0].mRegion.imageSubresource.baseArrayLayer == 0 &&
+               fixture.mState.mCopies[0].mRegion.imageSubresource.layerCount == 1 && fixture.mState.mCopies[0].mRegion.imageOffset.x == 0 &&
+               fixture.mState.mCopies[0].mRegion.imageOffset.y == 0 && fixture.mState.mCopies[0].mRegion.imageOffset.z == 0 &&
+               fixture.mState.mCopies[0].mRegion.imageExtent.width == fixture.mReadback.imageExtent().width &&
+               fixture.mState.mCopies[0].mRegion.imageExtent.height == fixture.mReadback.imageExtent().height &&
+               fixture.mState.mCopies[0].mRegion.imageExtent.depth == 1);
+    ensure("transfer writes become exact-range host reads",
+           transfer_to_host.mSourceStage == VK_PIPELINE_STAGE_TRANSFER_BIT &&
+               transfer_to_host.mDestinationStage == VK_PIPELINE_STAGE_HOST_BIT &&
+               transfer_to_host.mBufferBarrier.srcAccessMask == VK_ACCESS_TRANSFER_WRITE_BIT &&
+               transfer_to_host.mBufferBarrier.dstAccessMask == VK_ACCESS_HOST_READ_BIT && transfer_to_host.mBufferBarrier.offset == 0 &&
+               transfer_to_host.mBufferBarrier.size == fixture.mReadback.byteCount());
+    ensure("the copied image returns to present after transfer reads",
+           image_to_present.mSourceStage == VK_PIPELINE_STAGE_TRANSFER_BIT &&
+               image_to_present.mDestinationStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
+               image_to_present.mImageBarrier.srcAccessMask == VK_ACCESS_TRANSFER_READ_BIT &&
+               image_to_present.mImageBarrier.dstAccessMask == 0 &&
+               image_to_present.mImageBarrier.oldLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
+               image_to_present.mImageBarrier.newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR && fixture.mState.mQueueSubmits.size() == 1 &&
+               fixture.mState.mQueueSubmits[0].mWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
+    const std::vector<std::string> expected_events{
+        "wait fence",        "acquire image",    "reset buffer",     "begin buffer",         "pipeline barrier",
+        "begin render pass", "bind pipeline",    "set viewport",     "set scissor",          "draw",
+        "end render pass",   "pipeline barrier", "pipeline barrier", "copy image to buffer", "pipeline barrier",
+        "pipeline barrier",  "end buffer",       "reset fence",      "queue submit",         "queue present",
+        "wait fence"
+    };
+    ensure("draw, copy, present, and final wait occur in one exact order", fixture.mState.mEvents == expected_events);
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<43>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mWaitResults = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
+    fixture.configureFinalGreen();
+    fixture.mState.mRequireSentinelBeforeFinalWrite = true;
+
+    const auto first = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    ensure("a final-fence timeout retains the exact readback without classifying",
+           requirePresentationError(first).mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+               requirePresentationError(first).mResult == VK_TIMEOUT &&
+               fixture.mSlot.disposition() == VulkanSwapchainFrameSlotDisposition::PresentPending &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0 &&
+               hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
+
+    const auto  retry   = fixture.mSlot.retryPresentationCompletion();
+    const auto& success = requirePresentationSuccess(retry);
+    ensure("retry classifies exactly once after the two fences succeed",
+           success.mObservation && success.mObservation->mGreenPixelCount == success.mObservation->mTotalPixelCount &&
+               fixture.mState.mFinalFenceWrites == 1 && fixture.mState.mSentinelChecks == 1 && fixture.mState.mCopies.size() == 1 &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<44>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mPresentResults = { VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS };
+    fixture.configureFinalGreen();
+
+    const auto first = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    ensure("a retryable present allocation failure retains the submitted readback",
+           requirePresentationError(first).mCommand == VulkanSwapchainFrameSlotCommand::QueuePresent &&
+               requirePresentationError(first).mResult == VK_ERROR_OUT_OF_HOST_MEMORY &&
+               fixture.mSlot.disposition() == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0);
+    const auto  retry   = fixture.mSlot.retryPresentation();
+    const auto& success = requirePresentationSuccess(retry);
+    ensure("present retry reuses one copy and returns its post-fence observation",
+           success.mObservation && success.mObservation->mUnexpectedPixelCount == 0 &&
+               success.mObservation->mGreenPixelCount == success.mObservation->mTotalPixelCount && fixture.mState.mPresents.size() == 2 &&
+               fixture.mState.mCopies.size() == 1 && fixture.mState.mFinalFenceWrites == 1 &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<45>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mEndCommandBufferResult   = VK_ERROR_OUT_OF_HOST_MEMORY;
+    fixture.mState.mExpectedRetentionSlot    = &fixture.mSlot;
+    fixture.mState.mExpectedRetainedReadback = &fixture.mReadback;
+
+    const auto failed = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    ensure("a record failure retains the poisoned owner with the acquired image",
+           requirePresentationError(failed).mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
+               fixture.mSlot.disposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
+    ensureOperationSuccess(fixture.mSlot.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("record-failure cancellation drains and releases before clearing the owner",
+           fixture.mState.mRetentionChecks >= 3 && fixture.mState.mRetentionFailures == 0 && fixture.mState.mReleases.size() == 1 &&
+               fixture.mState.mPresents.empty() && fixture.mState.mFinalFenceWrites == 0 &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<46>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mPresentResults           = { VK_ERROR_OUT_OF_DEVICE_MEMORY };
+    fixture.mState.mExpectedRetentionSlot    = &fixture.mSlot;
+    fixture.mState.mExpectedRetainedReadback = &fixture.mReadback;
+
+    const auto pending = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    ensure("a submitted copy remains active while presentation is retryable",
+           requirePresentationError(pending).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+               fixture.mState.mCopies.size() == 1 && fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+    ensureOperationSuccess(fixture.mSlot.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("submitted cancellation waits both fences, suppresses classification, then releases",
+           fixture.mState.mRetentionChecks >= 3 && fixture.mState.mRetentionFailures == 0 && fixture.mState.mReleases.size() == 1 &&
+               fixture.mState.mFinalFenceWrites == 0 && hasExactReadbackSentinel(fixture.mState.mReadbackBytes) &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<47>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mWaitResults       = { VK_SUCCESS, VK_ERROR_DEVICE_LOST };
+    fixture.mState.mQueueSubmitResult = VK_ERROR_DEVICE_LOST;
+
+    const auto submitted =
+        fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    ensure("device loss reported by submit retains possible buffer use until its fence retires",
+           requirePresentationError(submitted).mDisposition == VulkanSwapchainFrameSlotDisposition::SubmissionPending &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mCopies.size() == 1);
+    const auto retired = fixture.mSlot.retryPresentationCompletion();
+    ensure("terminal device loss retires without touching mapped bytes",
+           requirePresentationError(retired).mDisposition == VulkanSwapchainFrameSlotDisposition::DeviceLost &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0 &&
+               hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<48>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mPresentResults = { VK_ERROR_UNKNOWN };
+
+    const auto result = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    ensure("indeterminate presentation retains the owner and never reads mapped bytes",
+           requirePresentationError(result).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationIndeterminate &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0 &&
+               hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
+    const VkCommandPool command_pool = fixture.mSlot.commandPool();
+    fixture.mSlot.reset();
+    ensure("reset refuses an indeterminate active readback",
+           fixture.mSlot.commandPool() == command_pool && fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mState.mDestroyedCommandPools.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<49>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mFinalFenceBytes           = { 0, 255, 0, 255 };
+    fixture.mState.mWriteReadbackOnFinalFence = true;
+
+    const auto partial_result =
+        fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto& partial = requirePresentationSuccess(partial_result);
+    ensure("a partial copy is a successful exact-count mismatch, not a Vulkan error",
+           partial.mObservation && partial.mObservation->mGreenPixelCount == 1 && partial.mObservation->mRedPixelCount == 0 &&
+               partial.mObservation->mUnexpectedPixelCount + 1 == partial.mObservation->mTotalPixelCount);
+
+    fixture.mState.clearFrameRecords();
+    fixture.configureFinalGreen();
+    fixture.mState.mRequireSentinelBeforeFinalWrite = true;
+    const auto second_result =
+        fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto& second = requirePresentationSuccess(second_result);
+    ensure("a second run re-poisons every byte before the next copy",
+           second.mObservation && second.mObservation->mGreenPixelCount == second.mObservation->mTotalPixelCount &&
+               second.mObservation->mUnexpectedPixelCount == 0 && fixture.mState.mSentinelChecks == 1 &&
+               fixture.mState.mFinalFenceWrites == 1);
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<50>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(resolveRenderPassDrawPresentation(fixture.mSlot, fixture.mParents, fixture.mTarget, fixture.mPipeline),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    const auto  before  = fixture.mState.mReadbackBytes;
+    const auto  result  = fixture.mSlot.executeAcquireRenderPassDrawToPresent(fixture.mTarget, fixture.mPipeline, {});
+    const auto& success = requirePresentationSuccess(result);
+    ensure("the existing draw path returns no observation and performs no readback work",
+           !success.mObservation && fixture.mState.mCopies.empty() && fixture.mState.mReadbackBytes == before &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<51>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mWaitResults               = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
+    fixture.mState.mResetFrameSlotOnPriorWait = &fixture.mSlot;
+    fixture.configureFinalGreen();
+
+    const VkCommandPool command_pool = fixture.mSlot.commandPool();
+    const auto pending = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    ensure("active pre-native ownership makes reset refuse despite a Reusable disposition",
+           requirePresentationError(pending).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending &&
+               fixture.mSlot.commandPool() == command_pool && fixture.mState.mDestroyedCommandPools.empty() &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+
+    auto moved = std::move(fixture.mSlot);
+    ensure("a pending move transfers retention and disarms the source",
+           moved.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               moved.commandPool() == command_pool && fixture.mSlot.commandPool() == VK_NULL_HANDLE);
+    const auto  completion = moved.retryPresentationCompletion();
+    const auto& success    = requirePresentationSuccess(completion);
+    ensure("the moved transaction classifies exactly once and becomes reusable",
+           success.mObservation && success.mObservation->mGreenPixelCount == success.mObservation->mTotalPixelCount &&
+               !moved.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 1);
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<52>()
+{
+    DrawReadbackFixture fixture;
+    ensureOperationSuccess(fixture.resolve(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    fixture.mState.clearFrameRecords();
+    fixture.mState.mResetReadbackOnAcquire = &fixture.mReadback;
+
+    const auto mismatch =
+        fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    ensure("post-acquire structural replacement suppresses copy and retains cancellation ownership",
+           requirePresentationError(mismatch).mCode == VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration &&
+               requirePresentationError(mismatch).mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mCopies.empty() &&
+               fixture.mState.mFinalFenceWrites == 0);
+    fixture.mState.mExpectedRetentionSlot    = &fixture.mSlot;
+    fixture.mState.mExpectedRetainedReadback = &fixture.mReadback;
+    ensureOperationSuccess(fixture.mSlot.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("structural mismatch does not strand cancellation or inspect invalid memory",
+           fixture.mState.mRetentionChecks >= 2 && fixture.mState.mRetentionFailures == 0 && fixture.mState.mReleases.size() == 1 &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0);
 }
 
 } // namespace tut

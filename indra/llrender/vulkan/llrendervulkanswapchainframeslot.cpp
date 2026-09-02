@@ -61,6 +61,7 @@ namespace
         PFN_vkCmdSetViewport            mCmdSetViewport         = nullptr;
         PFN_vkCmdSetScissor             mCmdSetScissor          = nullptr;
         PFN_vkCmdDraw                   mCmdDraw                = nullptr;
+        PFN_vkCmdCopyImageToBuffer      mCmdCopyImageToBuffer   = nullptr;
         PFN_vkQueuePresentKHR           mQueuePresent           = nullptr;
         PFN_vkReleaseSwapchainImagesKHR mReleaseSwapchainImages = nullptr;
     };
@@ -262,6 +263,7 @@ VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(
     mQueueFamilyIndex(logical_device_generation.queueFamilyIndex()),
     mQueueIndex(logical_device_generation.queueIndex()),
     mDrawableExtent(configuration_generation.drawableExtent()),
+    mImageExtent(configuration_generation.imageExtent()),
     mSwapchain(swapchain_generation.swapchain()),
     mImageFormat(images_generation.imageFormat()),
     mImageCount(images_generation.imageCount()),
@@ -297,6 +299,7 @@ VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(VulkanSwa
     mQueueFamilyIndex(std::exchange(other.mQueueFamilyIndex, VK_QUEUE_FAMILY_IGNORED)),
     mQueueIndex(std::exchange(other.mQueueIndex, 0)),
     mDrawableExtent(std::exchange(other.mDrawableExtent, {})),
+    mImageExtent(std::exchange(other.mImageExtent, {})),
     mSwapchain(std::exchange(other.mSwapchain, VK_NULL_HANDLE)),
     mImageFormat(std::exchange(other.mImageFormat, VK_FORMAT_UNDEFINED)),
     mImageCount(std::exchange(other.mImageCount, 0)),
@@ -329,8 +332,18 @@ VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(VulkanSwa
     mCmdSetViewport(std::exchange(other.mCmdSetViewport, nullptr)),
     mCmdSetScissor(std::exchange(other.mCmdSetScissor, nullptr)),
     mCmdDraw(std::exchange(other.mCmdDraw, nullptr)),
+    mCmdCopyImageToBuffer(std::exchange(other.mCmdCopyImageToBuffer, nullptr)),
     mQueuePresent(std::exchange(other.mQueuePresent, nullptr)),
     mReleaseSwapchainImages(std::exchange(other.mReleaseSwapchainImages, nullptr)),
+    mReadbackPhysicalDeviceGeneration(std::exchange(other.mReadbackPhysicalDeviceGeneration, nullptr)),
+    mResolvedReadbackGeneration(std::exchange(other.mResolvedReadbackGeneration, nullptr)),
+    mActiveReadbackGeneration(std::exchange(other.mActiveReadbackGeneration, nullptr)),
+    mActiveReadbackBuffer(std::exchange(other.mActiveReadbackBuffer, VK_NULL_HANDLE)),
+    mActiveReadbackImageFormat(std::exchange(other.mActiveReadbackImageFormat, VK_FORMAT_UNDEFINED)),
+    mActiveReadbackImageExtent(std::exchange(other.mActiveReadbackImageExtent, {})),
+    mActiveReadbackRowBytes(std::exchange(other.mActiveReadbackRowBytes, 0)),
+    mActiveReadbackByteCount(std::exchange(other.mActiveReadbackByteCount, 0)),
+    mReadbackClassificationEligible(std::exchange(other.mReadbackClassificationEligible, false)),
     mDisposition(std::exchange(other.mDisposition, VulkanSwapchainFrameSlotDisposition::Reusable)),
     mPendingSubmissionReportedDeviceLost(std::exchange(other.mPendingSubmissionReportedDeviceLost, false)),
     mSubmissionFenceSignaled(std::exchange(other.mSubmissionFenceSignaled, true)),
@@ -350,6 +363,7 @@ bool VulkanSwapchainFrameSlotGeneration::createdFor(const VulkanLogicalDeviceGen
                                                     const VulkanSwapchainImagesGeneration&        images_generation) const noexcept
 {
     const VkExtent2D drawable_extent = configuration_generation.drawableExtent();
+    const VkExtent2D image_extent    = configuration_generation.imageExtent();
     return mCommandPool != VK_NULL_HANDLE && mCommandBuffer != VK_NULL_HANDLE && mImageAvailableSemaphore != VK_NULL_HANDLE &&
            mPresentationReadySemaphore != VK_NULL_HANDLE && mSubmissionFence != VK_NULL_HANDLE &&
            mPresentCompletionFence != VK_NULL_HANDLE && mLogicalDeviceGeneration == &logical_device_generation &&
@@ -361,7 +375,8 @@ bool VulkanSwapchainFrameSlotGeneration::createdFor(const VulkanLogicalDeviceGen
            mPhysicalDeviceIndex == logical_device_generation.physicalDeviceIndex() && mDevice == logical_device_generation.device() &&
            mQueue == logical_device_generation.queue() && mQueueFamilyIndex == logical_device_generation.queueFamilyIndex() &&
            mQueueIndex == logical_device_generation.queueIndex() && mDrawableExtent.width == drawable_extent.width &&
-           mDrawableExtent.height == drawable_extent.height && mSwapchain == swapchain_generation.swapchain() &&
+           mDrawableExtent.height == drawable_extent.height && mImageExtent.width == image_extent.width &&
+           mImageExtent.height == image_extent.height && mSwapchain == swapchain_generation.swapchain() &&
            mImageFormat == images_generation.imageFormat() && mImageCount == images_generation.imageCount();
 }
 
@@ -383,9 +398,10 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     }
 
     const VkExtent2D drawable_extent = configuration_generation.drawableExtent();
+    const VkExtent2D image_extent    = configuration_generation.imageExtent();
     if (mConfigurationGeneration != &configuration_generation || !belongsTo(configuration_generation, logical_device_generation) ||
-        mDrawableExtent.width != drawable_extent.width ||
-        mDrawableExtent.height != drawable_extent.height)
+        mDrawableExtent.width != drawable_extent.width || mDrawableExtent.height != drawable_extent.height ||
+        mImageExtent.width != image_extent.width || mImageExtent.height != image_extent.height)
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainConfigurationGeneration, mDisposition);
     }
@@ -474,7 +490,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainImagesGeneration&        images_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       RecordingMode::LayoutOnly, nullptr, nullptr);
+                                       RecordingMode::LayoutOnly, nullptr, nullptr, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveClearPresentationDispatch(
@@ -484,7 +500,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainImagesGeneration&        images_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       RecordingMode::TransferClear, nullptr, nullptr);
+                                       RecordingMode::TransferClear, nullptr, nullptr, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveRenderPassPresentationDispatch(
@@ -495,7 +511,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainPresentationTargetGeneration& presentation_target_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       RecordingMode::RenderPassClear, &presentation_target_generation, nullptr);
+                                       RecordingMode::RenderPassClear, nullptr, &presentation_target_generation, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveRenderPassDrawPresentationDispatch(
@@ -507,7 +523,23 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       RecordingMode::RenderPassDraw, &presentation_target_generation, &presentation_pipeline_generation);
+                                       RecordingMode::RenderPassDraw, nullptr, &presentation_target_generation,
+                                       &presentation_pipeline_generation, nullptr);
+}
+
+VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveRenderPassDrawReadbackPresentationDispatch(
+    const VulkanPhysicalDeviceGeneration&                physical_device_generation,
+    const VulkanLogicalDeviceGeneration&                 logical_device_generation,
+    const VulkanSwapchainConfigurationGeneration&        configuration_generation,
+    const VulkanSwapchainGeneration&                     swapchain_generation,
+    const VulkanSwapchainImagesGeneration&               images_generation,
+    const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
+    const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
+    const VulkanSwapchainReadbackGeneration&             readback_generation) noexcept
+{
+    return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
+                                       RecordingMode::RenderPassDrawReadback, &physical_device_generation, &presentation_target_generation,
+                                       &presentation_pipeline_generation, &readback_generation);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolvePresentationDispatch(
@@ -516,8 +548,10 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainGeneration&                     swapchain_generation,
     const VulkanSwapchainImagesGeneration&               images_generation,
     RecordingMode                                        recording_mode,
+    const VulkanPhysicalDeviceGeneration*                physical_device_generation,
     const VulkanSwapchainPresentationTargetGeneration*   presentation_target_generation,
-    const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation) noexcept
+    const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation,
+    const VulkanSwapchainReadbackGeneration*             readback_generation) noexcept
 {
     if (mLogicalDeviceGeneration != &logical_device_generation || !valid(logical_device_generation) ||
         mGetInstanceProcAddr != logical_device_generation.getInstanceProcAddr() ||
@@ -535,9 +569,10 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     }
 
     const VkExtent2D drawable_extent = configuration_generation.drawableExtent();
+    const VkExtent2D image_extent    = configuration_generation.imageExtent();
     if (mConfigurationGeneration != &configuration_generation || !belongsTo(configuration_generation, logical_device_generation) ||
-        mDrawableExtent.width != drawable_extent.width ||
-        mDrawableExtent.height != drawable_extent.height)
+        mDrawableExtent.width != drawable_extent.width || mDrawableExtent.height != drawable_extent.height ||
+        mImageExtent.width != image_extent.width || mImageExtent.height != image_extent.height)
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainConfigurationGeneration, mDisposition);
     }
@@ -554,8 +589,10 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainImagesGeneration, mDisposition);
     }
 
-    const bool render_pass_required = recording_mode == RecordingMode::RenderPassClear || recording_mode == RecordingMode::RenderPassDraw;
-    const bool draw_required        = recording_mode == RecordingMode::RenderPassDraw;
+    const bool readback_required = recording_mode == RecordingMode::RenderPassDrawReadback;
+    const bool render_pass_required =
+        recording_mode == RecordingMode::RenderPassClear || recording_mode == RecordingMode::RenderPassDraw || readback_required;
+    const bool draw_required = recording_mode == RecordingMode::RenderPassDraw || readback_required;
     if (render_pass_required && (!presentation_target_generation ||
                                  !presentation_target_generation->createdFor(logical_device_generation, configuration_generation,
                                                                              swapchain_generation, images_generation) ||
@@ -578,6 +615,17 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VkPipelineLayout presentation_pipeline_layout =
         draw_required ? presentation_pipeline_generation->pipelineLayout() : VK_NULL_HANDLE;
     const VkPipeline presentation_pipeline = draw_required ? presentation_pipeline_generation->pipeline() : VK_NULL_HANDLE;
+    if (readback_required &&
+        (!physical_device_generation || !readback_generation ||
+         !readback_generation->createdFor(*physical_device_generation, logical_device_generation, configuration_generation,
+                                          swapchain_generation, images_generation) ||
+         readback_generation->buffer() == VK_NULL_HANDLE || !readback_generation->isMapped() ||
+         readback_generation->imageFormat() != mImageFormat || readback_generation->imageExtent().width != mImageExtent.width ||
+         readback_generation->imageExtent().height != mImageExtent.height || readback_generation->rowBytes() == 0 ||
+         readback_generation->byteCount() == 0))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition);
+    }
 
     const bool transfer_clear_required = recording_mode == RecordingMode::TransferClear;
     const bool dispatch_resolved =
@@ -589,6 +637,8 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
                             mPresentationPipelineGeneration == presentation_pipeline_generation &&
                             mPresentationPipelineLayout == presentation_pipeline_generation->pipelineLayout() &&
                             mPresentationPipeline == presentation_pipeline_generation->pipeline())) &&
+        (!readback_required || (mCmdCopyImageToBuffer && mReadbackPhysicalDeviceGeneration == physical_device_generation &&
+                                mResolvedReadbackGeneration == readback_generation)) &&
         mQueuePresent && mReleaseSwapchainImages;
     if (dispatch_resolved)
     {
@@ -715,6 +765,15 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
                                     VulkanSwapchainFrameSlotCommand::CmdDraw);
         }
     }
+    if (readback_required)
+    {
+        dispatch.mCmdCopyImageToBuffer = resolveDevice<PFN_vkCmdCopyImageToBuffer>(get_device_proc_addr, mDevice, "vkCmdCopyImageToBuffer");
+        if (!dispatch.mCmdCopyImageToBuffer)
+        {
+            return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                    VulkanSwapchainFrameSlotCommand::CmdCopyImageToBuffer);
+        }
+    }
     dispatch.mQueuePresent = resolveDevice<PFN_vkQueuePresentKHR>(get_device_proc_addr, mDevice, "vkQueuePresentKHR");
     if (!dispatch.mQueuePresent)
     {
@@ -741,6 +800,16 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
          presentation_pipeline_generation->pipeline() != presentation_pipeline))
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration, mDisposition);
+    }
+    if (readback_required &&
+        (!readback_generation->createdFor(*physical_device_generation, logical_device_generation, configuration_generation,
+                                          swapchain_generation, images_generation) ||
+         readback_generation->buffer() == VK_NULL_HANDLE || !readback_generation->isMapped() ||
+         readback_generation->imageFormat() != mImageFormat || readback_generation->imageExtent().width != mImageExtent.width ||
+         readback_generation->imageExtent().height != mImageExtent.height || readback_generation->rowBytes() == 0 ||
+         readback_generation->byteCount() == 0))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition);
     }
 
     mWaitForFences          = dispatch.mSubmission.mWaitForFences;
@@ -770,6 +839,12 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
         mPresentationPipelineGeneration = presentation_pipeline_generation;
         mPresentationPipelineLayout     = presentation_pipeline_layout;
         mPresentationPipeline           = presentation_pipeline;
+    }
+    if (readback_required)
+    {
+        mCmdCopyImageToBuffer             = dispatch.mCmdCopyImageToBuffer;
+        mReadbackPhysicalDeviceGeneration = physical_device_generation;
+        mResolvedReadbackGeneration       = readback_generation;
     }
     mQueuePresent           = dispatch.mQueuePresent;
     mReleaseSwapchainImages = dispatch.mReleaseSwapchainImages;
@@ -929,7 +1004,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retr
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireToPresent() noexcept
 {
-    return executeAcquireToPresent(RecordingMode::LayoutOnly, nullptr, nullptr, nullptr);
+    return executeAcquireToPresent(RecordingMode::LayoutOnly, nullptr, nullptr, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireClearToPresent(
@@ -939,7 +1014,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor, mDisposition);
     }
-    return executeAcquireToPresent(RecordingMode::TransferClear, &clear_color, nullptr, nullptr);
+    return executeAcquireToPresent(RecordingMode::TransferClear, &clear_color, nullptr, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireRenderPassClearToPresent(
@@ -950,7 +1025,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor, mDisposition);
     }
-    return executeAcquireToPresent(RecordingMode::RenderPassClear, &clear_color, &presentation_target_generation, nullptr);
+    return executeAcquireToPresent(RecordingMode::RenderPassClear, &clear_color, &presentation_target_generation, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireRenderPassDrawToPresent(
@@ -963,22 +1038,59 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor, mDisposition);
     }
     return executeAcquireToPresent(RecordingMode::RenderPassDraw, &clear_color, &presentation_target_generation,
-                                   &presentation_pipeline_generation);
+                                   &presentation_pipeline_generation, nullptr);
+}
+
+VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireRenderPassDrawReadbackToPresent(
+    const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
+    const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
+    VulkanSwapchainReadbackGeneration&                   readback_generation) noexcept
+{
+    return executeAcquireToPresent(RecordingMode::RenderPassDrawReadback, nullptr, &presentation_target_generation,
+                                   &presentation_pipeline_generation, &readback_generation);
+}
+
+bool VulkanSwapchainFrameSlotGeneration::activeReadbackMatchesSnapshot() const noexcept
+{
+    if (!mActiveReadbackGeneration)
+    {
+        return false;
+    }
+    const VkExtent2D extent = mActiveReadbackGeneration->imageExtent();
+    return mResolvedReadbackGeneration == mActiveReadbackGeneration && mActiveReadbackGeneration->buffer() == mActiveReadbackBuffer &&
+           mActiveReadbackGeneration->isMapped() && mActiveReadbackGeneration->imageFormat() == mActiveReadbackImageFormat &&
+           extent.width == mActiveReadbackImageExtent.width && extent.height == mActiveReadbackImageExtent.height &&
+           mActiveReadbackGeneration->rowBytes() == mActiveReadbackRowBytes &&
+           mActiveReadbackGeneration->byteCount() == mActiveReadbackByteCount;
+}
+
+void VulkanSwapchainFrameSlotGeneration::clearActiveReadback() noexcept
+{
+    mActiveReadbackGeneration       = nullptr;
+    mActiveReadbackBuffer           = VK_NULL_HANDLE;
+    mActiveReadbackImageFormat      = VK_FORMAT_UNDEFINED;
+    mActiveReadbackImageExtent      = {};
+    mActiveReadbackRowBytes         = 0;
+    mActiveReadbackByteCount        = 0;
+    mReadbackClassificationEligible = false;
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireToPresent(
     RecordingMode                                        recording_mode,
     const VulkanSwapchainFrameClearColor*                clear_color,
     const VulkanSwapchainPresentationTargetGeneration*   presentation_target_generation,
-    const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation) noexcept
+    const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation,
+    VulkanSwapchainReadbackGeneration*                   readback_generation) noexcept
 {
     if (mDisposition != VulkanSwapchainFrameSlotDisposition::Reusable)
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidDisposition, mDisposition);
     }
 
-    const bool render_pass_required = recording_mode == RecordingMode::RenderPassClear || recording_mode == RecordingMode::RenderPassDraw;
-    const bool draw_required        = recording_mode == RecordingMode::RenderPassDraw;
+    const bool readback_required = recording_mode == RecordingMode::RenderPassDrawReadback;
+    const bool render_pass_required =
+        recording_mode == RecordingMode::RenderPassClear || recording_mode == RecordingMode::RenderPassDraw || readback_required;
+    const bool draw_required = recording_mode == RecordingMode::RenderPassDraw || readback_required;
     if (render_pass_required && (!presentation_target_generation || mPresentationTargetGeneration != presentation_target_generation ||
                                  !mLogicalDeviceGeneration || !mConfigurationGeneration || !mSwapchainGeneration || !mImagesGeneration ||
                                  !presentation_target_generation->createdFor(*mLogicalDeviceGeneration, *mConfigurationGeneration,
@@ -996,15 +1108,42 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration, mDisposition);
     }
+    if (readback_required &&
+        (!readback_generation || !mReadbackPhysicalDeviceGeneration || mResolvedReadbackGeneration != readback_generation ||
+         !mLogicalDeviceGeneration || !mConfigurationGeneration || !mSwapchainGeneration || !mImagesGeneration ||
+         !readback_generation->createdFor(*mReadbackPhysicalDeviceGeneration, *mLogicalDeviceGeneration, *mConfigurationGeneration,
+                                          *mSwapchainGeneration, *mImagesGeneration) ||
+         readback_generation->buffer() == VK_NULL_HANDLE || !readback_generation->isMapped() ||
+         readback_generation->imageFormat() != mImageFormat || readback_generation->imageExtent().width != mImageExtent.width ||
+         readback_generation->imageExtent().height != mImageExtent.height || readback_generation->rowBytes() == 0 ||
+         readback_generation->byteCount() == 0))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition);
+    }
 
     VulkanSwapchainFrameClearColor clear_color_snapshot;
-    if (clear_color)
+    if (readback_required)
+    {
+        clear_color_snapshot = VulkanSwapchainFrameClearColor{ { 1.0f, 0.0f, 0.0f, 1.0f } };
+    }
+    else if (clear_color)
     {
         clear_color_snapshot = *clear_color;
     }
 
-    const auto missing_command = [this, recording_mode, render_pass_required,
-                                  draw_required]() -> std::optional<VulkanSwapchainFrameSlotCommand>
+    if (readback_required)
+    {
+        mActiveReadbackGeneration       = readback_generation;
+        mActiveReadbackBuffer           = readback_generation->buffer();
+        mActiveReadbackImageFormat      = readback_generation->imageFormat();
+        mActiveReadbackImageExtent      = readback_generation->imageExtent();
+        mActiveReadbackRowBytes         = readback_generation->rowBytes();
+        mActiveReadbackByteCount        = readback_generation->byteCount();
+        mReadbackClassificationEligible = false;
+    }
+
+    const auto missing_command = [this, recording_mode, render_pass_required, draw_required,
+                                  readback_required]() -> std::optional<VulkanSwapchainFrameSlotCommand>
     {
         if (!mWaitForFences)
             return VulkanSwapchainFrameSlotCommand::WaitForFences;
@@ -1030,6 +1169,8 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
             return VulkanSwapchainFrameSlotCommand::CmdSetScissor;
         if (draw_required && !mCmdDraw)
             return VulkanSwapchainFrameSlotCommand::CmdDraw;
+        if (readback_required && !mCmdCopyImageToBuffer)
+            return VulkanSwapchainFrameSlotCommand::CmdCopyImageToBuffer;
         if (!mEndCommandBuffer)
             return VulkanSwapchainFrameSlotCommand::EndCommandBuffer;
         if (!mResetFences)
@@ -1042,6 +1183,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     };
     if (const auto command = missing_command())
     {
+        clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition, command);
     }
 
@@ -1051,28 +1193,42 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
                                                       : VulkanSwapchainFrameSlotDisposition::Reusable;
+        clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::WaitForFences, result);
     }
     mSubmissionFenceSignaled        = true;
     mPresentCompletionFenceSignaled = true;
 
+    if (readback_required &&
+        (!activeReadbackMatchesSnapshot() ||
+         !mActiveReadbackGeneration->createdFor(*mReadbackPhysicalDeviceGeneration, *mLogicalDeviceGeneration, *mConfigurationGeneration,
+                                                *mSwapchainGeneration, *mImagesGeneration) ||
+         !mActiveReadbackGeneration->poisonForPresentationObservation()))
+    {
+        clearActiveReadback();
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition);
+    }
+
     std::uint32_t image_index = 0;
     result = mAcquireNextImage(mDevice, mSwapchain, VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS, mImageAvailableSemaphore,
                                VK_NULL_HANDLE, &image_index);
     if (result == VK_ERROR_OUT_OF_DATE_KHR)
     {
-        return VulkanSwapchainFrameSlotPresentationSuccess{
-            VulkanSwapchainFrameSlotPresentationOutcome::SwapchainReplacementRequired, std::nullopt };
+        clearActiveReadback();
+        return VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::SwapchainReplacementRequired,
+                                                            std::nullopt };
     }
     if (result == VK_ERROR_SURFACE_LOST_KHR)
     {
+        clearActiveReadback();
         return VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::SurfaceLost, std::nullopt };
     }
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
     {
         mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
                                                       : VulkanSwapchainFrameSlotDisposition::Reusable;
+        clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::AcquireNextImage, result);
     }
@@ -1086,6 +1242,11 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::AcquiredImageIndexOutOfRange, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::AcquireNextImage, result, image_index);
+    }
+    if (readback_required && !activeReadbackMatchesSnapshot())
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition, std::nullopt,
+                                VK_SUCCESS, image_index);
     }
     VkRenderPass  presentation_render_pass = VK_NULL_HANDLE;
     VkFramebuffer presentation_framebuffer = VK_NULL_HANDLE;
@@ -1105,6 +1266,12 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         presentation_framebuffer = presentation_target_generation->framebuffer(image_index);
         presentation_extent      = presentation_target_generation->imageExtent();
     }
+    if (readback_required &&
+        (presentation_extent.width != mActiveReadbackImageExtent.width || presentation_extent.height != mActiveReadbackImageExtent.height))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition, std::nullopt,
+                                VK_SUCCESS, image_index);
+    }
     if (draw_required &&
         (mPresentationPipelineGeneration != presentation_pipeline_generation || mPresentationPipelineLayout == VK_NULL_HANDLE ||
          mPresentationPipeline == VK_NULL_HANDLE || presentation_pipeline_generation->pipelineLayout() != mPresentationPipelineLayout ||
@@ -1122,6 +1289,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::ResetCommandBuffer, result, image_index);
@@ -1135,6 +1303,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::BeginCommandBuffer, result, image_index);
@@ -1212,11 +1381,52 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         mCmdEndRenderPass(mCommandBuffer);
 
         barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        barrier.dstAccessMask = 0;
+        barrier.dstAccessMask = readback_required ? VK_ACCESS_TRANSFER_READ_BIT : 0;
         barrier.oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        barrier.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        barrier.newLayout     = readback_required ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         mCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+                            readback_required ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0,
+                            nullptr, 1, &barrier);
+
+        if (readback_required)
+        {
+            VkBufferMemoryBarrier buffer_barrier{};
+            buffer_barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            buffer_barrier.srcAccessMask       = VK_ACCESS_HOST_WRITE_BIT;
+            buffer_barrier.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            buffer_barrier.buffer              = mActiveReadbackBuffer;
+            buffer_barrier.offset              = 0;
+            buffer_barrier.size                = mActiveReadbackByteCount;
+            mCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1,
+                                &buffer_barrier, 0, nullptr);
+
+            VkBufferImageCopy copy_region{};
+            copy_region.bufferOffset                    = 0;
+            copy_region.bufferRowLength                 = 0;
+            copy_region.bufferImageHeight               = 0;
+            copy_region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy_region.imageSubresource.mipLevel       = 0;
+            copy_region.imageSubresource.baseArrayLayer = 0;
+            copy_region.imageSubresource.layerCount     = 1;
+            copy_region.imageOffset                     = { 0, 0, 0 };
+            copy_region.imageExtent                     = { mActiveReadbackImageExtent.width, mActiveReadbackImageExtent.height, 1 };
+            mCmdCopyImageToBuffer(mCommandBuffer, barrier.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mActiveReadbackBuffer, 1,
+                                  &copy_region);
+
+            buffer_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            buffer_barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            mCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
+                                &buffer_barrier, 0, nullptr);
+
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = 0;
+            barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            mCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0,
+                                nullptr, 1, &barrier);
+        }
     }
 
     result = mEndCommandBuffer(mCommandBuffer);
@@ -1225,6 +1435,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::EndCommandBuffer, result, image_index);
@@ -1237,6 +1448,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveReadback();
         }
         else if (result != VK_ERROR_OUT_OF_HOST_MEMORY && result != VK_ERROR_OUT_OF_DEVICE_MEMORY)
         {
@@ -1277,6 +1489,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     }
 
     mPendingSubmissionReportedDeviceLost = false;
+    mReadbackClassificationEligible      = mActiveReadbackGeneration != nullptr;
     mDisposition                         = VulkanSwapchainFrameSlotDisposition::PresentationReady;
     return retryPresentation();
 }
@@ -1363,6 +1576,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
             {
                 mPendingSubmissionReportedDeviceLost = false;
                 mDisposition                         = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+                clearActiveReadback();
                 return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                         VulkanSwapchainFrameSlotCommand::QueueSubmit, VK_ERROR_DEVICE_LOST, mAcquiredImageIndex);
             }
@@ -1374,6 +1588,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
         {
             mPendingSubmissionReportedDeviceLost = false;
             mDisposition                         = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::WaitForFences, result, mAcquiredImageIndex);
@@ -1396,6 +1611,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::WaitForFences, result, mAcquiredImageIndex);
@@ -1413,15 +1629,33 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
     if (present_result == VK_ERROR_DEVICE_LOST)
     {
         mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+        clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::QueuePresent, present_result, image_index);
     }
 
+    std::optional<VulkanSwapchainReadbackObservation> observation;
+    bool                                              invalid_readback = false;
+    if (mActiveReadbackGeneration)
+    {
+        if (mReadbackClassificationEligible && activeReadbackMatchesSnapshot())
+        {
+            observation = mActiveReadbackGeneration->classifyPresentationObservation();
+        }
+        invalid_readback = !observation;
+        clearActiveReadback();
+    }
+
     mDisposition = VulkanSwapchainFrameSlotDisposition::Reusable;
+    if (invalid_readback)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition, std::nullopt,
+                                VK_SUCCESS, image_index);
+    }
     if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR || present_result == VK_ERROR_OUT_OF_DATE_KHR ||
         present_result == VK_ERROR_SURFACE_LOST_KHR)
     {
-        return VulkanSwapchainFrameSlotPresentationSuccess{ outcome, image_index };
+        return VulkanSwapchainFrameSlotPresentationSuccess{ outcome, image_index, observation };
     }
     return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                             VulkanSwapchainFrameSlotCommand::QueuePresent, present_result, image_index);
@@ -1457,11 +1691,17 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::canc
             mAcquiredImageIndex.reset();
             mCancellationPhase = CancellationPhase::Idle;
             mDisposition       = VulkanSwapchainFrameSlotDisposition::Reusable;
+            clearActiveReadback();
             return mDisposition;
         }
         // A non-success result does not say whether release took effect.
         // Retrying could release an image that is no longer acquired.
-        mDisposition = VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate;
+        mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
+                                                      : VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate;
+        if (mDisposition == VulkanSwapchainFrameSlotDisposition::DeviceLost)
+        {
+            clearActiveReadback();
+        }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::ReleaseSwapchainImages, result, mAcquiredImageIndex);
     }
@@ -1492,6 +1732,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::canc
         if (reset_result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::ResetFences, reset_result, mAcquiredImageIndex);
@@ -1592,6 +1833,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retr
             mCancellationSubmissionPending        = false;
             mCancellationSubmitReportedDeviceLost = false;
             mDisposition                          = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::WaitForFences, wait_result, mAcquiredImageIndex);
@@ -1602,6 +1844,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retr
     {
         mCancellationSubmitReportedDeviceLost = false;
         mDisposition                          = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+        clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::QueueSubmit, VK_ERROR_DEVICE_LOST, mAcquiredImageIndex);
     }
@@ -1633,7 +1876,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retr
 
 void VulkanSwapchainFrameSlotGeneration::reset() noexcept
 {
-    if (mDisposition == VulkanSwapchainFrameSlotDisposition::Pending ||
+    if (mActiveReadbackGeneration || mDisposition == VulkanSwapchainFrameSlotDisposition::Pending ||
         mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired ||
         mDisposition == VulkanSwapchainFrameSlotDisposition::SubmissionPending ||
         mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady ||
@@ -1674,47 +1917,52 @@ void VulkanSwapchainFrameSlotGeneration::reset() noexcept
     mCommandPool   = VK_NULL_HANDLE;
     mCommandBuffer = VK_NULL_HANDLE;
 
-    mLogicalDeviceGeneration             = nullptr;
-    mConfigurationGeneration             = nullptr;
-    mSwapchainGeneration                 = nullptr;
-    mGetInstanceProcAddr                 = nullptr;
-    mInstance                            = VK_NULL_HANDLE;
-    mSurface                             = VK_NULL_HANDLE;
-    mPhysicalDevice                      = VK_NULL_HANDLE;
-    mPhysicalDeviceIndex                 = 0;
-    mDevice                              = VK_NULL_HANDLE;
-    mQueue                               = VK_NULL_HANDLE;
-    mQueueFamilyIndex                    = VK_QUEUE_FAMILY_IGNORED;
-    mQueueIndex                          = 0;
-    mDrawableExtent                      = {};
-    mSwapchain                           = VK_NULL_HANDLE;
-    mImageFormat                         = VK_FORMAT_UNDEFINED;
-    mImageCount                          = 0;
-    mImagesGeneration                    = nullptr;
-    mPresentationTargetGeneration        = nullptr;
-    mPresentationPipelineGeneration       = nullptr;
-    mPresentationPipelineLayout           = VK_NULL_HANDLE;
-    mPresentationPipeline                 = VK_NULL_HANDLE;
-    mDestroyCommandPool                  = nullptr;
-    mDestroySemaphore                    = nullptr;
-    mDestroyFence                        = nullptr;
-    mWaitForFences                       = nullptr;
-    mResetCommandBuffer                  = nullptr;
-    mBeginCommandBuffer                  = nullptr;
-    mEndCommandBuffer                    = nullptr;
-    mResetFences                         = nullptr;
-    mQueueSubmit                         = nullptr;
-    mAcquireNextImage                    = nullptr;
-    mCmdPipelineBarrier                  = nullptr;
-    mCmdClearColorImage                  = nullptr;
-    mCmdBeginRenderPass                  = nullptr;
-    mCmdEndRenderPass                    = nullptr;
-    mCmdBindPipeline                      = nullptr;
-    mCmdSetViewport                       = nullptr;
-    mCmdSetScissor                        = nullptr;
-    mCmdDraw                              = nullptr;
-    mQueuePresent                        = nullptr;
-    mReleaseSwapchainImages              = nullptr;
+    mLogicalDeviceGeneration          = nullptr;
+    mConfigurationGeneration          = nullptr;
+    mSwapchainGeneration              = nullptr;
+    mGetInstanceProcAddr              = nullptr;
+    mInstance                         = VK_NULL_HANDLE;
+    mSurface                          = VK_NULL_HANDLE;
+    mPhysicalDevice                   = VK_NULL_HANDLE;
+    mPhysicalDeviceIndex              = 0;
+    mDevice                           = VK_NULL_HANDLE;
+    mQueue                            = VK_NULL_HANDLE;
+    mQueueFamilyIndex                 = VK_QUEUE_FAMILY_IGNORED;
+    mQueueIndex                       = 0;
+    mDrawableExtent                   = {};
+    mImageExtent                      = {};
+    mSwapchain                        = VK_NULL_HANDLE;
+    mImageFormat                      = VK_FORMAT_UNDEFINED;
+    mImageCount                       = 0;
+    mImagesGeneration                 = nullptr;
+    mPresentationTargetGeneration     = nullptr;
+    mPresentationPipelineGeneration   = nullptr;
+    mPresentationPipelineLayout       = VK_NULL_HANDLE;
+    mPresentationPipeline             = VK_NULL_HANDLE;
+    mDestroyCommandPool               = nullptr;
+    mDestroySemaphore                 = nullptr;
+    mDestroyFence                     = nullptr;
+    mWaitForFences                    = nullptr;
+    mResetCommandBuffer               = nullptr;
+    mBeginCommandBuffer               = nullptr;
+    mEndCommandBuffer                 = nullptr;
+    mResetFences                      = nullptr;
+    mQueueSubmit                      = nullptr;
+    mAcquireNextImage                 = nullptr;
+    mCmdPipelineBarrier               = nullptr;
+    mCmdClearColorImage               = nullptr;
+    mCmdBeginRenderPass               = nullptr;
+    mCmdEndRenderPass                 = nullptr;
+    mCmdBindPipeline                  = nullptr;
+    mCmdSetViewport                   = nullptr;
+    mCmdSetScissor                    = nullptr;
+    mCmdDraw                          = nullptr;
+    mCmdCopyImageToBuffer             = nullptr;
+    mQueuePresent                     = nullptr;
+    mReleaseSwapchainImages           = nullptr;
+    mReadbackPhysicalDeviceGeneration = nullptr;
+    mResolvedReadbackGeneration       = nullptr;
+    clearActiveReadback();
     mDisposition                         = VulkanSwapchainFrameSlotDisposition::Reusable;
     mPendingSubmissionReportedDeviceLost = false;
     mSubmissionFenceSignaled              = true;

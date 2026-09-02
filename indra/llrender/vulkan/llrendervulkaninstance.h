@@ -591,7 +591,8 @@ enum class VulkanSwapchainFrameSlotParentOperationCode : std::uint8_t
     OperationFailure,
     InvalidClearColor,
     SwapchainPresentationTargetNotLive,
-    SwapchainPresentationPipelineNotLive
+    SwapchainPresentationPipelineNotLive,
+    SwapchainReadbackNotLive
 };
 
 struct VulkanSwapchainFrameSlotParentOperationError
@@ -819,6 +820,8 @@ public:
     VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassDrawToPresentSwapchainFrameSlot(
         const VulkanSwapchainFrameSlotOperationRequest& request,
         const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
+    VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentationCompletion(
@@ -830,9 +833,10 @@ public:
     // Callers externally serialize these resets. Image teardown retires the
     // frame slot, readback destination, presentation pipeline, and presentation
     // target in that order. Direct readback reset preserves every presentation
-    // sibling; direct pipeline or target reset preserves readback. False
-    // preserves the requested owner and every parent; it reports either an
-    // outstanding frame obligation or an in-progress native child acquisition.
+    // sibling, but refuses while the frame slot retains it for an observation;
+    // direct pipeline or target reset preserves readback. False preserves the
+    // requested owner and every parent; it reports an outstanding frame
+    // obligation, retained observation, or in-progress native child acquisition.
     // The latter refuses even an otherwise idempotent reset.
     bool resetSwapchainFrameSlotGeneration() noexcept;
     bool resetSwapchainReadbackGeneration() noexcept;

@@ -15,6 +15,8 @@
 
 #include "llrendervulkanswapchainreadback.h"
 
+#include <algorithm>
+#include <array>
 #include <limits>
 #include <utility>
 
@@ -170,6 +172,11 @@ namespace
         }
         product = left * right;
         return true;
+    }
+
+    bool admittedObservationFormat(VkFormat format) noexcept
+    {
+        return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_B8G8R8A8_UNORM;
     }
 
     bool validMemoryRequirements(const VkMemoryRequirements& requirements, VkDeviceSize byte_count) noexcept
@@ -380,6 +387,73 @@ bool VulkanSwapchainReadbackGeneration::createdFor(const VulkanPhysicalDeviceGen
            mImageExtent.height == image_extent.height && mImageCount == images_generation.imageCount();
 }
 
+bool VulkanSwapchainReadbackGeneration::hasValidPresentationObservationLayout() const noexcept
+{
+    constexpr VkMemoryPropertyFlags required_memory = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    if (mBuffer == VK_NULL_HANDLE || mMemory == VK_NULL_HANDLE || mMappedData == nullptr || !admittedObservationFormat(mImageFormat) ||
+        mImageCount == 0 || (mMemoryPropertyFlags & required_memory) != required_memory)
+    {
+        return false;
+    }
+
+    const auto  layout_result = VulkanSwapchainReadbackDetail::checkedByteLayout(mImageExtent.width, mImageExtent.height);
+    const auto* layout        = std::get_if<VulkanSwapchainReadbackByteLayout>(&layout_result);
+    return layout && layout->mRowBytes == mRowBytes && layout->mByteCount == mByteCount && mAllocationSize >= mByteCount;
+}
+
+bool VulkanSwapchainReadbackGeneration::poisonForPresentationObservation() noexcept
+{
+    if (!hasValidPresentationObservationLayout())
+    {
+        return false;
+    }
+
+    constexpr std::array<std::uint8_t, 4> sentinel{ 0x11, 0x22, 0x33, 0x44 };
+    auto*                                 bytes = static_cast<std::uint8_t*>(mMappedData);
+    const std::size_t                     size  = static_cast<std::size_t>(mByteCount);
+    for (std::size_t offset = 0; offset < size; offset += sentinel.size())
+    {
+        std::copy(sentinel.begin(), sentinel.end(), bytes + offset);
+    }
+    return true;
+}
+
+std::optional<VulkanSwapchainReadbackObservation> VulkanSwapchainReadbackGeneration::classifyPresentationObservation() const noexcept
+{
+    if (!hasValidPresentationObservationLayout())
+    {
+        return std::nullopt;
+    }
+
+    VulkanSwapchainReadbackObservation observation;
+    observation.mImageFormat     = mImageFormat;
+    observation.mImageExtent     = mImageExtent;
+    observation.mTotalPixelCount = static_cast<std::uint64_t>(mByteCount / 4);
+
+    const auto*       bytes = static_cast<const std::uint8_t*>(mMappedData);
+    const std::size_t size  = static_cast<std::size_t>(mByteCount);
+    for (std::size_t offset = 0; offset < size; offset += 4)
+    {
+        const std::uint8_t red   = bytes[offset + (mImageFormat == VK_FORMAT_R8G8B8A8_UNORM ? 0 : 2)];
+        const std::uint8_t green = bytes[offset + 1];
+        const std::uint8_t blue  = bytes[offset + (mImageFormat == VK_FORMAT_R8G8B8A8_UNORM ? 2 : 0)];
+        const std::uint8_t alpha = bytes[offset + 3];
+        if (red == 0 && green == 255 && blue == 0 && alpha == 255)
+        {
+            ++observation.mGreenPixelCount;
+        }
+        else if (red == 255 && green == 0 && blue == 0 && alpha == 255)
+        {
+            ++observation.mRedPixelCount;
+        }
+        else
+        {
+            ++observation.mUnexpectedPixelCount;
+        }
+    }
+    return observation;
+}
+
 void VulkanSwapchainReadbackGeneration::reset() noexcept
 {
     if (mMappedData != nullptr && mMemory != VK_NULL_HANDLE && mUnmapMemory)
@@ -440,7 +514,7 @@ VulkanSwapchainReadbackResolutionResult resolveVulkanSwapchainReadbackGeneration
     }
 
     const VkFormat format = configuration_generation.surfaceFormat().format;
-    if (format != VK_FORMAT_B8G8R8A8_UNORM && format != VK_FORMAT_R8G8B8A8_UNORM)
+    if (!admittedObservationFormat(format))
     {
         return failure(VulkanSwapchainReadbackResolutionCode::UnsupportedImageFormat);
     }

@@ -107,7 +107,8 @@ enum class MissingCommand : std::uint8_t
     FreeMemory,
     BindBufferMemory,
     MapMemory,
-    UnmapMemory
+    UnmapMemory,
+    CmdCopyImageToBuffer
 };
 
 enum class Event : std::uint8_t
@@ -160,6 +161,13 @@ enum class Event : std::uint8_t
     UnmapMemory,
     DestroyBuffer,
     FreeMemory
+};
+
+enum class ReadbackResetReentryPoint : std::uint8_t
+{
+    None,
+    WaitForFences,
+    AcquireNextImage
 };
 
 template<typename Handle>
@@ -246,6 +254,7 @@ struct FakeState
     VkBuffer                      mReadbackBuffer             = fakeHandle<VkBuffer>(0xd001);
     VkDeviceMemory                mReadbackMemory             = fakeHandle<VkDeviceMemory>(0xd002);
     std::array<std::byte, 4>      mReadbackMappedStorage{};
+    std::vector<std::byte>        mReadbackObservationStorage;
     std::vector<Event>            mEvents;
     std::vector<std::string>      mEnabledExtensions;
     std::vector<std::string>      mEnabledLayers;
@@ -520,6 +529,15 @@ struct FakeState
     std::uint32_t           mDrawInstanceCount = 0;
     std::uint32_t           mDrawFirstVertex   = 0;
     std::uint32_t           mDrawFirstInstance = 0;
+    std::size_t             mCopyImageToBufferCalls = 0;
+
+    ReadbackResetReentryPoint                          mReadbackResetReentryPoint   = ReadbackResetReentryPoint::None;
+    VulkanInstanceGeneration*                          mReadbackResetReentryOwner   = nullptr;
+    bool                                               mReadbackResetReentryInvoked = false;
+    std::optional<VulkanSwapchainFrameSlotDisposition> mReadbackResetReentryDisposition;
+    bool                                               mReenteredReadbackResetSucceeded  = false;
+    bool                                               mReenteredFrameSlotResetSucceeded = false;
+    bool                                               mReenteredImagesResetSucceeded    = false;
 
     bool        mGenerationCurrent   = true;
     std::size_t mGenerationChecks    = 0;
@@ -587,6 +605,19 @@ public:
 
     void use(FakeState& state) noexcept { gFakeState = &state; }
 };
+
+void attemptReadbackResetReentry(FakeState& state) noexcept
+{
+    if (!state.mReadbackResetReentryOwner || state.mReadbackResetReentryInvoked)
+    {
+        return;
+    }
+    state.mReadbackResetReentryInvoked      = true;
+    state.mReadbackResetReentryDisposition  = state.mReadbackResetReentryOwner->swapchainFrameSlotDisposition();
+    state.mReenteredReadbackResetSucceeded  = state.mReadbackResetReentryOwner->resetSwapchainReadbackGeneration();
+    state.mReenteredFrameSlotResetSucceeded = state.mReadbackResetReentryOwner->resetSwapchainFrameSlotGeneration();
+    state.mReenteredImagesResetSucceeded    = state.mReadbackResetReentryOwner->resetSwapchainImagesGeneration();
+}
 
 template<typename Function>
 PFN_vkVoidFunction eraseFunctionType(Function function) noexcept
@@ -1512,6 +1543,10 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeWaitForFences(VkDevice device, std::uint32_t 
     gFakeState->mWaitAll         = wait_all;
     gFakeState->mWaitTimeout     = timeout;
     gFakeState->mEvents.push_back(Event::WaitForFences);
+    if (gFakeState->mReadbackResetReentryPoint == ReadbackResetReentryPoint::WaitForFences)
+    {
+        attemptReadbackResetReentry(*gFakeState);
+    }
     const std::size_t index = gFakeState->mWaitForFencesResultIndex++;
     return index < gFakeState->mWaitForFencesResults.size() ? gFakeState->mWaitForFencesResults[index] : VK_SUCCESS;
 }
@@ -1611,6 +1646,10 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice       device,
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gFakeState->mAcquireNextImageCalls;
+    if (gFakeState->mReadbackResetReentryPoint == ReadbackResetReentryPoint::AcquireNextImage)
+    {
+        attemptReadbackResetReentry(*gFakeState);
+    }
     *image_index = gFakeState->mAcquiredImageIndex;
     return gFakeState->mAcquireNextImageResult;
 }
@@ -1732,6 +1771,24 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdDraw(VkCommandBuffer command_buffer,
     gFakeState->mDrawFirstVertex   = first_vertex;
     gFakeState->mDrawFirstInstance = first_instance;
     gFakeState->mEvents.push_back(Event::Draw);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdCopyImageToBuffer(VkCommandBuffer          command_buffer,
+                                                    VkImage                  source_image,
+                                                    VkImageLayout            source_image_layout,
+                                                    VkBuffer                 destination_buffer,
+                                                    std::uint32_t            region_count,
+                                                    const VkBufferImageCopy* regions) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mCommandBuffer ||
+        gFakeState->mAcquiredImageIndex >= gFakeState->mSwapchainImages.size() ||
+        source_image != gFakeState->mSwapchainImages[gFakeState->mAcquiredImageIndex] ||
+        source_image_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL || destination_buffer != gFakeState->mReadbackBuffer ||
+        region_count != 1 || !regions)
+    {
+        return;
+    }
+    ++gFakeState->mCopyImageToBufferCalls;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeCmdEndRenderPass(VkCommandBuffer command_buffer) noexcept
@@ -1870,7 +1927,10 @@ VKAPI_ATTR VkResult VKAPI_CALL
     gFakeState->mMappedOffset = offset;
     gFakeState->mMappedSize   = size;
     gFakeState->mEvents.push_back(Event::MapMemory);
-    *data = gFakeState->mNullReadbackMapping ? nullptr : gFakeState->mReadbackMappedStorage.data();
+    *data = gFakeState->mNullReadbackMapping
+                ? nullptr
+                : (gFakeState->mReadbackObservationStorage.empty() ? gFakeState->mReadbackMappedStorage.data()
+                                                                   : gFakeState->mReadbackObservationStorage.data());
     return gFakeState->mMemoryMapResult;
 }
 
@@ -2038,6 +2098,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     if (std::strcmp(name, "vkCmdDraw") == 0)
     {
         return gFakeState->mMissing == MissingCommand::CmdDraw ? nullptr : eraseFunctionType(fakeCmdDraw);
+    }
+    if (std::strcmp(name, "vkCmdCopyImageToBuffer") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CmdCopyImageToBuffer ? nullptr : eraseFunctionType(fakeCmdCopyImageToBuffer);
     }
     if (std::strcmp(name, "vkCmdEndRenderPass") == 0)
     {
@@ -2405,6 +2469,13 @@ VulkanSwapchainFrameSlotOperationRequest makeExactFrameSlotOperationRequest(Vulk
              owner.swapchainDrawableExtent(),
              { &owner, exactMutationOwnerIsCurrent },
              { &owner, exactMutationWindowIsCurrent } };
+}
+
+void prepareReadbackObservationStorage(FakeState& state, VkExtent2D extent, std::byte fill = std::byte{ 0xa5 })
+{
+    const std::size_t byte_count = static_cast<std::size_t>(extent.width) * static_cast<std::size_t>(extent.height) * 4;
+    state.mReadbackObservationStorage.assign(byte_count, fill);
+    state.mReadbackMemoryRequirements.size = static_cast<VkDeviceSize>(byte_count);
 }
 
 struct ClearColorMutationContext
@@ -3830,6 +3901,48 @@ bool readbackParentAbaWindowIsCurrent(void* userdata, std::uint64_t native_windo
     return true;
 }
 
+struct ReadbackOperationAbaContext
+{
+    FakeState*                mState        = nullptr;
+    VulkanInstanceGeneration* mOwner        = nullptr;
+    std::size_t               mOwnerChecks  = 0;
+    std::size_t               mWindowChecks = 0;
+    bool                      mReset        = false;
+    bool                      mReacquired   = false;
+};
+
+bool readbackOperationAbaOwnerIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
+{
+    auto* context = static_cast<ReadbackOperationAbaContext*>(userdata);
+    if (!context || !context->mState || !context->mOwner || context->mOwner != &generation)
+    {
+        return false;
+    }
+    ++context->mOwnerChecks;
+    if (context->mOwnerChecks == 2)
+    {
+        const VkExtent2D extent = context->mOwner->swapchainDrawableExtent();
+        context->mReset         = context->mOwner->resetSwapchainReadbackGeneration();
+        if (context->mReset)
+        {
+            context->mReacquired = !context->mOwner->acquireSwapchainReadbackGeneration(
+                makeSwapchainReadbackRequest(*context->mState, *context->mOwner, extent));
+        }
+    }
+    return true;
+}
+
+bool readbackOperationAbaWindowIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    auto* context = static_cast<ReadbackOperationAbaContext*>(userdata);
+    if (!context || !context->mOwner || native_window_generation != context->mOwner->nativeWindowGeneration())
+    {
+        return false;
+    }
+    ++context->mWindowChecks;
+    return true;
+}
+
 void emitValidationMessage(FakeState& state, const char* message)
 {
     tut::ensure("the validation callback was retained", state.mValidationCallback != nullptr && state.mValidationUserdata != nullptr);
@@ -3849,7 +3962,7 @@ struct render_vulkan_instance_test
 {
 };
 
-using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 100>;
+using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 105>;
 using render_vulkan_instance_test_object = render_vulkan_instance_test_group::object;
 render_vulkan_instance_test_group render_vulkan_instance_tests("render Vulkan instance");
 
@@ -9381,6 +9494,254 @@ void render_vulkan_instance_test_object::test<100>()
            !owner.hasSwapchainReadbackGeneration() && state.mMemoryPropertiesCalls == 0 && state.mCreateBufferCalls == 0 &&
                state.mAllocateMemoryCalls == 0 && state.mBindBufferMemoryCalls == 0 && state.mMapMemoryCalls == 0 &&
                state.mUnmapMemoryCalls == 0 && state.mDestroyBufferCalls == 0 && state.mFreeMemoryCalls == 0 && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<101>()
+{
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotParentOperationCode::SwapchainReadbackNotLive) == 20);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdCopyImageToBuffer) == 25);
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
+        std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
+
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireSwapchainPresentationTargetChain(state, owner, { 64, 64 });
+        ensure("the missing-readback fixture publishes its draw pipeline and frame slot",
+               !owner.acquireSwapchainPresentationPipelineGeneration(makeSwapchainPresentationPipelineRequest(state, owner, { 64, 64 })) &&
+                   !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, { 64, 64 })));
+
+        const std::size_t                                      owner_checks  = state.mInstanceOwnerChecks;
+        const std::size_t                                      window_checks = state.mSurfaceWindowChecks;
+        const std::size_t                                      lookups       = state.mDeviceProcAddrCalls;
+        const VulkanSwapchainFrameSlotParentPresentationResult result = owner.acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
+            makeSwapchainFrameSlotOperationRequest(state, owner, { 64, 64 }));
+        const auto& error = requireSwapchainFrameSlotPresentationError(result);
+        ensure("the fixed readback operation rejects a missing owner before callbacks, dispatch, or frame work",
+               error.mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainReadbackNotLive && !error.mOperationError &&
+                   state.mInstanceOwnerChecks == owner_checks && state.mSurfaceWindowChecks == window_checks &&
+                   state.mDeviceProcAddrCalls == lookups && state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 &&
+                   state.mCopyImageToBufferCalls == 0 && owner.reset());
+    }
+
+    {
+        constexpr VkExtent2D extent{ 64, 64 };
+        FakeState            state;
+        prepareReadbackObservationStorage(state, extent);
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireCompleteSwapchainChain(state, owner, extent);
+        const auto storage_before = state.mReadbackObservationStorage;
+
+        const VulkanSwapchainFrameSlotParentPresentationResult result = owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(
+            makeSwapchainFrameSlotOperationRequest(state, owner, extent), VulkanSwapchainFrameClearColor{});
+        const auto& success = requireSwapchainFrameSlotPresentationSuccess(result);
+        ensure("the existing draw path returns no observation and never touches readback storage",
+               success.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented && success.mImageIndex == 0 &&
+                   !success.mObservation && state.mCopyImageToBufferCalls == 0 && state.mReadbackObservationStorage == storage_before &&
+                   owner.reset());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<102>()
+{
+    constexpr VkExtent2D extent{ 64, 64 };
+    FakeState            state;
+    prepareReadbackObservationStorage(state, extent);
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, extent);
+    const VkBuffer       original_buffer = owner.swapchainReadbackBuffer();
+    const VkDeviceMemory original_memory = owner.swapchainReadbackMemory();
+
+    ReadbackOperationAbaContext replacement{ &state, &owner };
+    const VulkanSwapchainFrameSlotOperationRequest request{ owner.nativeWindowGeneration(),
+                                                            owner.swapchainDrawableExtent(),
+                                                            { &replacement, readbackOperationAbaOwnerIsCurrent },
+                                                            { &replacement, readbackOperationAbaWindowIsCurrent } };
+    const VulkanSwapchainFrameSlotParentPresentationResult result = owner.acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(request);
+    const auto&                                            error  = requireSwapchainFrameSlotPresentationError(result);
+
+    ensure("post-resolution freshness can replace readback with the same-looking native handles",
+           replacement.mOwnerChecks == 2 && replacement.mWindowChecks == 2 && replacement.mReset && replacement.mReacquired &&
+               owner.hasSwapchainReadbackGeneration() && owner.swapchainReadbackBuffer() == original_buffer &&
+               owner.swapchainReadbackMemory() == original_memory && state.mCreateBufferCalls == 2 && state.mAllocateMemoryCalls == 2 &&
+               state.mMapMemoryCalls == 2 && state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 && state.mFreeMemoryCalls == 1);
+    ensure("the readback epoch rejects the stale resolved generation before wait, acquire, or copy",
+           error.mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainReadbackNotLive && !error.mOperationError &&
+               state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 && state.mCopyImageToBufferCalls == 0 && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<103>()
+{
+    constexpr VkExtent2D extent{ 64, 64 };
+    const std::array     points{ ReadbackResetReentryPoint::WaitForFences, ReadbackResetReentryPoint::AcquireNextImage };
+    for (const ReadbackResetReentryPoint point : points)
+    {
+        FakeState state;
+        prepareReadbackObservationStorage(state, extent);
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireCompleteSwapchainChain(state, owner, extent);
+        state.mReadbackResetReentryPoint = point;
+        state.mReadbackResetReentryOwner = &owner;
+
+        const VulkanSwapchainFrameSlotParentPresentationResult result =
+            owner.acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(makeSwapchainFrameSlotOperationRequest(state, owner, extent));
+        const auto& success = requireSwapchainFrameSlotPresentationSuccess(result);
+        ensure("the active readback identity refuses every direct and transitive reentrant reset while still Reusable",
+               state.mReadbackResetReentryInvoked &&
+                   state.mReadbackResetReentryDisposition == VulkanSwapchainFrameSlotDisposition::Reusable &&
+                   !state.mReenteredReadbackResetSucceeded && !state.mReenteredFrameSlotResetSucceeded &&
+                   !state.mReenteredImagesResetSucceeded && owner.hasSwapchainReadbackGeneration() &&
+                   owner.hasSwapchainFrameSlotGeneration() && state.mUnmapMemoryCalls == 0 && state.mDestroyBufferCalls == 0 &&
+                   state.mFreeMemoryCalls == 0 && state.mDestroyCommandPoolCalls == 0 && state.mDestroyImageViewCalls == 0);
+        ensure("a mismatched sentinel frame is still a successful bounded observation",
+               success.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented && success.mImageIndex == 0 &&
+                   success.mObservation && success.mObservation->mImageFormat == VK_FORMAT_B8G8R8A8_UNORM &&
+                   success.mObservation->mImageExtent.width == extent.width && success.mObservation->mImageExtent.height == extent.height &&
+                   success.mObservation->mTotalPixelCount == 64 * 64 && success.mObservation->mGreenPixelCount == 0 &&
+                   success.mObservation->mRedPixelCount == 0 && success.mObservation->mUnexpectedPixelCount == 64 * 64 &&
+                   state.mCopyImageToBufferCalls == 1);
+
+        ensure("normal completion releases the readback identity for one exact transitive teardown",
+               owner.resetSwapchainImagesGeneration() && !owner.hasSwapchainImagesGeneration() && !owner.hasSwapchainReadbackGeneration() &&
+                   !owner.hasSwapchainFrameSlotGeneration() && state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 &&
+                   state.mFreeMemoryCalls == 1 && state.mDestroyCommandPoolCalls == 1 &&
+                   state.mDestroyImageViewCalls == state.mSwapchainImages.size());
+        ensure("repeating the completed teardown destroys no resource twice",
+               owner.resetSwapchainImagesGeneration() && state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 &&
+                   state.mFreeMemoryCalls == 1 && state.mDestroyCommandPoolCalls == 1 &&
+                   state.mDestroyImageViewCalls == state.mSwapchainImages.size() && owner.reset());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<104>()
+{
+    constexpr VkExtent2D extent{ 64, 64 };
+    {
+        FakeState state;
+        prepareReadbackObservationStorage(state, extent);
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireCompleteSwapchainChain(state, owner, extent);
+        state.mEndCommandBufferResult = VK_ERROR_UNKNOWN;
+
+        VulkanSwapchainFrameSlotOperationRequest               request = makeSwapchainFrameSlotOperationRequest(state, owner, extent);
+        const VulkanSwapchainFrameSlotParentPresentationResult result =
+            owner.acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(request);
+        const auto& error = requireSwapchainFrameSlotPresentationError(result);
+        ensure("an acquired readback frame retains every dependent owner through a recording failure",
+               error.mOperationError && error.mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
+                   error.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+                   !owner.resetSwapchainReadbackGeneration() && !owner.resetSwapchainFrameSlotGeneration() &&
+                   !owner.resetSwapchainImagesGeneration() && state.mUnmapMemoryCalls == 0 && state.mDestroyBufferCalls == 0 &&
+                   state.mFreeMemoryCalls == 0 && state.mDestroyCommandPoolCalls == 0 && state.mDestroyImageViewCalls == 0);
+
+        state.mEndCommandBufferResult = VK_SUCCESS;
+        request.mDrawableExtent       = {};
+        ensureSwapchainFrameSlotOperationSuccess(owner.cancelSwapchainFrameSlotPresentation(request),
+                                                 VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("fully completed cancellation releases direct readback and frame-slot resets exactly once",
+               owner.resetSwapchainReadbackGeneration() && owner.resetSwapchainReadbackGeneration() &&
+                   owner.resetSwapchainFrameSlotGeneration() && owner.resetSwapchainFrameSlotGeneration() && state.mUnmapMemoryCalls == 1 &&
+                   state.mDestroyBufferCalls == 1 && state.mFreeMemoryCalls == 1 && state.mDestroyCommandPoolCalls == 1 &&
+                   owner.resetSwapchainImagesGeneration() && state.mDestroyImageViewCalls == state.mSwapchainImages.size() &&
+                   owner.reset());
+    }
+
+    {
+        FakeState state;
+        prepareReadbackObservationStorage(state, extent);
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireCompleteSwapchainChain(state, owner, extent);
+        state.mWaitForFencesResults = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
+
+        const VulkanSwapchainFrameSlotOperationRequest request = makeSwapchainFrameSlotOperationRequest(state, owner, extent);
+        const auto result = owner.acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(request);
+        const auto& pending_error = requireSwapchainFrameSlotPresentationError(result);
+        ensure("the readback frame reaches an active PresentPending obligation",
+               pending_error.mOperationError && pending_error.mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+                   pending_error.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending &&
+                   !owner.resetSwapchainReadbackGeneration() && !owner.resetSwapchainFrameSlotGeneration() &&
+                   !owner.resetSwapchainImagesGeneration());
+
+        const auto  rebuild_result = owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, extent));
+        const auto& rebuild_error  = requireSwapchainChainRebuildError(rebuild_result);
+        ensure("aggregate rebuild reports the active frame-slot reset refusal without destroying readback resources",
+               rebuild_error.mCode == VulkanSwapchainChainRebuildCode::FrameSlotResetRefused &&
+                   rebuild_error.mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+                   rebuild_error.mFrameSlotDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending &&
+                   state.mUnmapMemoryCalls == 0 && state.mDestroyBufferCalls == 0 && state.mFreeMemoryCalls == 0 &&
+                   state.mDestroyCommandPoolCalls == 0 && state.mDestroyImageViewCalls == 0);
+
+        const auto completion_result = owner.retrySwapchainFrameSlotPresentationCompletion(makeExactFrameSlotOperationRequest(owner));
+        const auto& completion = requireSwapchainFrameSlotPresentationSuccess(completion_result);
+        ensure("completion after the refused rebuild returns the one retained observation and restores teardown",
+               completion.mObservation && completion.mObservation->mUnexpectedPixelCount == 64 * 64 &&
+                   owner.resetSwapchainImagesGeneration() && state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 &&
+                   state.mFreeMemoryCalls == 1 && owner.reset());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<105>()
+{
+    constexpr VkExtent2D extent{ 64, 64 };
+    FakeState            state;
+    prepareReadbackObservationStorage(state, extent);
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, extent);
+    state.mWaitForFencesResults = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
+
+    const auto pending_result = owner.acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
+        makeSwapchainFrameSlotOperationRequest(state, owner, extent));
+    const auto& pending_error = requireSwapchainFrameSlotPresentationError(pending_result);
+    ensure("the move fixture holds one submitted readback frame",
+           pending_error.mOperationError &&
+               pending_error.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending);
+
+    const VkCommandPool  command_pool    = owner.swapchainFrameCommandPool();
+    const VkBuffer       readback_buffer = owner.swapchainReadbackBuffer();
+    const VkDeviceMemory readback_memory = owner.swapchainReadbackMemory();
+    VulkanInstanceGeneration moved(std::move(owner));
+    ensure("aggregate move preserves the live child objects and empties only the source owner",
+           owner.instance() == VK_NULL_HANDLE && !owner.hasSwapchainFrameSlotGeneration() &&
+               !owner.hasSwapchainReadbackGeneration() && moved.instance() == state.mInstance &&
+               moved.hasSwapchainFrameSlotGeneration() && moved.hasSwapchainReadbackGeneration() &&
+               moved.swapchainFrameCommandPool() == command_pool && moved.swapchainReadbackBuffer() == readback_buffer &&
+               moved.swapchainReadbackMemory() == readback_memory && state.mDestroyCommandPoolCalls == 0 &&
+               state.mUnmapMemoryCalls == 0 && state.mDestroyBufferCalls == 0 && state.mFreeMemoryCalls == 0);
+
+    const auto completion_result = moved.retrySwapchainFrameSlotPresentationCompletion(makeExactFrameSlotOperationRequest(moved));
+    const auto& completion = requireSwapchainFrameSlotPresentationSuccess(completion_result);
+    ensure("the moved-to owner retires the frame with exactly one successful mismatch observation",
+           completion.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented && completion.mObservation &&
+               completion.mObservation->mTotalPixelCount == 64 * 64 && completion.mObservation->mGreenPixelCount == 0 &&
+               completion.mObservation->mRedPixelCount == 0 && completion.mObservation->mUnexpectedPixelCount == 64 * 64 &&
+               state.mCopyImageToBufferCalls == 1);
+
+    const auto duplicate_result = moved.retrySwapchainFrameSlotPresentationCompletion(makeExactFrameSlotOperationRequest(moved));
+    const auto& duplicate_error = requireSwapchainFrameSlotPresentationError(duplicate_result);
+    ensure("a second completion returns no observation and performs no second copy or teardown",
+           duplicate_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::OperationFailure &&
+               duplicate_error.mOperationError &&
+               duplicate_error.mOperationError->mCode == VulkanSwapchainFrameSlotOperationCode::InvalidDisposition &&
+               state.mCopyImageToBufferCalls == 1 && state.mUnmapMemoryCalls == 0 && state.mDestroyBufferCalls == 0 &&
+               state.mFreeMemoryCalls == 0 && moved.resetSwapchainImagesGeneration() && state.mUnmapMemoryCalls == 1 &&
+               state.mDestroyBufferCalls == 1 && state.mFreeMemoryCalls == 1 && moved.reset());
 }
 
 } // namespace tut
