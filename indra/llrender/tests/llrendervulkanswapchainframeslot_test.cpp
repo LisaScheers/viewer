@@ -337,6 +337,8 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice     
     {
         *properties            = {};
         properties->apiVersion = VK_API_VERSION_1_1;
+        properties->limits.maxFramebufferWidth  = 4096;
+        properties->limits.maxFramebufferHeight = 2160;
         std::strncpy(properties->deviceName, "frame-slot-fake", VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1);
     }
 }
@@ -348,7 +350,8 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFormatProperties(VkPhysicalDevic
     if (gFakeState && physical_device == gFakeState->mPhysicalDevice && format == gFakeState->mFormats[0].format && properties)
     {
         *properties                        = {};
-        properties->optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        properties->optimalTilingFeatures =
+            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
     }
 }
 

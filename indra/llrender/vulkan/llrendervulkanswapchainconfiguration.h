@@ -64,7 +64,9 @@ enum class VulkanSwapchainConfigurationResolutionCode : std::uint8_t
     FifoPresentModeUnsupported,
     ScratchAllocationFailure,
     SurfaceTransferDestinationUsageUnsupported,
-    SelectedFormatTransferDestinationUnsupported
+    SelectedFormatTransferDestinationUnsupported,
+    SelectedFormatColorAttachmentUnsupported,
+    SelectedImageExtentExceedsFramebufferLimits
 };
 
 struct VulkanSwapchainConfigurationResolutionError

@@ -534,6 +534,13 @@ VulkanSwapchainConfigurationResolutionResult resolveSwapchainConfiguration(
         return *error;
     }
 
+    const VkExtent2D image_extent = selectExtent(capabilities, drawable_extent);
+    const VkPhysicalDeviceLimits& limits = physical_device_generation.properties().limits;
+    if (image_extent.width > limits.maxFramebufferWidth || image_extent.height > limits.maxFramebufferHeight)
+    {
+        return failure(VulkanSwapchainConfigurationResolutionCode::SelectedImageExtentExceedsFramebufferLimits);
+    }
+
     auto format_result = selectSurfaceFormat(dispatch, physical_device_generation.physicalDevice(), physical_device_generation.surface(),
                                              allocation_checkpoint);
     if (const auto* error = std::get_if<VulkanSwapchainConfigurationResolutionError>(&format_result))
@@ -549,6 +556,11 @@ VulkanSwapchainConfigurationResolutionResult resolveSwapchainConfiguration(
         return failure(VulkanSwapchainConfigurationResolutionCode::SelectedFormatTransferDestinationUnsupported,
                        VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties);
     }
+    if ((format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0)
+    {
+        return failure(VulkanSwapchainConfigurationResolutionCode::SelectedFormatColorAttachmentUnsupported,
+                       VulkanSwapchainConfigurationCommand::GetPhysicalDeviceFormatProperties);
+    }
 
     auto present_mode_result = selectPresentMode(dispatch, physical_device_generation.physicalDevice(),
                                                  physical_device_generation.surface(), allocation_checkpoint);
@@ -559,7 +571,7 @@ VulkanSwapchainConfigurationResolutionResult resolveSwapchainConfiguration(
 
     return VulkanSwapchainConfigurationGenerationFactory::create(
         physical_device_generation, logical_device_generation, drawable_extent, capabilities, selected_format,
-        std::get<VkPresentModeKHR>(present_mode_result), selectImageCount(capabilities), selectExtent(capabilities, drawable_extent),
+        std::get<VkPresentModeKHR>(present_mode_result), selectImageCount(capabilities), image_extent,
         capabilities.currentTransform, selectCompositeAlpha(capabilities.supportedCompositeAlpha));
 }
 

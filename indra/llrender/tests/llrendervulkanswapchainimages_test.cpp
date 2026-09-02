@@ -174,6 +174,8 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice     
     }
     *properties            = {};
     properties->apiVersion = VK_API_VERSION_1_1;
+    properties->limits.maxFramebufferWidth  = 4096;
+    properties->limits.maxFramebufferHeight = 2160;
     std::strncpy(properties->deviceName, "swapchain-images-fake", VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1);
 }
 
@@ -368,7 +370,8 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFormatProperties(VkPhysicalDevic
         return;
     }
     *properties                       = {};
-    properties->optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    properties->optimalTilingFeatures =
+        VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSwapchain(VkDevice device,

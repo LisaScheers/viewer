@@ -84,6 +84,8 @@ struct FakeState
     {
         mPhysicalProperties.apiVersion = VK_API_VERSION_1_1;
         mPhysicalProperties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        mPhysicalProperties.limits.maxFramebufferWidth  = 4096;
+        mPhysicalProperties.limits.maxFramebufferHeight = 2160;
         std::memcpy(mPhysicalProperties.deviceName, "macOS adapter fake", sizeof("macOS adapter fake"));
         mSurfaceCapabilities.minImageCount       = 2;
         mSurfaceCapabilities.maxImageCount       = 3;
@@ -97,7 +99,8 @@ struct FakeState
         mSurfaceCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         mSurfaceCapabilities.supportedUsageFlags =
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        mFormatProperties.optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        mFormatProperties.optimalTilingFeatures =
+            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
     }
 
     std::array<Event, 96> mEvents{};
@@ -200,6 +203,10 @@ struct FakeState
     VkImageUsageFlags          mLastSwapchainUsage         = 0;
     std::size_t                mCreateImageViewCount       = 0;
     std::size_t                mDestroyImageViewCount      = 0;
+    std::size_t                mCreateRenderPassCount      = 0;
+    std::size_t                mDestroyRenderPassCount     = 0;
+    std::size_t                mCreateFramebufferCount     = 0;
+    std::size_t                mDestroyFramebufferCount    = 0;
     std::size_t                mCreateCommandPoolCount     = 0;
     std::size_t                mDestroyCommandPoolCount    = 0;
     std::size_t                mCreateSemaphoreCount       = 0;
@@ -685,6 +692,54 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyImageView(VkDevice device,
     }
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateRenderPass(VkDevice device,
+                                                     const VkRenderPassCreateInfo*,
+                                                     const VkAllocationCallbacks*,
+                                                     VkRenderPass* render_pass) noexcept
+{
+    if (!gState || device != gState->mDevice || !render_pass)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mCreateRenderPassCount;
+    *render_pass = reinterpret_cast<VkRenderPass>(static_cast<std::uintptr_t>(0x80000 + gState->mCreateRenderPassCount));
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyRenderPass(VkDevice device,
+                                                  VkRenderPass render_pass,
+                                                  const VkAllocationCallbacks*) noexcept
+{
+    if (gState && device == gState->mDevice && render_pass != VK_NULL_HANDLE)
+    {
+        ++gState->mDestroyRenderPassCount;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateFramebuffer(VkDevice device,
+                                                      const VkFramebufferCreateInfo*,
+                                                      const VkAllocationCallbacks*,
+                                                      VkFramebuffer* framebuffer) noexcept
+{
+    if (!gState || device != gState->mDevice || !framebuffer)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gState->mCreateFramebufferCount;
+    *framebuffer = reinterpret_cast<VkFramebuffer>(static_cast<std::uintptr_t>(0x81000 + gState->mCreateFramebufferCount));
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyFramebuffer(VkDevice device,
+                                                   VkFramebuffer framebuffer,
+                                                   const VkAllocationCallbacks*) noexcept
+{
+    if (gState && device == gState->mDevice && framebuffer != VK_NULL_HANDLE)
+    {
+        ++gState->mDestroyFramebufferCount;
+    }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateCommandPool(VkDevice device,
                                                      const VkCommandPoolCreateInfo*,
                                                      const VkAllocationCallbacks*,
@@ -938,6 +993,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeGetSwapchainImages);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CreateImageView);
     LL_MACOS_VULKAN_DEVICE_COMMAND(DestroyImageView);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CreateRenderPass);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(DestroyRenderPass);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CreateFramebuffer);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(DestroyFramebuffer);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CreateCommandPool);
     LL_MACOS_VULKAN_DEVICE_COMMAND(DestroyCommandPool);
     LL_MACOS_VULKAN_DEVICE_COMMAND(AllocateCommandBuffers);
@@ -1316,7 +1375,7 @@ bool acquireCompleteSwapchainChain(LLWindowMacOSXVulkan& owner) noexcept
            !owner.acquireSurfaceGeneration() && !owner.acquirePresentationDeviceGeneration() &&
            !owner.acquireLogicalDeviceGeneration() && !owner.acquireSwapchainConfigurationGeneration() &&
            !owner.acquireSwapchainGeneration() && !owner.acquireSwapchainImagesGeneration() &&
-           !owner.acquireSwapchainFrameSlotGeneration();
+           !owner.acquireSwapchainPresentationTargetGeneration() && !owner.acquireSwapchainFrameSlotGeneration();
 }
 
 void failAllocation()
@@ -1363,6 +1422,9 @@ void window_macosx_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainImagesGeneration()),
                                  LLRenderVulkan::VulkanSwapchainImagesAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainImagesGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainPresentationTargetGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainPresentationTargetAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainPresentationTargetGeneration()));
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireSwapchainFrameSlotGeneration()));
@@ -1389,6 +1451,8 @@ void window_macosx_vulkan_object::test<1>()
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().cancelSwapchainFrameSlotPresentation()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotCancellationCompletion()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainFrameSlotGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainPresentationTargetGeneration()), bool>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainPresentationTargetGeneration()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainImagesGeneration()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().resetSwapchainGeneration()));
     static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().reset()), bool>);
@@ -2399,7 +2463,17 @@ void window_macosx_vulkan_object::test<17>()
            full_generation && full_generation->hasSurfaceGeneration() && full_generation->hasPresentationDeviceGeneration() &&
                full_generation->hasLogicalDeviceGeneration() && full_generation->hasSwapchainConfigurationGeneration() &&
                full_generation->hasSwapchainGeneration() && full_generation->hasSwapchainImagesGeneration() &&
+               full_generation->hasSwapchainPresentationTargetGeneration() &&
                full_generation->hasSwapchainFrameSlotGeneration());
+    ensure("the complete fixture publishes one render pass and one framebuffer per swapchain image",
+           full_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               full_generation->swapchainPresentationFramebufferCount() == full_state.mImages.size() &&
+               full_generation->swapchainPresentationFramebuffer(0) != VK_NULL_HANDLE &&
+               full_generation->swapchainPresentationFramebuffer(1) != VK_NULL_HANDLE &&
+               full_generation->swapchainPresentationFramebuffer(2) != VK_NULL_HANDLE &&
+               full_generation->swapchainPresentationFramebuffer(static_cast<std::uint32_t>(full_state.mImages.size())) ==
+                   VK_NULL_HANDLE &&
+               full_state.mCreateRenderPassCount == 1 && full_state.mCreateFramebufferCount == full_state.mImages.size());
     const VkSurfaceKHR    retained_surface         = full_generation->surface();
     const VkPhysicalDevice retained_physical_device = full_generation->physicalDevice();
     const VkDevice         retained_device          = full_generation->logicalDevice();
@@ -2414,18 +2488,25 @@ void window_macosx_vulkan_object::test<17>()
     ensure("zero backing width produces the typed suspended outcome",
            suspended_outcome && *suspended_outcome == VulkanSwapchainChainRebuildOutcome::Suspended &&
                full_owner->drawableWidth() == 0 && full_owner->drawableHeight() == 720);
-    ensure("suspension removes the configuration, swapchain, images, views, and frame slot",
+    ensure("suspension removes the configuration, swapchain, images, presentation targets, and frame slot",
            !full_generation->hasSwapchainConfigurationGeneration() && !full_generation->hasSwapchainGeneration() &&
-               !full_generation->hasSwapchainImagesGeneration() && !full_generation->hasSwapchainFrameSlotGeneration() &&
-               full_generation->swapchain() == VK_NULL_HANDLE && full_generation->resolvedSwapchainImageCount() == 0 &&
+               !full_generation->hasSwapchainImagesGeneration() &&
+               !full_generation->hasSwapchainPresentationTargetGeneration() &&
+               !full_generation->hasSwapchainFrameSlotGeneration() && full_generation->swapchain() == VK_NULL_HANDLE &&
+               full_generation->resolvedSwapchainImageCount() == 0 &&
+               full_generation->swapchainPresentationRenderPass() == VK_NULL_HANDLE &&
+               full_generation->swapchainPresentationFramebufferCount() == 0 &&
+               full_generation->swapchainPresentationFramebuffer(0) == VK_NULL_HANDLE &&
                full_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE);
     ensure("suspension retains the exact surface, selection, logical device, and queue parents",
            full_generation->surface() == retained_surface && full_generation->physicalDevice() == retained_physical_device &&
                full_generation->logicalDevice() == retained_device && full_generation->presentationQueue() == retained_queue);
     ensure("suspension destroys each youngest owned resource exactly once without creating a replacement",
-           full_state.mCreateSwapchainCount == 1 && full_state.mDestroySwapchainCount == 1 &&
+               full_state.mCreateSwapchainCount == 1 && full_state.mDestroySwapchainCount == 1 &&
                full_state.mCreateImageViewCount == full_state.mImages.size() &&
-               full_state.mDestroyImageViewCount == full_state.mImages.size() && full_state.mCreateCommandPoolCount == 1 &&
+               full_state.mDestroyImageViewCount == full_state.mImages.size() && full_state.mCreateRenderPassCount == 1 &&
+               full_state.mDestroyRenderPassCount == 1 && full_state.mCreateFramebufferCount == full_state.mImages.size() &&
+               full_state.mDestroyFramebufferCount == full_state.mImages.size() && full_state.mCreateCommandPoolCount == 1 &&
                full_state.mDestroyCommandPoolCount == 1 && full_state.mCreateSemaphoreCount == 2 &&
                full_state.mDestroySemaphoreCount == 2 && full_state.mCreateFenceCount == 2 && full_state.mDestroyFenceCount == 2);
 
@@ -2434,7 +2515,8 @@ void window_macosx_vulkan_object::test<17>()
     ensure("a repeated zero sample remains stably suspended without extra destruction",
            repeated_suspend_outcome && *repeated_suspend_outcome == VulkanSwapchainChainRebuildOutcome::Suspended &&
                full_state.mCreateSwapchainCount == 1 && full_state.mDestroySwapchainCount == 1 &&
-               full_state.mDestroyImageViewCount == full_state.mImages.size() && full_state.mDestroyCommandPoolCount == 1);
+               full_state.mDestroyImageViewCount == full_state.mImages.size() && full_state.mDestroyRenderPassCount == 1 &&
+               full_state.mDestroyFramebufferCount == full_state.mImages.size() && full_state.mDestroyCommandPoolCount == 1);
 
     full_state.mRefreshScale  = 1.5;
     full_state.mRefreshWidth  = 1600;
@@ -2444,7 +2526,9 @@ void window_macosx_vulkan_object::test<17>()
     ensure("a positive restored extent rebuilds the complete youngest chain",
            restored_outcome && *restored_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
                full_generation->hasSwapchainConfigurationGeneration() && full_generation->hasSwapchainGeneration() &&
-               full_generation->hasSwapchainImagesGeneration() && full_generation->hasSwapchainFrameSlotGeneration() &&
+               full_generation->hasSwapchainImagesGeneration() &&
+               full_generation->hasSwapchainPresentationTargetGeneration() &&
+               full_generation->hasSwapchainFrameSlotGeneration() &&
                full_owner->backingScale() == 1.5 && full_owner->drawableWidth() == 1600 && full_owner->drawableHeight() == 900);
     const VkExtent2D restored_extent = full_generation->swapchainDrawableExtent();
     ensure("restoration authenticates one exact extent and still retains every older parent",
@@ -2452,15 +2536,26 @@ void window_macosx_vulkan_object::test<17>()
                full_generation->surface() == retained_surface && full_generation->physicalDevice() == retained_physical_device &&
                full_generation->logicalDevice() == retained_device && full_generation->presentationQueue() == retained_queue);
     ensure("restoration creates an initial-form swapchain and one complete fresh child set",
-           full_state.mCreateSwapchainCount == 2 && full_state.mLastOldSwapchain == VK_NULL_HANDLE &&
+               full_state.mCreateSwapchainCount == 2 && full_state.mLastOldSwapchain == VK_NULL_HANDLE &&
                full_state.mLastSwapchainExtent.width == 1600 && full_state.mLastSwapchainExtent.height == 900 &&
-               full_state.mCreateImageViewCount == full_state.mImages.size() * 2 && full_state.mCreateCommandPoolCount == 2 &&
-               full_state.mCreateSemaphoreCount == 4 && full_state.mCreateFenceCount == 4);
+               full_state.mCreateImageViewCount == full_state.mImages.size() * 2 &&
+               full_state.mCreateRenderPassCount == 2 && full_state.mDestroyRenderPassCount == 1 &&
+               full_state.mCreateFramebufferCount == full_state.mImages.size() * 2 &&
+               full_state.mDestroyFramebufferCount == full_state.mImages.size() &&
+               full_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               full_generation->swapchainPresentationFramebufferCount() == full_state.mImages.size() &&
+               full_generation->swapchainPresentationFramebuffer(0) != VK_NULL_HANDLE &&
+               full_generation->swapchainPresentationFramebuffer(1) != VK_NULL_HANDLE &&
+               full_generation->swapchainPresentationFramebuffer(2) != VK_NULL_HANDLE &&
+               full_state.mCreateCommandPoolCount == 2 && full_state.mCreateSemaphoreCount == 4 &&
+               full_state.mCreateFenceCount == 4);
 
     full_state.mOwnerDuringDestroy = full_owner;
     ensure("suspend-and-restore fixture teardown succeeds", full_owner->reset());
     ensure("restored teardown releases the second youngest child set exactly once",
            full_state.mDestroySwapchainCount == 2 && full_state.mDestroyImageViewCount == full_state.mImages.size() * 2 &&
+               full_state.mDestroyRenderPassCount == 2 &&
+               full_state.mDestroyFramebufferCount == full_state.mImages.size() * 2 &&
                full_state.mDestroyCommandPoolCount == 2 && full_state.mDestroySemaphoreCount == 4 &&
                full_state.mDestroyFenceCount == 4);
 }
@@ -2559,6 +2654,130 @@ void window_macosx_vulkan_object::test<18>()
     ensure("clear-present adapter fixture teardown succeeds", owner->reset());
     ensure_equals("clear-present teardown preserves one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("clear-present teardown preserves one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_macosx_vulkan_object::test<19>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState   state;
+    ScopedState active(state);
+    auto        result = acquireLLWindowMacOSXVulkan(createInfo(), 191, fakeOperations(state));
+    auto*       owner  = acquiredWindow(result);
+    ensure("presentation-target adapter fixture acquires a native owner", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("presentation-target acquisition requires a live instance before refreshing Cocoa geometry",
+           missing_instance && missing_instance->mCode == VulkanSwapchainPresentationTargetAcquireCode::InstanceNotLive &&
+               state.mRefreshCount == 0);
+
+    ensure("presentation-target adapter fixture acquires an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    const std::size_t refreshes_after_instance = state.mRefreshCount;
+
+    state.mMainThread = false;
+    const auto off_main = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("off-main presentation-target acquisition is stale without refreshing native geometry",
+           off_main && off_main->mCode == VulkanSwapchainPresentationTargetAcquireCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance);
+
+    state.mMainThread      = true;
+    state.mRefreshSucceeds = false;
+    const auto failed_refresh = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("a failed Cocoa geometry refresh maps to a stale presentation-target window",
+           failed_refresh && failed_refresh->mCode == VulkanSwapchainPresentationTargetAcquireCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance + 1);
+
+    state.mRefreshSucceeds = true;
+    state.mRefreshMutation = RefreshMutation::ZeroHeight;
+    const auto invalid_refresh = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("an invalid refreshed backing height maps to a stale presentation-target window",
+           invalid_refresh && invalid_refresh->mCode == VulkanSwapchainPresentationTargetAcquireCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_instance + 2);
+
+    state.mRefreshMutation = RefreshMutation::None;
+    state.mRefreshScale    = 1.5;
+    state.mRefreshWidth    = 1920;
+    state.mRefreshHeight   = 1080;
+    const auto missing_surface = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("current Cocoa backing pixels are forwarded to the presentation-target parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainPresentationTargetAcquireCode::SurfaceNotLive &&
+               state.mRefreshCount == refreshes_after_instance + 3 && owner->drawableWidth() == 1920 &&
+               owner->drawableHeight() == 1080);
+
+    ensure("presentation-target adapter fixture acquires a surface", !owner->acquireSurfaceGeneration());
+    const std::size_t refreshes_after_surface = state.mRefreshCount;
+    const auto        missing_selection       = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("the presentation-target adapter refreshes pixels through the exact surface parent",
+           missing_selection &&
+               missing_selection->mCode == VulkanSwapchainPresentationTargetAcquireCode::PresentationDeviceNotLive &&
+               state.mRefreshCount == refreshes_after_surface + 1 && owner->drawableWidth() == 1920 &&
+               owner->drawableHeight() == 1080);
+
+    ensure("presentation-target adapter fixture acquires the remaining parents through the swapchain",
+           !owner->acquirePresentationDeviceGeneration() && !owner->acquireLogicalDeviceGeneration() &&
+               !owner->acquireSwapchainConfigurationGeneration() && !owner->acquireSwapchainGeneration());
+    const auto missing_images = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("presentation-target acquisition requires the exact swapchain-image parent",
+           missing_images && missing_images->mCode == VulkanSwapchainPresentationTargetAcquireCode::SwapchainImagesNotLive &&
+               state.mCreateRenderPassCount == 0 && state.mCreateFramebufferCount == 0);
+    ensure("presentation-target adapter fixture acquires its swapchain-image parent",
+           !owner->acquireSwapchainImagesGeneration());
+    ensure("presentation-target acquisition succeeds through the authenticated Cocoa adapter",
+           !owner->acquireSwapchainPresentationTargetGeneration());
+
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    const VkRenderPass first_render_pass = instance ? instance->swapchainPresentationRenderPass() : VK_NULL_HANDLE;
+    const VkFramebuffer first_framebuffer = instance ? instance->swapchainPresentationFramebuffer(0) : VK_NULL_HANDLE;
+    ensure("the Cocoa adapter publishes one exact presentation target per swapchain image",
+           instance && instance->hasSwapchainPresentationTargetGeneration() && first_render_pass != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebufferCount() == state.mImages.size() &&
+               first_framebuffer != VK_NULL_HANDLE && instance->swapchainPresentationFramebuffer(1) != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebuffer(2) != VK_NULL_HANDLE &&
+               first_framebuffer != instance->swapchainPresentationFramebuffer(1) &&
+               instance->swapchainPresentationFramebuffer(1) != instance->swapchainPresentationFramebuffer(2) &&
+               instance->swapchainPresentationFramebuffer(static_cast<std::uint32_t>(state.mImages.size())) == VK_NULL_HANDLE &&
+               state.mCreateRenderPassCount == 1 && state.mCreateFramebufferCount == state.mImages.size() &&
+               state.mDestroyRenderPassCount == 0 && state.mDestroyFramebufferCount == 0);
+
+    const auto duplicate = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("duplicate presentation-target acquisition is typed and does not create native resources",
+           duplicate &&
+               duplicate->mCode == VulkanSwapchainPresentationTargetAcquireCode::SwapchainPresentationTargetAlreadyOwned &&
+               state.mCreateRenderPassCount == 1 && state.mCreateFramebufferCount == state.mImages.size());
+
+    ensure("the complete-chain order admits a frame slot after the presentation target",
+           !owner->acquireSwapchainFrameSlotGeneration() && instance->hasSwapchainFrameSlotGeneration());
+    ensure("explicit presentation-target reset retires the younger frame slot and every target handle",
+           owner->resetSwapchainPresentationTargetGeneration() &&
+               !instance->hasSwapchainPresentationTargetGeneration() && !instance->hasSwapchainFrameSlotGeneration() &&
+               instance->swapchainPresentationRenderPass() == VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebufferCount() == 0 &&
+               instance->swapchainPresentationFramebuffer(0) == VK_NULL_HANDLE && state.mDestroyRenderPassCount == 1 &&
+               state.mDestroyFramebufferCount == state.mImages.size());
+    ensure("an unowned presentation target reports no adapter-level reset",
+           !owner->resetSwapchainPresentationTargetGeneration());
+
+    ensure("the retained image parents can acquire a fresh presentation target",
+           !owner->acquireSwapchainPresentationTargetGeneration() &&
+               instance->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance->swapchainPresentationRenderPass() != first_render_pass &&
+               instance->swapchainPresentationFramebufferCount() == state.mImages.size() &&
+               instance->swapchainPresentationFramebuffer(0) != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebuffer(0) != first_framebuffer && state.mCreateRenderPassCount == 2 &&
+               state.mCreateFramebufferCount == state.mImages.size() * 2);
+    ensure("resetting the image parent retires its presentation target first",
+           owner->resetSwapchainImagesGeneration() && !instance->hasSwapchainImagesGeneration() &&
+               !instance->hasSwapchainPresentationTargetGeneration() && instance->swapchainPresentationRenderPass() == VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebufferCount() == 0 && state.mDestroyRenderPassCount == 2 &&
+               state.mDestroyFramebufferCount == state.mImages.size() * 2);
+
+    state.mOwnerDuringDestroy = owner;
+    ensure("presentation-target adapter fixture tears down its retained parents", owner->reset());
+    ensure_equals("presentation-target adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("presentation-target adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
 }
 
 } // namespace tut

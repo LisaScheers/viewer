@@ -482,6 +482,40 @@ LLRenderVulkan::VulkanSwapchainImagesAcquireResult LLWindowSDLVulkan::acquireSwa
     return mInstanceGeneration->acquireSwapchainImagesGeneration(request);
 }
 
+LLRenderVulkan::VulkanSwapchainPresentationTargetAcquireResult
+LLWindowSDLVulkan::acquireSwapchainPresentationTargetGeneration() noexcept
+{
+    using namespace LLRenderVulkan;
+
+    if (!mInstanceGeneration)
+    {
+        return VulkanSwapchainPresentationTargetAcquireError{ VulkanSwapchainPresentationTargetAcquireCode::InstanceNotLive,
+                                                              std::nullopt };
+    }
+    if (!mRequirements || !mWindow || !mOperations.mGetWindowSizeInPixels)
+    {
+        return VulkanSwapchainPresentationTargetAcquireError{ VulkanSwapchainPresentationTargetAcquireCode::StaleWindowGeneration,
+                                                              std::nullopt };
+    }
+
+    int drawable_width  = 0;
+    int drawable_height = 0;
+    if (!mOperations.mGetWindowSizeInPixels(mOperations.mUserdata, mWindow, &drawable_width, &drawable_height) || drawable_width <= 0 ||
+        drawable_height <= 0)
+    {
+        return VulkanSwapchainPresentationTargetAcquireError{ VulkanSwapchainPresentationTargetAcquireCode::InvalidDrawableExtent,
+                                                              std::nullopt };
+    }
+
+    SurfaceAcquireContext                     context{ this, mInstanceGeneration.get(), &mOperations, mWindow };
+    VulkanSwapchainPresentationTargetRequest request;
+    request.mNativeWindowGeneration = mRequirements->nativeWindowGeneration();
+    request.mDrawableExtent         = { static_cast<std::uint32_t>(drawable_width), static_cast<std::uint32_t>(drawable_height) };
+    request.mInstanceOwnerCheck     = { &context, isSurfaceInstanceOwnerCurrent };
+    request.mWindowGenerationCheck  = { &context, isSurfaceWindowGenerationCurrent };
+    return mInstanceGeneration->acquireSwapchainPresentationTargetGeneration(request);
+}
+
 LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult LLWindowSDLVulkan::acquireSwapchainFrameSlotGeneration() noexcept
 {
     using namespace LLRenderVulkan;
@@ -746,6 +780,15 @@ bool LLWindowSDLVulkan::resetSwapchainFrameSlotGeneration() noexcept
         return false;
     }
     return mInstanceGeneration->resetSwapchainFrameSlotGeneration();
+}
+
+bool LLWindowSDLVulkan::resetSwapchainPresentationTargetGeneration() noexcept
+{
+    if (!mInstanceGeneration || !mInstanceGeneration->hasSwapchainPresentationTargetGeneration())
+    {
+        return false;
+    }
+    return mInstanceGeneration->resetSwapchainPresentationTargetGeneration();
 }
 
 bool LLWindowSDLVulkan::resetSwapchainImagesGeneration() noexcept

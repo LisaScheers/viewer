@@ -311,6 +311,25 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("swapchain-image acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("swapchain-image acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    const auto presentation_target_error = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("the exact image-view chain creates one presentation-target generation", !presentation_target_error.has_value());
+    ensure("the instance parent owns one presentation-target generation",
+           instance_generation->hasSwapchainPresentationTargetGeneration());
+    ensure("the real presentation target owns one non-null pass and one framebuffer per image view",
+           instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationFramebufferCount() == resolved_image_count);
+    for (std::uint32_t index = 0; index < resolved_image_count; ++index)
+    {
+        ensure("every real MoltenVK image view has one non-null presentation framebuffer",
+               instance_generation->swapchainPresentationFramebuffer(index) != VK_NULL_HANDLE);
+    }
+    ensure("presentation framebuffer lookup rejects the first out-of-range index",
+           instance_generation->swapchainPresentationFramebuffer(resolved_image_count) == VK_NULL_HANDLE);
+    ensure_equals("presentation-target acquisition emits no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+    ensure("presentation-target acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("presentation-target acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     const auto frame_slot_error = owner->acquireSwapchainFrameSlotGeneration();
     ensure("the exact swapchain-image chain creates one idle frame slot", !frame_slot_error.has_value());
     ensure("the instance parent owns one frame-slot generation", instance_generation->hasSwapchainFrameSlotGeneration());
@@ -378,7 +397,9 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("the current Cocoa owner rebuilds the complete swapchain-dependent chain",
            rebuild_outcome && *rebuild_outcome == LLRenderVulkan::VulkanSwapchainChainRebuildOutcome::Ready &&
                instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
-               instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainFrameSlotGeneration());
+               instance_generation->hasSwapchainImagesGeneration() &&
+               instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->hasSwapchainFrameSlotGeneration());
     const VkExtent2D rebuilt_drawable_extent = instance_generation->swapchainDrawableExtent();
     ensure("the rebuilt configuration authenticates the changed Cocoa backing extent",
            rebuilt_drawable_extent.width == REBUILT_BACKING_WIDTH &&
@@ -394,6 +415,9 @@ void window_vulkan_macos_wsi_object::test<1>()
            resolved_image_count != 0 && instance_generation->swapchain() != VK_NULL_HANDLE &&
                instance_generation->swapchainImage(0) != VK_NULL_HANDLE &&
                instance_generation->swapchainImageView(0) != VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationFramebufferCount() == resolved_image_count &&
+               instance_generation->swapchainPresentationFramebuffer(0) != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameCommandBuffer() != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameImageAvailableSemaphore() != VK_NULL_HANDLE &&
                instance_generation->swapchainFramePresentationReadySemaphore() != VK_NULL_HANDLE &&
@@ -458,6 +482,22 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("frame-slot reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("frame-slot reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    ensure("the native smoke explicitly resets the presentation target before swapchain images",
+           owner->resetSwapchainPresentationTargetGeneration());
+    ensure("explicit presentation-target reset removes its pass and every framebuffer",
+           !instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->swapchainPresentationRenderPass() == VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationFramebufferCount() == 0 &&
+               instance_generation->swapchainPresentationFramebuffer(0) == VK_NULL_HANDLE);
+    ensure("presentation-target reset leaves the exact image, swapchain, configuration, device, and surface parents live",
+           instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() != 0 &&
+               instance_generation->hasSwapchainGeneration() && instance_generation->hasSwapchainConfigurationGeneration() &&
+               instance_generation->hasLogicalDeviceGeneration() && instance_generation->hasSurfaceGeneration());
+    ensure_equals("presentation-target creation and destruction emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+    ensure("presentation-target reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("presentation-target reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     ensure("the native smoke explicitly resets the swapchain images before the swapchain", owner->resetSwapchainImagesGeneration());
     ensure("explicit image reset removes every borrowed image and owned image view",
            !instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() == 0 &&
@@ -501,6 +541,10 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("surface reset leaves no swapchain-image generation",
            !instance_generation->hasSwapchainImagesGeneration() && instance_generation->resolvedSwapchainImageCount() == 0 &&
                instance_generation->swapchainImage(0) == VK_NULL_HANDLE && instance_generation->swapchainImageView(0) == VK_NULL_HANDLE);
+    ensure("surface reset leaves no presentation-target generation",
+           !instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->swapchainPresentationRenderPass() == VK_NULL_HANDLE &&
+               instance_generation->swapchainPresentationFramebufferCount() == 0);
     ensure("surface reset leaves no frame-slot generation or owned frame handle",
            !instance_generation->hasSwapchainFrameSlotGeneration() && instance_generation->swapchainFrameCommandPool() == VK_NULL_HANDLE &&
                instance_generation->swapchainFrameCommandBuffer() == VK_NULL_HANDLE &&
