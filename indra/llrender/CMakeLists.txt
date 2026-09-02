@@ -393,7 +393,7 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
   target_compile_definitions(llrendervulkanswapchainframeslot
       PRIVATE VK_NO_PROTOTYPES)
   target_link_libraries(llrendervulkanswapchainframeslot
-      PUBLIC llrendervulkanswapchainimages)
+      PUBLIC llrendervulkanswapchainpresentationtarget)
   set_target_properties(llrendervulkanswapchainframeslot PROPERTIES FOLDER "Tests")
 
   set_source_files_properties(

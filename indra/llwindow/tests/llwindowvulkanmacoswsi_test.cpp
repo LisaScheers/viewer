@@ -354,34 +354,34 @@ void window_vulkan_macos_wsi_object::test<1>()
     const VkFence     initial_submission_fence         = instance_generation->swapchainFrameSubmissionFence();
     const VkFence     initial_present_completion_fence = instance_generation->swapchainFramePresentCompletionFence();
     const auto initial_first_presentation = owner->acquireClearToPresentSwapchainFrameSlot(INITIAL_CLEAR_ONE);
-    ensure("the initial Metal swapchain submits and presents the first explicit clear cycle",
+    ensure("the initial Metal swapchain submits and presents one legacy transfer-clear cycle",
            presentationCompleted(initial_first_presentation, resolved_image_count) &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                !instance_generation->swapchainFrameAcquiredImageIndex());
-    ensure("the first initial clear cycle retains all four synchronization handles",
+    ensure("the initial transfer-clear cycle retains all four synchronization handles",
            initial_image_available != VK_NULL_HANDLE && initial_presentation_ready != VK_NULL_HANDLE &&
                initial_submission_fence != VK_NULL_HANDLE && initial_present_completion_fence != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameImageAvailableSemaphore() == initial_image_available &&
                instance_generation->swapchainFramePresentationReadySemaphore() == initial_presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == initial_submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == initial_present_completion_fence);
-    ensure("the first initial clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the first initial clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure("the initial transfer-clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the initial transfer-clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
-    const auto initial_second_presentation = owner->acquireClearToPresentSwapchainFrameSlot(INITIAL_CLEAR_TWO);
-    ensure("the initial Metal swapchain submits and presents the second distinctive clear cycle",
+    const auto initial_second_presentation = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(INITIAL_CLEAR_TWO);
+    ensure("the initial Metal swapchain submits and presents one distinctive render-pass clear cycle",
            presentationCompleted(initial_second_presentation, resolved_image_count) &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                !instance_generation->swapchainFrameAcquiredImageIndex());
-    ensure("the second initial clear cycle retains all four synchronization handles",
+    ensure("the initial render-pass clear cycle retains all four synchronization handles",
            instance_generation->swapchainFrameImageAvailableSemaphore() == initial_image_available &&
                instance_generation->swapchainFramePresentationReadySemaphore() == initial_presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == initial_submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == initial_present_completion_fence);
-    ensure_equals("two initial clear-present cycles emit no validation messages",
+    ensure_equals("the initial transfer and render-pass clear cycles emit no validation messages",
                   instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
-    ensure("the second initial clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the second initial clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure("the initial render-pass clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the initial render-pass clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     const VkSurfaceKHR    retained_surface         = instance_generation->surface();
     const VkPhysicalDevice retained_physical_device = instance_generation->physicalDevice();
@@ -433,34 +433,34 @@ void window_vulkan_macos_wsi_object::test<1>()
     const VkFence     submission_fence         = instance_generation->swapchainFrameSubmissionFence();
     const VkFence     present_completion_fence = instance_generation->swapchainFramePresentCompletionFence();
     const auto        first_presentation       = owner->acquireClearToPresentSwapchainFrameSlot(REBUILT_CLEAR_ONE);
-    ensure("the rebuilt Metal swapchain submits and presents the first explicit clear cycle",
+    ensure("the rebuilt Metal swapchain submits and presents one legacy transfer-clear cycle",
            presentationCompleted(first_presentation, resolved_image_count) &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                !instance_generation->swapchainFrameAcquiredImageIndex());
-    ensure("the first rebuilt clear cycle retains all four synchronization handles",
+    ensure("the rebuilt transfer-clear cycle retains all four synchronization handles",
            image_available != VK_NULL_HANDLE && presentation_ready != VK_NULL_HANDLE && submission_fence != VK_NULL_HANDLE &&
                present_completion_fence != VK_NULL_HANDLE &&
                instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
                instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
-    ensure("the first rebuilt clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the first rebuilt clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure("the rebuilt transfer-clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the rebuilt transfer-clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
-    const auto second_presentation = owner->acquireClearToPresentSwapchainFrameSlot(REBUILT_CLEAR_TWO);
-    ensure("the rebuilt Metal swapchain submits and presents the second distinctive clear cycle",
+    const auto second_presentation = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(REBUILT_CLEAR_TWO);
+    ensure("the rebuilt Metal swapchain submits and presents one distinctive render-pass clear cycle",
            presentationCompleted(second_presentation, resolved_image_count) &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                !instance_generation->swapchainFrameAcquiredImageIndex());
-    ensure("the second rebuilt clear cycle retains all four synchronization handles",
+    ensure("the rebuilt render-pass clear cycle retains all four synchronization handles",
            instance_generation->swapchainFrameImageAvailableSemaphore() == image_available &&
                instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
-    ensure_equals("two rebuilt clear-present cycles emit no validation messages",
+    ensure_equals("the rebuilt transfer and render-pass clear cycles emit no validation messages",
                   instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
-    ensure("the second rebuilt clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("the second rebuilt clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure("the rebuilt render-pass clear cycle creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("the rebuilt render-pass clear cycle leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     ensure("the native smoke explicitly resets the frame slot before swapchain images", owner->resetSwapchainFrameSlotGeneration());
     ensure("explicit frame-slot reset removes all six owned handles",

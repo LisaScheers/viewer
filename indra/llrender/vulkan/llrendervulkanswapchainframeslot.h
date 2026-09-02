@@ -28,6 +28,8 @@
 namespace LLRenderVulkan
 {
 
+class VulkanSwapchainPresentationTargetGeneration;
+
 inline constexpr std::uint64_t VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS = 1'000'000'000;
 
 enum class VulkanSwapchainFrameSlotCommand : std::uint8_t
@@ -50,7 +52,9 @@ enum class VulkanSwapchainFrameSlotCommand : std::uint8_t
     CmdPipelineBarrier,
     QueuePresent,
     ReleaseSwapchainImages,
-    CmdClearColorImage
+    CmdClearColorImage,
+    CmdBeginRenderPass,
+    CmdEndRenderPass
 };
 
 enum class VulkanSwapchainFrameSlotResolutionCode : std::uint8_t
@@ -113,7 +117,8 @@ enum class VulkanSwapchainFrameSlotOperationCode : std::uint8_t
     InvalidDisposition,
     AcquiredImageIndexOutOfRange,
     CommandFailure,
-    InvalidClearColor
+    InvalidClearColor,
+    InvalidSwapchainPresentationTargetGeneration
 };
 
 struct VulkanSwapchainFrameClearColor
@@ -165,6 +170,8 @@ using VulkanSwapchainFrameSlotPresentationResult =
 // or destroying this generation while disposition() names acquired or pending
 // work violates the caller contract. Before any other reset or destruction, no
 // operation may still use a fence or semaphore and no image may remain acquired.
+// A presentation target bound for render-pass recording must also outlive this
+// slot and be reset only after the slot.
 class VulkanSwapchainFrameSlotGeneration
 {
 public:
@@ -214,6 +221,13 @@ public:
         const VulkanSwapchainGeneration&              swapchain_generation,
         const VulkanSwapchainImagesGeneration&        images_generation) noexcept;
 
+    VulkanSwapchainFrameSlotOperationResult resolveRenderPassPresentationDispatch(
+        const VulkanLogicalDeviceGeneration&               logical_device_generation,
+        const VulkanSwapchainConfigurationGeneration&      configuration_generation,
+        const VulkanSwapchainGeneration&                   swapchain_generation,
+        const VulkanSwapchainImagesGeneration&             images_generation,
+        const VulkanSwapchainPresentationTargetGeneration& presentation_target_generation) noexcept;
+
     // Acquires one image with VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS,
     // transitions it from undefined to present source, submits, presents, and
     // retires both fences. A post-acquire error retains the exact image and
@@ -221,6 +235,9 @@ public:
     VulkanSwapchainFrameSlotPresentationResult executeAcquireToPresent() noexcept;
     VulkanSwapchainFrameSlotPresentationResult executeAcquireClearToPresent(
         const VulkanSwapchainFrameClearColor& clear_color) noexcept;
+    VulkanSwapchainFrameSlotPresentationResult executeAcquireRenderPassClearToPresent(
+        const VulkanSwapchainPresentationTargetGeneration& presentation_target_generation,
+        const VulkanSwapchainFrameClearColor&               clear_color) noexcept;
     VulkanSwapchainFrameSlotPresentationResult retryPresentation() noexcept;
     VulkanSwapchainFrameSlotPresentationResult retryPresentationCompletion() noexcept;
 
@@ -253,29 +270,43 @@ private:
                                        PFN_vkDestroySemaphore                        destroy_semaphore,
                                        PFN_vkDestroyFence                            destroy_fence) noexcept;
 
+    enum class RecordingMode : std::uint8_t
+    {
+        LayoutOnly,
+        TransferClear,
+        RenderPassClear
+    };
+
     VulkanSwapchainFrameSlotOperationResult resolvePresentationDispatch(
         const VulkanLogicalDeviceGeneration&          logical_device_generation,
         const VulkanSwapchainConfigurationGeneration& configuration_generation,
         const VulkanSwapchainGeneration&              swapchain_generation,
         const VulkanSwapchainImagesGeneration&        images_generation,
-        bool                                           clear_required) noexcept;
+        RecordingMode                                 recording_mode,
+        const VulkanSwapchainPresentationTargetGeneration* presentation_target_generation) noexcept;
     VulkanSwapchainFrameSlotPresentationResult executeAcquireToPresent(
-        const VulkanSwapchainFrameClearColor* clear_color) noexcept;
+        RecordingMode                                     recording_mode,
+        const VulkanSwapchainFrameClearColor*              clear_color,
+        const VulkanSwapchainPresentationTargetGeneration* presentation_target_generation) noexcept;
 
-    PFN_vkGetInstanceProcAddr              mGetInstanceProcAddr = nullptr;
-    VkInstance                             mInstance            = VK_NULL_HANDLE;
-    VkSurfaceKHR                           mSurface             = VK_NULL_HANDLE;
-    VkPhysicalDevice                       mPhysicalDevice      = VK_NULL_HANDLE;
-    std::uint32_t                          mPhysicalDeviceIndex = 0;
-    VkDevice                               mDevice              = VK_NULL_HANDLE;
-    VkQueue                                mQueue               = VK_NULL_HANDLE;
-    std::uint32_t                          mQueueFamilyIndex    = VK_QUEUE_FAMILY_IGNORED;
-    std::uint32_t                          mQueueIndex          = 0;
-    VkExtent2D                             mDrawableExtent{};
-    VkSwapchainKHR                         mSwapchain                           = VK_NULL_HANDLE;
-    VkFormat                               mImageFormat                         = VK_FORMAT_UNDEFINED;
-    std::uint32_t                          mImageCount                          = 0;
-    const VulkanSwapchainImagesGeneration* mImagesGeneration                    = nullptr;
+    const VulkanLogicalDeviceGeneration*              mLogicalDeviceGeneration       = nullptr;
+    const VulkanSwapchainConfigurationGeneration*     mConfigurationGeneration       = nullptr;
+    const VulkanSwapchainGeneration*                  mSwapchainGeneration           = nullptr;
+    PFN_vkGetInstanceProcAddr                         mGetInstanceProcAddr            = nullptr;
+    VkInstance                                        mInstance                       = VK_NULL_HANDLE;
+    VkSurfaceKHR                                      mSurface                        = VK_NULL_HANDLE;
+    VkPhysicalDevice                                  mPhysicalDevice                 = VK_NULL_HANDLE;
+    std::uint32_t                                     mPhysicalDeviceIndex            = 0;
+    VkDevice                                          mDevice                         = VK_NULL_HANDLE;
+    VkQueue                                           mQueue                          = VK_NULL_HANDLE;
+    std::uint32_t                                     mQueueFamilyIndex               = VK_QUEUE_FAMILY_IGNORED;
+    std::uint32_t                                     mQueueIndex                     = 0;
+    VkExtent2D                                        mDrawableExtent{};
+    VkSwapchainKHR                                    mSwapchain                      = VK_NULL_HANDLE;
+    VkFormat                                          mImageFormat                    = VK_FORMAT_UNDEFINED;
+    std::uint32_t                                     mImageCount                     = 0;
+    const VulkanSwapchainImagesGeneration*            mImagesGeneration               = nullptr;
+    const VulkanSwapchainPresentationTargetGeneration* mPresentationTargetGeneration = nullptr;
     VkCommandPool                          mCommandPool                         = VK_NULL_HANDLE;
     VkCommandBuffer                        mCommandBuffer                       = VK_NULL_HANDLE;
     VkSemaphore                            mImageAvailableSemaphore             = VK_NULL_HANDLE;
@@ -294,6 +325,8 @@ private:
     PFN_vkAcquireNextImageKHR              mAcquireNextImage                    = nullptr;
     PFN_vkCmdPipelineBarrier               mCmdPipelineBarrier                  = nullptr;
     PFN_vkCmdClearColorImage               mCmdClearColorImage                  = nullptr;
+    PFN_vkCmdBeginRenderPass               mCmdBeginRenderPass                  = nullptr;
+    PFN_vkCmdEndRenderPass                 mCmdEndRenderPass                    = nullptr;
     PFN_vkQueuePresentKHR                  mQueuePresent                        = nullptr;
     PFN_vkReleaseSwapchainImagesKHR        mReleaseSwapchainImages              = nullptr;
     VulkanSwapchainFrameSlotDisposition    mDisposition                         = VulkanSwapchainFrameSlotDisposition::Reusable;

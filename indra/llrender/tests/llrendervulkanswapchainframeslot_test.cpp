@@ -16,6 +16,7 @@
 #include "linden_common.h"
 
 #include "llrendervulkanswapchainframeslot.h"
+#include "llrendervulkanswapchainpresentationtarget.h"
 #include "lltut.h"
 
 #include <algorithm>
@@ -66,6 +67,8 @@ enum class MissingCommand : std::uint8_t
     AcquireNextImage,
     CmdPipelineBarrier,
     CmdClearColorImage,
+    CmdBeginRenderPass,
+    CmdEndRenderPass,
     QueuePresent,
     ReleaseSwapchainImages
 };
@@ -142,6 +145,15 @@ struct ClearColorRecord
     VkClearColorValue      mColor{};
     std::uint32_t          mRangeCount = 0;
     VkImageSubresourceRange mRange{};
+};
+
+struct RenderPassBeginRecord
+{
+    VkCommandBuffer       mCommandBuffer = VK_NULL_HANDLE;
+    VkRenderPassBeginInfo mInfo{};
+    bool                  mHadClearValues = false;
+    VkClearValue          mClearValue{};
+    VkSubpassContents     mContents = VK_SUBPASS_CONTENTS_MAX_ENUM;
 };
 
 struct PresentRecord
@@ -224,6 +236,7 @@ struct FakeState
     std::size_t           mNextPresentResult = 0;
     std::vector<VkResult> mReleaseResults;
     std::size_t           mNextReleaseResult = 0;
+    VulkanSwapchainPresentationTargetGeneration* mResetPresentationTargetOnAcquire = nullptr;
 
     std::vector<std::string>                 mEvents;
     std::vector<VkDevice>                    mMutationDevices;
@@ -244,10 +257,14 @@ struct FakeState
     std::vector<AcquireRecord>               mAcquires;
     std::vector<BarrierRecord>               mBarriers;
     std::vector<ClearColorRecord>             mClears;
+    std::vector<RenderPassBeginRecord>         mRenderPassBegins;
+    std::vector<VkCommandBuffer>               mEndedRenderPassBuffers;
     std::vector<PresentRecord>               mPresents;
     std::vector<ReleaseRecord>               mReleases;
 
     std::size_t mNextImageView = 0;
+    std::size_t mNextRenderPass = 0;
+    std::size_t mNextFramebuffer = 0;
 
     std::array<VkImage, 3> images() const noexcept
     {
@@ -279,6 +296,8 @@ struct FakeState
         mAcquires.clear();
         mBarriers.clear();
         mClears.clear();
+        mRenderPassBegins.clear();
+        mEndedRenderPassBuffers.clear();
         mPresents.clear();
         mReleases.clear();
         mNextWaitResult = 0;
@@ -286,6 +305,7 @@ struct FakeState
         mNextAcquireResult = 0;
         mNextPresentResult = 0;
         mNextReleaseResult = 0;
+        mResetPresentationTargetOnAcquire = nullptr;
     }
 };
 
@@ -580,6 +600,38 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyImageView(VkDevice, VkImageView, const VkA
 {
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateRenderPass(VkDevice device, const VkRenderPassCreateInfo*,
+                                                     const VkAllocationCallbacks*, VkRenderPass* render_pass) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !render_pass)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *render_pass = fakeHandle<VkRenderPass>(0xa000 + gFakeState->mNextRenderPass * 0x100);
+    ++gFakeState->mNextRenderPass;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyRenderPass(VkDevice, VkRenderPass, const VkAllocationCallbacks*) noexcept
+{
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateFramebuffer(VkDevice device, const VkFramebufferCreateInfo*,
+                                                      const VkAllocationCallbacks*, VkFramebuffer* framebuffer) noexcept
+{
+    if (!gFakeState || device != gFakeState->mDevice || !framebuffer)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *framebuffer = fakeHandle<VkFramebuffer>(0xb000 + gFakeState->mNextFramebuffer * 0x100);
+    ++gFakeState->mNextFramebuffer;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyFramebuffer(VkDevice, VkFramebuffer, const VkAllocationCallbacks*) noexcept
+{
+}
+
 const std::vector<std::string>& expectedDeviceLookups()
 {
     static const std::vector<std::string> names{ "vkCreateCommandPool", "vkDestroyCommandPool", "vkAllocateCommandBuffers",
@@ -610,6 +662,15 @@ const std::vector<std::string>& expectedClearPresentationLookups()
                                                  "vkEndCommandBuffer",   "vkResetFences",        "vkQueueSubmit",
                                                  "vkAcquireNextImageKHR", "vkCmdPipelineBarrier", "vkCmdClearColorImage",
                                                  "vkQueuePresentKHR",     "vkReleaseSwapchainImagesKHR" };
+    return names;
+}
+
+const std::vector<std::string>& expectedRenderPassPresentationLookups()
+{
+    static const std::vector<std::string> names{ "vkWaitForFences",      "vkResetCommandBuffer", "vkBeginCommandBuffer",
+                                                 "vkEndCommandBuffer",   "vkResetFences",        "vkQueueSubmit",
+                                                 "vkAcquireNextImageKHR", "vkCmdPipelineBarrier", "vkCmdBeginRenderPass",
+                                                 "vkCmdEndRenderPass",   "vkQueuePresentKHR",     "vkReleaseSwapchainImagesKHR" };
     return names;
 }
 
@@ -824,7 +885,13 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice device, VkSwapchain
     gFakeState->mAcquires.push_back({ device, swapchain, timeout, semaphore, fence });
     const std::size_t call = gFakeState->mNextAcquireResult++;
     *image_index = call < gFakeState->mAcquireIndices.size() ? gFakeState->mAcquireIndices[call] : 0;
-    return call < gFakeState->mAcquireResults.size() ? gFakeState->mAcquireResults[call] : VK_SUCCESS;
+    const VkResult result = call < gFakeState->mAcquireResults.size() ? gFakeState->mAcquireResults[call] : VK_SUCCESS;
+    if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && gFakeState->mResetPresentationTargetOnAcquire)
+    {
+        gFakeState->mResetPresentationTargetOnAcquire->reset();
+        gFakeState->mResetPresentationTargetOnAcquire = nullptr;
+    }
+    return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer command_buffer, VkPipelineStageFlags source_stage,
@@ -866,6 +933,38 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer             co
         record.mRange = ranges[0];
     }
     gFakeState->mClears.push_back(record);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBeginRenderPass(VkCommandBuffer command_buffer,
+                                                   const VkRenderPassBeginInfo* begin_info,
+                                                   VkSubpassContents contents) noexcept
+{
+    if (!gFakeState || !begin_info)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("begin render pass");
+    RenderPassBeginRecord record;
+    record.mCommandBuffer = command_buffer;
+    record.mInfo          = *begin_info;
+    record.mHadClearValues = begin_info->clearValueCount != 0 && begin_info->pClearValues;
+    if (record.mHadClearValues)
+    {
+        record.mClearValue = begin_info->pClearValues[0];
+    }
+    record.mInfo.pClearValues = nullptr;
+    record.mContents          = contents;
+    gFakeState->mRenderPassBegins.push_back(record);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdEndRenderPass(VkCommandBuffer command_buffer) noexcept
+{
+    if (!gFakeState)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("end render pass");
+    gFakeState->mEndedRenderPassBuffers.push_back(command_buffer);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
@@ -929,6 +1028,14 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeCreateImageView);
     if (std::strcmp(name, "vkDestroyImageView") == 0)
         return eraseFunctionType(fakeDestroyImageView);
+    if (std::strcmp(name, "vkCreateRenderPass") == 0)
+        return eraseFunctionType(fakeCreateRenderPass);
+    if (std::strcmp(name, "vkDestroyRenderPass") == 0)
+        return eraseFunctionType(fakeDestroyRenderPass);
+    if (std::strcmp(name, "vkCreateFramebuffer") == 0)
+        return eraseFunctionType(fakeCreateFramebuffer);
+    if (std::strcmp(name, "vkDestroyFramebuffer") == 0)
+        return eraseFunctionType(fakeDestroyFramebuffer);
 
     gFakeState->mDeviceLookups.emplace_back(name);
     if (std::strcmp(name, "vkCreateCommandPool") == 0)
@@ -964,6 +1071,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return gFakeState->mMissingCommand == MissingCommand::CmdPipelineBarrier ? nullptr : eraseFunctionType(fakeCmdPipelineBarrier);
     if (std::strcmp(name, "vkCmdClearColorImage") == 0)
         return gFakeState->mMissingCommand == MissingCommand::CmdClearColorImage ? nullptr : eraseFunctionType(fakeCmdClearColorImage);
+    if (std::strcmp(name, "vkCmdBeginRenderPass") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::CmdBeginRenderPass ? nullptr : eraseFunctionType(fakeCmdBeginRenderPass);
+    if (std::strcmp(name, "vkCmdEndRenderPass") == 0)
+        return gFakeState->mMissingCommand == MissingCommand::CmdEndRenderPass ? nullptr : eraseFunctionType(fakeCmdEndRenderPass);
     if (std::strcmp(name, "vkQueuePresentKHR") == 0)
         return gFakeState->mMissingCommand == MissingCommand::QueuePresent ? nullptr : eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
@@ -1075,6 +1186,15 @@ VulkanSwapchainFrameSlotResolutionResult resolveSlot(Parents& parents)
     return resolveVulkanSwapchainFrameSlotGeneration(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages);
 }
 
+VulkanSwapchainPresentationTargetGeneration makePresentationTarget(Parents& parents)
+{
+    auto result = resolveVulkanSwapchainPresentationTargetGeneration(parents.mLogical, parents.mConfiguration, parents.mSwapchain,
+                                                                     parents.mImages);
+    tut::ensure("the presentation-target fixture resolves",
+                std::holds_alternative<VulkanSwapchainPresentationTargetGeneration>(result));
+    return std::get<VulkanSwapchainPresentationTargetGeneration>(std::move(result));
+}
+
 void ensureOnlyExactDevice(const FakeState& state)
 {
     tut::ensure("every frame-slot mutation uses the exact logical device",
@@ -1121,6 +1241,15 @@ VulkanSwapchainFrameSlotOperationResult resolveClearPresentation(VulkanSwapchain
     return generation.resolveClearPresentationDispatch(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages);
 }
 
+VulkanSwapchainFrameSlotOperationResult resolveRenderPassPresentation(
+    VulkanSwapchainFrameSlotGeneration&              generation,
+    Parents&                                         parents,
+    const VulkanSwapchainPresentationTargetGeneration& presentation_target)
+{
+    return generation.resolveRenderPassPresentationDispatch(parents.mLogical, parents.mConfiguration, parents.mSwapchain,
+                                                            parents.mImages, presentation_target);
+}
+
 const VulkanSwapchainFrameSlotPresentationSuccess& requirePresentationSuccess(
     const VulkanSwapchainFrameSlotPresentationResult& result)
 {
@@ -1145,7 +1274,7 @@ struct render_vulkan_swapchain_frame_slot_test
 {
 };
 
-using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test>;
+using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test, 35>;
 using render_vulkan_swapchain_frame_slot_object = render_vulkan_swapchain_frame_slot_group::object;
 render_vulkan_swapchain_frame_slot_group render_vulkan_swapchain_frame_slot_tests("render Vulkan swapchain frame slot");
 
@@ -1167,12 +1296,23 @@ void render_vulkan_swapchain_frame_slot_object::test<1>()
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().resolveEmptySubmissionDispatch(
         std::declval<const VulkanLogicalDeviceGeneration&>(), std::declval<const VulkanSwapchainConfigurationGeneration&>(),
         std::declval<const VulkanSwapchainGeneration&>(), std::declval<const VulkanSwapchainImagesGeneration&>())));
+    static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().resolveRenderPassPresentationDispatch(
+        std::declval<const VulkanLogicalDeviceGeneration&>(), std::declval<const VulkanSwapchainConfigurationGeneration&>(),
+        std::declval<const VulkanSwapchainGeneration&>(), std::declval<const VulkanSwapchainImagesGeneration&>(),
+        std::declval<const VulkanSwapchainPresentationTargetGeneration&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeEmptySubmission()));
+    static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeAcquireRenderPassClearToPresent(
+        std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
+        std::declval<const VulkanSwapchainFrameClearColor&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().retryEmptySubmissionCompletion()));
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::ReleaseSwapchainImages) == 17);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdClearColorImage) == 18);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdBeginRenderPass) == 19);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdEndRenderPass) == 20);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::CommandFailure) == 8);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor) == 9);
+    static_assert(static_cast<std::uint8_t>(
+                      VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration) == 10);
 
     const VulkanSwapchainFrameSlotResolutionError value{ VulkanSwapchainFrameSlotResolutionCode::SubmissionFenceCreationFailure,
                                                          VulkanSwapchainFrameSlotCommand::CreateFence, VK_ERROR_OUT_OF_DEVICE_MEMORY };
@@ -2633,8 +2773,8 @@ void render_vulkan_swapchain_frame_slot_object::test<28>()
         const auto& before = state.mBarriers[frame * 2];
         const auto& after  = state.mBarriers[frame * 2 + 1];
         const VkImage image = parents.mImages.image(static_cast<std::uint32_t>(frame + 1));
-        ensure("the first barrier transfers the exact acquired image from undefined to transfer destination",
-               before.mCommandBuffer == generation.commandBuffer() && before.mSourceStage == VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT &&
+        ensure("the first barrier waits in transfer before transitioning the exact acquired image to transfer destination",
+               before.mCommandBuffer == generation.commandBuffer() && before.mSourceStage == VK_PIPELINE_STAGE_TRANSFER_BIT &&
                    before.mDestinationStage == VK_PIPELINE_STAGE_TRANSFER_BIT && before.mDependencyFlags == 0 &&
                    before.mMemoryBarrierCount == 0 && before.mBufferBarrierCount == 0 && before.mImageBarrierCount == 1 &&
                    before.mImageBarrier.sType == VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER && before.mImageBarrier.pNext == nullptr &&
@@ -2678,6 +2818,356 @@ void render_vulkan_swapchain_frame_slot_object::test<28>()
                std::all_of(state.mQueueSubmits.begin(), state.mQueueSubmits.end(), [](const QueueSubmitRecord& record)
                            { return record.mWaitStage == VK_PIPELINE_STAGE_TRANSFER_BIT; }) &&
                state.mPresents.size() == 2 && state.mReleases.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<29>()
+{
+    constexpr std::array cases{
+        std::pair{ MissingCommand::CmdBeginRenderPass, VulkanSwapchainFrameSlotCommand::CmdBeginRenderPass },
+        std::pair{ MissingCommand::CmdEndRenderPass, VulkanSwapchainFrameSlotCommand::CmdEndRenderPass },
+    };
+
+    for (std::size_t index = 0; index < cases.size(); ++index)
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents             = makeParents(state);
+        auto            presentation_target = makePresentationTarget(parents);
+        auto            generation          = takeGeneration(resolveSlot(parents));
+        state.clearFrameRecords();
+        state.mMissingCommand = cases[index].first;
+
+        ensureOperationError(resolveRenderPassPresentation(generation, parents, presentation_target),
+                             VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand,
+                             VulkanSwapchainFrameSlotDisposition::Reusable, cases[index].second);
+        const std::size_t cutoff = index == 0 ? 9 : 10;
+        const auto& expected = expectedRenderPassPresentationLookups();
+        ensure("missing render-pass dispatch stops at the exact command without frame work",
+               state.mInstanceLookups == std::vector<std::string>{ "vkGetDeviceProcAddr" } &&
+                   state.mDeviceLookups == std::vector<std::string>(expected.begin(), expected.begin() + cutoff) &&
+                   state.mEvents.empty() && state.mAcquires.empty());
+
+        const auto unpublished_result = generation.executeAcquireToPresent();
+        const auto& unpublished        = requirePresentationError(unpublished_result);
+        ensure("failed render-pass resolution leaves the base dispatch unpublished",
+               unpublished.mCode == VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand &&
+                   unpublished.mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+                   unpublished.mDisposition == VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("failed render-pass resolution publishes none of the base presentation dispatch",
+               state.mEvents.empty() && state.mAcquires.empty());
+    }
+
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents             = makeParents(state);
+    auto            presentation_target = makePresentationTarget(parents);
+    auto            generation          = takeGeneration(resolveSlot(parents));
+    state.clearFrameRecords();
+    state.mMissingCommand = MissingCommand::CmdClearColorImage;
+    ensureOperationSuccess(resolveRenderPassPresentation(generation, parents, presentation_target),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("render-pass resolution is atomic and never looks up the transfer-clear command",
+           state.mDeviceLookups == expectedRenderPassPresentationLookups() &&
+               std::find(state.mDeviceLookups.begin(), state.mDeviceLookups.end(), "vkCmdClearColorImage") ==
+                   state.mDeviceLookups.end() &&
+               state.mEvents.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<30>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents             = makeParents(state);
+    auto            presentation_target = makePresentationTarget(parents);
+    auto            generation          = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveRenderPassPresentation(generation, parents, presentation_target),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    state.mAcquireResults = { VK_SUCCESS, VK_SUBOPTIMAL_KHR };
+    state.mAcquireIndices = { 0, 2 };
+
+    const VulkanSwapchainFrameClearColor color{ { 0.0625f, 0.25f, 0.75f, 1.0f } };
+    const auto first = requirePresentationSuccess(
+        generation.executeAcquireRenderPassClearToPresent(presentation_target, color));
+    const auto second = requirePresentationSuccess(
+        generation.executeAcquireRenderPassClearToPresent(presentation_target, color));
+    ensure("render-pass clear presentation repeats after complete retirement",
+           first == VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 0 } &&
+               second == VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Suboptimal, 2 } &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
+
+    const std::vector<std::string> one_cycle{ "wait fence",        "acquire image",       "reset buffer",
+                                              "begin buffer",      "pipeline barrier",    "begin render pass",
+                                              "end render pass",   "pipeline barrier",    "end buffer",
+                                              "reset fence",       "queue submit",        "queue present",
+                                              "wait fence" };
+    auto expected_events = one_cycle;
+    expected_events.insert(expected_events.end(), one_cycle.begin(), one_cycle.end());
+    ensure("each render-pass clear uses the exact record, submit, present, and retirement order",
+           state.mEvents == expected_events);
+
+    const std::array<std::uint32_t, 2> image_indices{ 0, 2 };
+    ensure_equals("two render-pass clears record four explicit layout barriers", state.mBarriers.size(), std::size_t{ 4 });
+    ensure_equals("two render-pass clears begin exactly two render passes", state.mRenderPassBegins.size(), std::size_t{ 2 });
+    for (std::size_t frame = 0; frame < image_indices.size(); ++frame)
+    {
+        const std::uint32_t image_index = image_indices[frame];
+        const VkImage      image       = parents.mImages.image(image_index);
+        const auto&        before      = state.mBarriers[frame * 2];
+        const auto&        after       = state.mBarriers[frame * 2 + 1];
+        ensure("the first render-pass barrier admits color-attachment writes on the exact acquired image",
+               before.mCommandBuffer == generation.commandBuffer() &&
+                   before.mSourceStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &&
+                   before.mDestinationStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT && before.mDependencyFlags == 0 &&
+                   before.mMemoryBarrierCount == 0 && before.mBufferBarrierCount == 0 && before.mImageBarrierCount == 1 &&
+                   before.mImageBarrier.sType == VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER && before.mImageBarrier.pNext == nullptr &&
+                   before.mImageBarrier.srcAccessMask == 0 &&
+                   before.mImageBarrier.dstAccessMask == VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT &&
+                   before.mImageBarrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+                   before.mImageBarrier.newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                   before.mImageBarrier.image == image);
+        ensure("the second render-pass barrier publishes the exact color attachment for presentation",
+               after.mCommandBuffer == generation.commandBuffer() &&
+                   after.mSourceStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &&
+                   after.mDestinationStage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT && after.mDependencyFlags == 0 &&
+                   after.mMemoryBarrierCount == 0 && after.mBufferBarrierCount == 0 && after.mImageBarrierCount == 1 &&
+                   after.mImageBarrier.sType == VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER && after.mImageBarrier.pNext == nullptr &&
+                   after.mImageBarrier.srcAccessMask == VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT &&
+                   after.mImageBarrier.dstAccessMask == 0 &&
+                   after.mImageBarrier.oldLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                   after.mImageBarrier.newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR && after.mImageBarrier.image == image);
+        for (const auto* image_barrier : { &before.mImageBarrier, &after.mImageBarrier })
+        {
+            ensure("render-pass barriers cover the one complete color subresource without queue-family transfer",
+                   image_barrier->srcQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED &&
+                       image_barrier->dstQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED &&
+                       image_barrier->subresourceRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+                       image_barrier->subresourceRange.baseMipLevel == 0 &&
+                       image_barrier->subresourceRange.levelCount == 1 &&
+                       image_barrier->subresourceRange.baseArrayLayer == 0 &&
+                       image_barrier->subresourceRange.layerCount == 1);
+        }
+
+        const auto& begin = state.mRenderPassBegins[frame];
+        ensure("render-pass begin deep-copies the exact pass, same-index framebuffer, target extent, and inline contents",
+               begin.mCommandBuffer == generation.commandBuffer() &&
+                   begin.mInfo.sType == VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO && begin.mInfo.pNext == nullptr &&
+                   begin.mInfo.renderPass == presentation_target.renderPass() &&
+                   begin.mInfo.framebuffer == presentation_target.framebuffer(image_index) &&
+                   begin.mInfo.renderArea.offset.x == 0 && begin.mInfo.renderArea.offset.y == 0 &&
+                   begin.mInfo.renderArea.extent.width == presentation_target.imageExtent().width &&
+                   begin.mInfo.renderArea.extent.height == presentation_target.imageExtent().height &&
+                   begin.mInfo.clearValueCount == 1 && begin.mInfo.pClearValues == nullptr && begin.mHadClearValues &&
+                   begin.mContents == VK_SUBPASS_CONTENTS_INLINE);
+        ensure("render-pass begin deep-copies the exact RGBA clear",
+               begin.mClearValue.color.float32[0] == color.mRgba[0] &&
+                   begin.mClearValue.color.float32[1] == color.mRgba[1] &&
+                   begin.mClearValue.color.float32[2] == color.mRgba[2] &&
+                   begin.mClearValue.color.float32[3] == color.mRgba[3]);
+    }
+
+    ensure("render-pass clear ends each exact command buffer without transfer clears",
+           state.mEndedRenderPassBuffers ==
+                   std::vector<VkCommandBuffer>{ generation.commandBuffer(), generation.commandBuffer() } &&
+               state.mClears.empty());
+    ensure("render-pass submissions wait for image availability at color-attachment output",
+           state.mQueueSubmits.size() == 2 &&
+               std::all_of(state.mQueueSubmits.begin(), state.mQueueSubmits.end(), [](const QueueSubmitRecord& record)
+                           { return record.mWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; }) &&
+               state.mPresents.size() == 2 && state.mReleases.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<31>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents       = makeParents(state);
+    auto            first_target  = makePresentationTarget(parents);
+    auto            second_target = makePresentationTarget(parents);
+    auto            generation    = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveRenderPassPresentation(generation, parents, first_target),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    const VulkanSwapchainFrameClearColor color{ { 0.2f, 0.4f, 0.6f, 1.0f } };
+
+    ensureOperationError(resolveRenderPassPresentation(generation, parents, second_target),
+                         VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration,
+                         VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("a second target cannot replace retained target provenance",
+           state.mInstanceLookups.empty() && state.mDeviceLookups.empty() && state.mEvents.empty());
+
+    const auto mismatched = generation.executeAcquireRenderPassClearToPresent(second_target, color);
+    const auto& mismatch_error = requirePresentationError(mismatched);
+    ensure("a distinct valid target is rejected with exact typed provenance before fences or acquire",
+           mismatch_error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration &&
+               !mismatch_error.mCommand && mismatch_error.mResult == VK_SUCCESS &&
+               mismatch_error.mDisposition == VulkanSwapchainFrameSlotDisposition::Reusable && !mismatch_error.mImageIndex &&
+               state.mEvents.empty() && state.mFenceWaits.empty() && state.mAcquires.empty());
+
+    first_target.reset();
+    const auto stale = generation.executeAcquireRenderPassClearToPresent(first_target, color);
+    const auto& stale_error = requirePresentationError(stale);
+    ensure("the retained target is revalidated before every fence wait and acquire",
+           stale_error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration &&
+               stale_error.mDisposition == VulkanSwapchainFrameSlotDisposition::Reusable && state.mEvents.empty() &&
+               state.mFenceWaits.empty() && state.mAcquires.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<32>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents             = makeParents(state);
+    auto            presentation_target = makePresentationTarget(parents);
+    auto            generation          = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveRenderPassPresentation(generation, parents, presentation_target),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    state.mAcquireIndices         = { 1 };
+    state.mEndCommandBufferResult = VK_ERROR_OUT_OF_HOST_MEMORY;
+
+    const VulkanSwapchainFrameClearColor color{ { 0.1f, 0.3f, 0.5f, 1.0f } };
+    const auto operation = generation.executeAcquireRenderPassClearToPresent(presentation_target, color);
+    const auto& error    = requirePresentationError(operation);
+    ensure("a post-acquire recording failure retains the exact acquired-image obligation",
+           error.mCode == VulkanSwapchainFrameSlotOperationCode::CommandFailure &&
+               error.mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
+               error.mResult == VK_ERROR_OUT_OF_HOST_MEMORY &&
+               error.mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired && error.mImageIndex == 1 &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               generation.acquiredImageIndex() == 1 && state.mRenderPassBegins.size() == 1 &&
+               state.mEndedRenderPassBuffers.size() == 1 && state.mQueueSubmits.empty() && state.mPresents.empty());
+
+    state.mEndCommandBufferResult = VK_SUCCESS;
+    ensureOperationSuccess(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("cancellation drains the acquisition semaphore and releases the exact image after render-pass recording failure",
+           state.mQueueSubmits.size() == 1 && state.mQueueSubmits[0].mFence == generation.submissionFence() &&
+               state.mQueueSubmits[0].mWaitSemaphore == generation.imageAvailableSemaphore() &&
+               state.mQueueSubmits[0].mCommandBufferCount == 0 && state.mQueueSubmits[0].mSignalSemaphoreCount == 0 &&
+               state.mReleases.size() == 1 && state.mReleases[0].mImageIndex == 1 &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<33>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents             = makeParents(state);
+    auto            presentation_target = makePresentationTarget(parents);
+    auto            generation          = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveRenderPassPresentation(generation, parents, presentation_target),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    state.mAcquireIndices                   = { 2 };
+    state.mResetPresentationTargetOnAcquire = &presentation_target;
+
+    const VulkanSwapchainFrameClearColor color{ { 0.2f, 0.3f, 0.4f, 1.0f } };
+    const auto operation = generation.executeAcquireRenderPassClearToPresent(presentation_target, color);
+    const auto& error    = requirePresentationError(operation);
+    ensure("post-acquire target invalidation retains the exact acquired image before command recording",
+           error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration &&
+               !error.mCommand && error.mResult == VK_SUCCESS &&
+               error.mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired && error.mImageIndex == 2 &&
+               generation.disposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               generation.acquiredImageIndex() == 2 &&
+               state.mEvents == std::vector<std::string>{ "wait fence", "acquire image" } &&
+               state.mCommandBufferResets.empty() && state.mBarriers.empty() && state.mRenderPassBegins.empty() &&
+               state.mQueueSubmits.empty() && state.mPresents.empty());
+
+    ensureOperationSuccess(generation.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("post-acquire target failure remains safely cancellable through exact semaphore drain and image release",
+           state.mQueueSubmits.size() == 1 && state.mQueueSubmits[0].mFence == generation.submissionFence() &&
+               state.mQueueSubmits[0].mWaitSemaphore == generation.imageAvailableSemaphore() &&
+               state.mQueueSubmits[0].mCommandBufferCount == 0 && state.mReleases.size() == 1 &&
+               state.mReleases[0].mImageIndex == 2 && generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !generation.acquiredImageIndex());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<34>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents = makeParents(state);
+    auto            clones  = makeParents(state);
+    auto clone_target_result = resolveVulkanSwapchainPresentationTargetGeneration(
+        clones.mLogical, clones.mConfiguration, clones.mSwapchain, parents.mImages);
+    ensure("an exact-handle target fixture can be bound to distinct parent objects",
+           std::holds_alternative<VulkanSwapchainPresentationTargetGeneration>(clone_target_result));
+    auto clone_target = std::get<VulkanSwapchainPresentationTargetGeneration>(std::move(clone_target_result));
+    auto generation   = takeGeneration(resolveSlot(parents));
+    state.clearFrameRecords();
+
+    ensure("createdFor authenticates exact parent objects rather than handle-equivalent clones",
+           generation.createdFor(parents.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages) &&
+               !generation.createdFor(clones.mLogical, parents.mConfiguration, parents.mSwapchain, parents.mImages) &&
+               !generation.createdFor(parents.mLogical, clones.mConfiguration, parents.mSwapchain, parents.mImages) &&
+               !generation.createdFor(parents.mLogical, parents.mConfiguration, clones.mSwapchain, parents.mImages));
+
+    ensureOperationError(generation.resolveRenderPassPresentationDispatch(
+                             clones.mLogical, clones.mConfiguration, clones.mSwapchain, parents.mImages, clone_target),
+                         VulkanSwapchainFrameSlotOperationCode::InvalidLogicalDeviceGeneration,
+                         VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensureOperationError(generation.resolveRenderPassPresentationDispatch(
+                             parents.mLogical, clones.mConfiguration, parents.mSwapchain, parents.mImages, clone_target),
+                         VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainConfigurationGeneration,
+                         VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensureOperationError(generation.resolveRenderPassPresentationDispatch(
+                             parents.mLogical, parents.mConfiguration, clones.mSwapchain, parents.mImages, clone_target),
+                         VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainGeneration,
+                         VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("exact-looking clone rejection occurs before dispatch lookup or frame work",
+           state.mInstanceLookups.empty() && state.mDeviceLookups.empty() && state.mEvents.empty() && state.mAcquires.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<35>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents             = makeParents(state);
+    auto            presentation_target = makePresentationTarget(parents);
+    auto            generation          = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveRenderPassPresentation(generation, parents, presentation_target),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    auto moved = std::move(generation);
+    state.clearFrameRecords();
+
+    const VulkanSwapchainFrameClearColor color{ { 0.25f, 0.5f, 0.75f, 1.0f } };
+    const auto source_result = generation.executeAcquireRenderPassClearToPresent(presentation_target, color);
+    ensure("moving a render-bound slot disarms target provenance in the source",
+           requirePresentationError(source_result).mCode ==
+                   VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration &&
+               state.mEvents.empty());
+
+    const VulkanSwapchainFrameClearColor invalid_color{
+        { std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f, 1.0f }
+    };
+    const auto invalid_result = moved.executeAcquireRenderPassClearToPresent(presentation_target, invalid_color);
+    ensure("the render-pass wrapper rejects an invalid clear before every Vulkan frame command",
+           requirePresentationError(invalid_result).mCode == VulkanSwapchainFrameSlotOperationCode::InvalidClearColor &&
+               state.mEvents.empty());
+
+    state.mAcquireIndices = { 1 };
+    const auto success_result = moved.executeAcquireRenderPassClearToPresent(presentation_target, color);
+    const auto& success       = requirePresentationSuccess(success_result);
+    ensure("moving a render-bound slot preserves dispatch and exact target provenance",
+           success == VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1 } &&
+               moved.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !moved.acquiredImageIndex() &&
+               state.mRenderPassBegins.size() == 1 &&
+               state.mRenderPassBegins[0].mInfo.framebuffer == presentation_target.framebuffer(1));
 }
 
 } // namespace tut

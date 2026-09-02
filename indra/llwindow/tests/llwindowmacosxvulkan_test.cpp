@@ -220,6 +220,14 @@ struct FakeState
     std::uint32_t              mAcquiredImageIndex         = 0;
     std::size_t                mPipelineBarrierCount       = 0;
     std::size_t                mClearColorImageCount       = 0;
+    std::size_t                mBeginRenderPassCount       = 0;
+    std::size_t                mEndRenderPassCount         = 0;
+    VkCommandBuffer            mRenderPassCommandBuffer    = VK_NULL_HANDLE;
+    VkRenderPass               mRenderPass                 = VK_NULL_HANDLE;
+    VkFramebuffer              mRenderPassFramebuffer      = VK_NULL_HANDLE;
+    VkRect2D                   mRenderPassArea{};
+    VkClearValue               mRenderPassClear{};
+    VkSubpassContents          mRenderPassContents         = VK_SUBPASS_CONTENTS_MAX_ENUM;
     VkCommandBuffer            mClearCommandBuffer         = VK_NULL_HANDLE;
     VkImage                    mClearedImage               = VK_NULL_HANDLE;
     VkImageLayout              mClearImageLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -881,16 +889,30 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeQueueSubmit(VkQueue             queue,
 {
     if (!gState || queue != gState->mQueue || submit_count != 1 || !submits ||
         fence != gState->mSubmissionFence || submits[0].sType != VK_STRUCTURE_TYPE_SUBMIT_INFO ||
-        submits[0].waitSemaphoreCount != 1 || !submits[0].pWaitSemaphores ||
-        submits[0].pWaitSemaphores[0] != gState->mImageAvailableSemaphore || !submits[0].pWaitDstStageMask ||
         submits[0].commandBufferCount != 1 || !submits[0].pCommandBuffers ||
-        submits[0].pCommandBuffers[0] != gState->mCommandBuffer || submits[0].signalSemaphoreCount != 1 ||
-        !submits[0].pSignalSemaphores || submits[0].pSignalSemaphores[0] != gState->mPresentationReadySemaphore)
+        submits[0].pCommandBuffers[0] != gState->mCommandBuffer)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+
+    const bool empty_submission = submits[0].waitSemaphoreCount == 0 && !submits[0].pWaitSemaphores &&
+                                  !submits[0].pWaitDstStageMask && submits[0].signalSemaphoreCount == 0 &&
+                                  !submits[0].pSignalSemaphores;
+    const bool presentation_submission = submits[0].waitSemaphoreCount == 1 && submits[0].pWaitSemaphores &&
+                                         submits[0].pWaitSemaphores[0] == gState->mImageAvailableSemaphore &&
+                                         submits[0].pWaitDstStageMask && submits[0].signalSemaphoreCount == 1 &&
+                                         submits[0].pSignalSemaphores &&
+                                         submits[0].pSignalSemaphores[0] == gState->mPresentationReadySemaphore;
+    if (!empty_submission && !presentation_submission)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
     ++gState->mQueueSubmitCount;
-    gState->mSubmitWaitStage = submits[0].pWaitDstStageMask[0];
+    if (presentation_submission)
+    {
+        gState->mSubmitWaitStage = submits[0].pWaitDstStageMask[0];
+    }
     return VK_SUCCESS;
 }
 
@@ -944,6 +966,32 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer               
         gState->mClearImageLayout   = image_layout;
         gState->mClearColor         = *color;
         gState->mClearRange         = ranges[0];
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBeginRenderPass(VkCommandBuffer              command_buffer,
+                                                   const VkRenderPassBeginInfo* begin_info,
+                                                   VkSubpassContents            contents) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer && begin_info &&
+        begin_info->sType == VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO && begin_info->clearValueCount == 1 &&
+        begin_info->pClearValues)
+    {
+        ++gState->mBeginRenderPassCount;
+        gState->mRenderPassCommandBuffer = command_buffer;
+        gState->mRenderPass              = begin_info->renderPass;
+        gState->mRenderPassFramebuffer   = begin_info->framebuffer;
+        gState->mRenderPassArea          = begin_info->renderArea;
+        gState->mRenderPassClear         = begin_info->pClearValues[0];
+        gState->mRenderPassContents      = contents;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdEndRenderPass(VkCommandBuffer command_buffer) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer)
+    {
+        ++gState->mEndRenderPassCount;
     }
 }
 
@@ -1014,6 +1062,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeAcquireNextImage);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdPipelineBarrier);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdClearColorImage);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdBeginRenderPass);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdEndRenderPass);
     if (std::strcmp(name, "vkQueuePresentKHR") == 0)
         return eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
@@ -1362,6 +1412,21 @@ const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError* presentation
     return std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result);
 }
 
+bool operationSucceeded(const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult& result,
+                        LLRenderVulkan::VulkanSwapchainFrameSlotDisposition                 disposition) noexcept
+{
+    const auto* success = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(&result);
+    return success && *success == disposition;
+}
+
+bool presentationSucceeded(const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result,
+                           LLRenderVulkan::VulkanSwapchainFrameSlotPresentationOutcome              outcome,
+                           std::uint32_t                                                             image_index) noexcept
+{
+    const auto* success = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>(&result);
+    return success && success->mOutcome == outcome && success->mImageIndex == image_index;
+}
+
 const LLRenderVulkan::VulkanSwapchainChainRebuildError* rebuildError(
     const LLRenderVulkan::VulkanSwapchainChainRebuildResult& result) noexcept
 {
@@ -1445,6 +1510,11 @@ void window_macosx_vulkan_object::test<1>()
                                      std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireClearToPresentSwapchainFrameSlot(
+        std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowMacOSXVulkan&>().acquireRenderPassClearToPresentSwapchainFrameSlot(
+                                     std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().acquireRenderPassClearToPresentSwapchainFrameSlot(
         std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotPresentation()));
     static_assert(noexcept(std::declval<LLWindowMacOSXVulkan&>().retrySwapchainFrameSlotPresentationCompletion()));
@@ -2778,6 +2848,157 @@ void window_macosx_vulkan_object::test<19>()
     ensure("presentation-target adapter fixture tears down its retained parents", owner->reset());
     ensure_equals("presentation-target adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("presentation-target adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_macosx_vulkan_object::test<20>()
+{
+    using namespace LLRenderVulkan;
+
+    constexpr VulkanSwapchainFrameClearColor render_clear{ { 0.1875f, 0.4375f, 0.8125f, 1.0f } };
+
+    FakeState   missing_state;
+    ScopedState active(missing_state);
+    auto        missing_result = acquireLLWindowMacOSXVulkan(createInfo(), 201, fakeOperations(missing_state));
+    auto*       missing_owner  = acquiredWindow(missing_result);
+    ensure("render-pass adapter fixture acquires its native owner", missing_owner != nullptr);
+
+    const auto  missing_instance_result = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* missing_instance        = presentationError(missing_instance_result);
+    ensure("render-pass clear requires a live instance before observing Cocoa geometry",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               missing_state.mRefreshCount == 0 && missing_state.mBeginRenderPassCount == 0);
+
+    ensure("the missing-target fixture acquires every lower frame-slot parent",
+           !missing_owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled,
+                                                      VulkanInstancePortabilityMode::Disabled) &&
+               !missing_owner->acquireSurfaceGeneration() && !missing_owner->acquirePresentationDeviceGeneration() &&
+               !missing_owner->acquireLogicalDeviceGeneration() &&
+               !missing_owner->acquireSwapchainConfigurationGeneration() && !missing_owner->acquireSwapchainGeneration() &&
+               !missing_owner->acquireSwapchainImagesGeneration() && !missing_owner->acquireSwapchainFrameSlotGeneration());
+    const std::size_t missing_target_refreshes = missing_state.mRefreshCount;
+    const auto  missing_target_result = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* missing_target        = presentationError(missing_target_result);
+    ensure("render-pass clear reports the exact missing presentation-target parent after one current identity refresh",
+           missing_target && missing_target->mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationTargetNotLive &&
+               missing_state.mRefreshCount == missing_target_refreshes + 1 && missing_state.mAcquireNextImageCount == 0 &&
+               missing_state.mBeginRenderPassCount == 0 && missing_state.mEndRenderPassCount == 0);
+    ensure("the lower frame-slot path remains independently usable without a presentation target",
+           operationSucceeded(missing_owner->roundTripEmptySwapchainFrameSlot(), VulkanSwapchainFrameSlotDisposition::Reusable) &&
+               missing_state.mBeginRenderPassCount == 0 && missing_state.mEndRenderPassCount == 0);
+    missing_state.mOwnerDuringDestroy = missing_owner;
+    ensure("the missing-target fixture tears down child-first", missing_owner->reset());
+
+    FakeState state;
+    active.use(state);
+    auto  result = acquireLLWindowMacOSXVulkan(createInfo(), 202, fakeOperations(state));
+    auto* owner  = acquiredWindow(result);
+    ensure("render-pass clear fixture acquires a complete authenticated swapchain chain",
+           owner && acquireCompleteSwapchainChain(*owner));
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("render-pass clear fixture retains its exact current Cocoa parent",
+           instance && owner->isGenerationCurrent(202) && instance->nativeWindowGeneration() == 202);
+    const std::size_t refreshes_after_chain = state.mRefreshCount;
+
+    state.mMainThread = false;
+    const auto  off_main_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* off_main        = presentationError(off_main_result);
+    ensure("off-main render-pass clear fails before refreshing or dispatching native work",
+           off_main && off_main->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_chain && state.mAcquireNextImageCount == 0 &&
+               state.mBeginRenderPassCount == 0);
+
+    state.mMainThread      = true;
+    state.mRefreshSucceeds = false;
+    const auto  failed_refresh_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* failed_refresh        = presentationError(failed_refresh_result);
+    ensure("a failed Cocoa refresh is a stale render-pass clear request",
+           failed_refresh && failed_refresh->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_chain + 1 && state.mAcquireNextImageCount == 0 &&
+               state.mBeginRenderPassCount == 0);
+
+    state.mRefreshSucceeds = true;
+    state.mRefreshMutation = RefreshMutation::Layer;
+    const auto  stale_identity_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* stale_identity        = presentationError(stale_identity_result);
+    ensure("a callback-mutated Metal-layer identity is rejected before render-pass dispatch",
+           stale_identity && stale_identity->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
+               state.mRefreshCount == refreshes_after_chain + 2 && state.mAcquireNextImageCount == 0 &&
+               state.mBeginRenderPassCount == 0);
+
+    state.mRefreshMutation = RefreshMutation::None;
+    state.mRefreshWidth    = 0;
+    const auto  zero_extent_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* zero_extent        = presentationError(zero_extent_result);
+    ensure("zero refreshed Cocoa backing pixels fail without replacing the retained geometry",
+           zero_extent && zero_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mRefreshCount == refreshes_after_chain + 3 && owner->drawableWidth() == 1280 &&
+               owner->drawableHeight() == 720 && state.mAcquireNextImageCount == 0 && state.mBeginRenderPassCount == 0);
+
+    state.mRefreshWidth  = 1600;
+    state.mRefreshHeight = 900;
+    const auto  changed_extent_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* changed_extent        = presentationError(changed_extent_result);
+    ensure("render-pass clear forwards changed positive pixels to exact parent authentication",
+           changed_extent && changed_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch &&
+               state.mRefreshCount == refreshes_after_chain + 4 && owner->drawableWidth() == 1600 &&
+               owner->drawableHeight() == 900 && state.mAcquireNextImageCount == 0 && state.mBeginRenderPassCount == 0);
+
+    VulkanSwapchainFrameClearColor invalid_clear = render_clear;
+    invalid_clear.mRgba[0]                       = -0.01f;
+    state.mRefreshWidth                          = 1280;
+    state.mRefreshHeight                         = 720;
+    const auto  invalid_clear_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(invalid_clear);
+    const auto* invalid_clear_error  = presentationError(invalid_clear_result);
+    ensure("render-pass clear preserves the core's typed normalized-color preflight",
+           invalid_clear_error && invalid_clear_error->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor &&
+               !invalid_clear_error->mOperationError && state.mRefreshCount == refreshes_after_chain + 5 &&
+               state.mAcquireNextImageCount == 0 && state.mBeginRenderPassCount == 0);
+
+    state.mAcquiredImageIndex = 2;
+    const VkRenderPass  expected_render_pass = instance->swapchainPresentationRenderPass();
+    const VkFramebuffer expected_framebuffer = instance->swapchainPresentationFramebuffer(2);
+    const VkExtent2D    expected_extent      = instance->swapchainImageExtent();
+    const auto          render_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const VulkanSwapchainFrameSlotPresentationSuccess expected_success{
+        VulkanSwapchainFrameSlotPresentationOutcome::Presented, std::uint32_t{ 2 }
+    };
+    ensure("render-pass clear returns the exact parent success and reusable image disposition",
+           render_result == VulkanSwapchainFrameSlotParentPresentationResult{ expected_success } &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+    ensure("render-pass clear refreshes once and records one balanced pass without a transfer clear",
+           state.mRefreshCount == refreshes_after_chain + 6 && owner->drawableWidth() == 1280 && owner->drawableHeight() == 720 &&
+               state.mAcquireNextImageCount == 1 && state.mPipelineBarrierCount == 2 && state.mBeginRenderPassCount == 1 &&
+               state.mEndRenderPassCount == 1 && state.mClearColorImageCount == 0 && state.mQueueSubmitCount == 1 &&
+               state.mQueuePresentCount == 1 && state.mWaitForFencesCount == 2 &&
+               state.mSubmitWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    ensure("the recorded pass uses the exact acquired framebuffer, full image extent, and inline contents",
+           state.mRenderPassCommandBuffer == state.mCommandBuffer && state.mRenderPass == expected_render_pass &&
+               state.mRenderPassFramebuffer == expected_framebuffer && state.mRenderPassArea.offset.x == 0 &&
+               state.mRenderPassArea.offset.y == 0 && state.mRenderPassArea.extent.width == expected_extent.width &&
+               state.mRenderPassArea.extent.height == expected_extent.height && state.mRenderPassContents == VK_SUBPASS_CONTENTS_INLINE);
+    ensure("the wrapper copies the exact clear value into the render-pass begin record",
+           state.mRenderPassClear.color.float32[0] == render_clear.mRgba[0] &&
+               state.mRenderPassClear.color.float32[1] == render_clear.mRgba[1] &&
+               state.mRenderPassClear.color.float32[2] == render_clear.mRgba[2] &&
+               state.mRenderPassClear.color.float32[3] == render_clear.mRgba[3]);
+
+    constexpr VulkanSwapchainFrameClearColor transfer_clear{ { 0.75f, 0.125f, 0.25f, 1.0f } };
+    state.mAcquiredImageIndex = 1;
+    const auto legacy_result  = owner->acquireClearToPresentSwapchainFrameSlot(transfer_clear);
+    ensure("the legacy transfer-clear wrapper remains independently reusable after a render-pass cycle",
+           presentationSucceeded(legacy_result, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
+               state.mRefreshCount == refreshes_after_chain + 7 && state.mBeginRenderPassCount == 1 &&
+               state.mEndRenderPassCount == 1 && state.mClearColorImageCount == 1 &&
+               state.mClearedImage == state.mImages[1] && state.mClearColor.float32[0] == transfer_clear.mRgba[0] &&
+               state.mSubmitWaitStage == VK_PIPELINE_STAGE_TRANSFER_BIT &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+
+    state.mOwnerDuringDestroy = owner;
+    ensure("the render-pass clear fixture tears down child-first", owner->reset());
 }
 
 } // namespace tut

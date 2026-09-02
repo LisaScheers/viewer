@@ -501,7 +501,8 @@ enum class VulkanSwapchainFrameSlotParentOperationCode : std::uint8_t
     StaleInstanceOwner,
     StaleWindowGeneration,
     OperationFailure,
-    InvalidClearColor
+    InvalidClearColor,
+    SwapchainPresentationTargetNotLive
 };
 
 struct VulkanSwapchainFrameSlotParentOperationError
@@ -697,6 +698,9 @@ public:
     VulkanSwapchainFrameSlotParentPresentationResult acquireToPresentSwapchainFrameSlot(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult acquireClearToPresentSwapchainFrameSlot(
+        const VulkanSwapchainFrameSlotOperationRequest& request,
+        const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
+    VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassClearToPresentSwapchainFrameSlot(
         const VulkanSwapchainFrameSlotOperationRequest& request,
         const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation(

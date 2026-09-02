@@ -14,6 +14,7 @@
  */
 
 #include "llrendervulkanswapchainframeslot.h"
+#include "llrendervulkanswapchainpresentationtarget.h"
 
 #include <algorithm>
 #include <cmath>
@@ -50,10 +51,12 @@ namespace
     struct PresentationDispatch
     {
         EmptySubmissionDispatch       mSubmission;
-        PFN_vkAcquireNextImageKHR      mAcquireNextImage       = nullptr;
-        PFN_vkCmdPipelineBarrier       mCmdPipelineBarrier     = nullptr;
-        PFN_vkCmdClearColorImage       mCmdClearColorImage     = nullptr;
-        PFN_vkQueuePresentKHR          mQueuePresent           = nullptr;
+        PFN_vkAcquireNextImageKHR       mAcquireNextImage       = nullptr;
+        PFN_vkCmdPipelineBarrier        mCmdPipelineBarrier     = nullptr;
+        PFN_vkCmdClearColorImage        mCmdClearColorImage     = nullptr;
+        PFN_vkCmdBeginRenderPass        mCmdBeginRenderPass     = nullptr;
+        PFN_vkCmdEndRenderPass          mCmdEndRenderPass       = nullptr;
+        PFN_vkQueuePresentKHR           mQueuePresent           = nullptr;
         PFN_vkReleaseSwapchainImagesKHR mReleaseSwapchainImages = nullptr;
     };
 
@@ -241,6 +244,9 @@ VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(
     PFN_vkDestroyCommandPool                      destroy_command_pool,
     PFN_vkDestroySemaphore                        destroy_semaphore,
     PFN_vkDestroyFence                            destroy_fence) noexcept :
+    mLogicalDeviceGeneration(&logical_device_generation),
+    mConfigurationGeneration(&configuration_generation),
+    mSwapchainGeneration(&swapchain_generation),
     mGetInstanceProcAddr(logical_device_generation.getInstanceProcAddr()),
     mInstance(logical_device_generation.instance()),
     mSurface(logical_device_generation.surface()),
@@ -273,6 +279,9 @@ VulkanSwapchainFrameSlotGeneration::~VulkanSwapchainFrameSlotGeneration() noexce
 }
 
 VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(VulkanSwapchainFrameSlotGeneration&& other) noexcept :
+    mLogicalDeviceGeneration(std::exchange(other.mLogicalDeviceGeneration, nullptr)),
+    mConfigurationGeneration(std::exchange(other.mConfigurationGeneration, nullptr)),
+    mSwapchainGeneration(std::exchange(other.mSwapchainGeneration, nullptr)),
     mGetInstanceProcAddr(std::exchange(other.mGetInstanceProcAddr, nullptr)),
     mInstance(std::exchange(other.mInstance, VK_NULL_HANDLE)),
     mSurface(std::exchange(other.mSurface, VK_NULL_HANDLE)),
@@ -287,6 +296,7 @@ VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(VulkanSwa
     mImageFormat(std::exchange(other.mImageFormat, VK_FORMAT_UNDEFINED)),
     mImageCount(std::exchange(other.mImageCount, 0)),
     mImagesGeneration(std::exchange(other.mImagesGeneration, nullptr)),
+    mPresentationTargetGeneration(std::exchange(other.mPresentationTargetGeneration, nullptr)),
     mCommandPool(std::exchange(other.mCommandPool, VK_NULL_HANDLE)),
     mCommandBuffer(std::exchange(other.mCommandBuffer, VK_NULL_HANDLE)),
     mImageAvailableSemaphore(std::exchange(other.mImageAvailableSemaphore, VK_NULL_HANDLE)),
@@ -305,6 +315,8 @@ VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(VulkanSwa
     mAcquireNextImage(std::exchange(other.mAcquireNextImage, nullptr)),
     mCmdPipelineBarrier(std::exchange(other.mCmdPipelineBarrier, nullptr)),
     mCmdClearColorImage(std::exchange(other.mCmdClearColorImage, nullptr)),
+    mCmdBeginRenderPass(std::exchange(other.mCmdBeginRenderPass, nullptr)),
+    mCmdEndRenderPass(std::exchange(other.mCmdEndRenderPass, nullptr)),
     mQueuePresent(std::exchange(other.mQueuePresent, nullptr)),
     mReleaseSwapchainImages(std::exchange(other.mReleaseSwapchainImages, nullptr)),
     mDisposition(std::exchange(other.mDisposition, VulkanSwapchainFrameSlotDisposition::Reusable)),
@@ -329,7 +341,9 @@ bool VulkanSwapchainFrameSlotGeneration::createdFor(const VulkanLogicalDeviceGen
     const VkExtent2D drawable_extent = configuration_generation.drawableExtent();
     return mCommandPool != VK_NULL_HANDLE && mCommandBuffer != VK_NULL_HANDLE && mImageAvailableSemaphore != VK_NULL_HANDLE &&
            mPresentationReadySemaphore != VK_NULL_HANDLE && mSubmissionFence != VK_NULL_HANDLE &&
-           mPresentCompletionFence != VK_NULL_HANDLE && mImagesGeneration == &images_generation &&
+           mPresentCompletionFence != VK_NULL_HANDLE && mLogicalDeviceGeneration == &logical_device_generation &&
+           mConfigurationGeneration == &configuration_generation && mSwapchainGeneration == &swapchain_generation &&
+           mImagesGeneration == &images_generation &&
            images_generation.createdFor(logical_device_generation, configuration_generation, swapchain_generation) &&
            mGetInstanceProcAddr == logical_device_generation.getInstanceProcAddr() && mInstance == logical_device_generation.instance() &&
            mSurface == logical_device_generation.surface() && mPhysicalDevice == logical_device_generation.physicalDevice() &&
@@ -346,7 +360,8 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainGeneration&              swapchain_generation,
     const VulkanSwapchainImagesGeneration&        images_generation) noexcept
 {
-    if (!valid(logical_device_generation) || mGetInstanceProcAddr != logical_device_generation.getInstanceProcAddr() ||
+    if (mLogicalDeviceGeneration != &logical_device_generation || !valid(logical_device_generation) ||
+        mGetInstanceProcAddr != logical_device_generation.getInstanceProcAddr() ||
         mInstance != logical_device_generation.instance() || mSurface != logical_device_generation.surface() ||
         mPhysicalDevice != logical_device_generation.physicalDevice() ||
         mPhysicalDeviceIndex != logical_device_generation.physicalDeviceIndex() || mDevice != logical_device_generation.device() ||
@@ -357,12 +372,14 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     }
 
     const VkExtent2D drawable_extent = configuration_generation.drawableExtent();
-    if (!belongsTo(configuration_generation, logical_device_generation) || mDrawableExtent.width != drawable_extent.width ||
+    if (mConfigurationGeneration != &configuration_generation || !belongsTo(configuration_generation, logical_device_generation) ||
+        mDrawableExtent.width != drawable_extent.width ||
         mDrawableExtent.height != drawable_extent.height)
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainConfigurationGeneration, mDisposition);
     }
-    if (!swapchain_generation.createdFor(logical_device_generation, configuration_generation) ||
+    if (mSwapchainGeneration != &swapchain_generation ||
+        !swapchain_generation.createdFor(logical_device_generation, configuration_generation) ||
         mSwapchain != swapchain_generation.swapchain())
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainGeneration, mDisposition);
@@ -446,7 +463,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainImagesGeneration&        images_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       false);
+                                       RecordingMode::LayoutOnly, nullptr);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveClearPresentationDispatch(
@@ -456,7 +473,18 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainImagesGeneration&        images_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       true);
+                                       RecordingMode::TransferClear, nullptr);
+}
+
+VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveRenderPassPresentationDispatch(
+    const VulkanLogicalDeviceGeneration&               logical_device_generation,
+    const VulkanSwapchainConfigurationGeneration&      configuration_generation,
+    const VulkanSwapchainGeneration&                   swapchain_generation,
+    const VulkanSwapchainImagesGeneration&             images_generation,
+    const VulkanSwapchainPresentationTargetGeneration& presentation_target_generation) noexcept
+{
+    return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
+                                       RecordingMode::RenderPassClear, &presentation_target_generation);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolvePresentationDispatch(
@@ -464,9 +492,11 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainConfigurationGeneration& configuration_generation,
     const VulkanSwapchainGeneration&              swapchain_generation,
     const VulkanSwapchainImagesGeneration&        images_generation,
-    bool                                           clear_required) noexcept
+    RecordingMode                                 recording_mode,
+    const VulkanSwapchainPresentationTargetGeneration* presentation_target_generation) noexcept
 {
-    if (!valid(logical_device_generation) || mGetInstanceProcAddr != logical_device_generation.getInstanceProcAddr() ||
+    if (mLogicalDeviceGeneration != &logical_device_generation || !valid(logical_device_generation) ||
+        mGetInstanceProcAddr != logical_device_generation.getInstanceProcAddr() ||
         mInstance != logical_device_generation.instance() || mSurface != logical_device_generation.surface() ||
         mPhysicalDevice != logical_device_generation.physicalDevice() ||
         mPhysicalDeviceIndex != logical_device_generation.physicalDeviceIndex() || mDevice != logical_device_generation.device() ||
@@ -481,12 +511,14 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     }
 
     const VkExtent2D drawable_extent = configuration_generation.drawableExtent();
-    if (!belongsTo(configuration_generation, logical_device_generation) || mDrawableExtent.width != drawable_extent.width ||
+    if (mConfigurationGeneration != &configuration_generation || !belongsTo(configuration_generation, logical_device_generation) ||
+        mDrawableExtent.width != drawable_extent.width ||
         mDrawableExtent.height != drawable_extent.height)
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainConfigurationGeneration, mDisposition);
     }
-    if (!swapchain_generation.createdFor(logical_device_generation, configuration_generation) ||
+    if (mSwapchainGeneration != &swapchain_generation ||
+        !swapchain_generation.createdFor(logical_device_generation, configuration_generation) ||
         mSwapchain != swapchain_generation.swapchain())
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainGeneration, mDisposition);
@@ -498,10 +530,23 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainImagesGeneration, mDisposition);
     }
 
+    if (recording_mode == RecordingMode::RenderPassClear &&
+        (!presentation_target_generation ||
+         !presentation_target_generation->createdFor(logical_device_generation, configuration_generation, swapchain_generation,
+                                                     images_generation) ||
+         (mPresentationTargetGeneration && mPresentationTargetGeneration != presentation_target_generation)))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration, mDisposition);
+    }
+
+    const bool transfer_clear_required = recording_mode == RecordingMode::TransferClear;
+    const bool render_pass_required    = recording_mode == RecordingMode::RenderPassClear;
     const bool dispatch_resolved =
         mWaitForFences && mResetCommandBuffer && mBeginCommandBuffer && mEndCommandBuffer && mResetFences && mQueueSubmit &&
-        mAcquireNextImage && mCmdPipelineBarrier && (!clear_required || mCmdClearColorImage) && mQueuePresent &&
-        mReleaseSwapchainImages;
+        mAcquireNextImage && mCmdPipelineBarrier && (!transfer_clear_required || mCmdClearColorImage) &&
+        (!render_pass_required || (mCmdBeginRenderPass && mCmdEndRenderPass &&
+                                   mPresentationTargetGeneration == presentation_target_generation)) &&
+        mQueuePresent && mReleaseSwapchainImages;
     if (dispatch_resolved)
     {
         return mDisposition;
@@ -573,7 +618,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::CmdPipelineBarrier);
     }
-    if (clear_required)
+    if (transfer_clear_required)
     {
         dispatch.mCmdClearColorImage =
             resolveDevice<PFN_vkCmdClearColorImage>(get_device_proc_addr, mDevice, "vkCmdClearColorImage");
@@ -581,6 +626,23 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
         {
             return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
                                     VulkanSwapchainFrameSlotCommand::CmdClearColorImage);
+        }
+    }
+    if (render_pass_required)
+    {
+        dispatch.mCmdBeginRenderPass =
+            resolveDevice<PFN_vkCmdBeginRenderPass>(get_device_proc_addr, mDevice, "vkCmdBeginRenderPass");
+        if (!dispatch.mCmdBeginRenderPass)
+        {
+            return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                    VulkanSwapchainFrameSlotCommand::CmdBeginRenderPass);
+        }
+        dispatch.mCmdEndRenderPass =
+            resolveDevice<PFN_vkCmdEndRenderPass>(get_device_proc_addr, mDevice, "vkCmdEndRenderPass");
+        if (!dispatch.mCmdEndRenderPass)
+        {
+            return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                    VulkanSwapchainFrameSlotCommand::CmdEndRenderPass);
         }
     }
     dispatch.mQueuePresent = resolveDevice<PFN_vkQueuePresentKHR>(get_device_proc_addr, mDevice, "vkQueuePresentKHR");
@@ -605,9 +667,15 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     mQueueSubmit            = dispatch.mSubmission.mQueueSubmit;
     mAcquireNextImage       = dispatch.mAcquireNextImage;
     mCmdPipelineBarrier     = dispatch.mCmdPipelineBarrier;
-    if (clear_required)
+    if (transfer_clear_required)
     {
         mCmdClearColorImage = dispatch.mCmdClearColorImage;
+    }
+    if (render_pass_required)
+    {
+        mCmdBeginRenderPass             = dispatch.mCmdBeginRenderPass;
+        mCmdEndRenderPass               = dispatch.mCmdEndRenderPass;
+        mPresentationTargetGeneration   = presentation_target_generation;
     }
     mQueuePresent           = dispatch.mQueuePresent;
     mReleaseSwapchainImages = dispatch.mReleaseSwapchainImages;
@@ -767,7 +835,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retr
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireToPresent() noexcept
 {
-    return executeAcquireToPresent(nullptr);
+    return executeAcquireToPresent(RecordingMode::LayoutOnly, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireClearToPresent(
@@ -777,25 +845,52 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor, mDisposition);
     }
-    return executeAcquireToPresent(&clear_color);
+    return executeAcquireToPresent(RecordingMode::TransferClear, &clear_color, nullptr);
+}
+
+VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireRenderPassClearToPresent(
+    const VulkanSwapchainPresentationTargetGeneration& presentation_target_generation,
+    const VulkanSwapchainFrameClearColor&               clear_color) noexcept
+{
+    if (!validClearColor(clear_color))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor, mDisposition);
+    }
+    return executeAcquireToPresent(RecordingMode::RenderPassClear, &clear_color, &presentation_target_generation);
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireToPresent(
-    const VulkanSwapchainFrameClearColor* clear_color) noexcept
+    RecordingMode                                     recording_mode,
+    const VulkanSwapchainFrameClearColor*              clear_color,
+    const VulkanSwapchainPresentationTargetGeneration* presentation_target_generation) noexcept
 {
     if (mDisposition != VulkanSwapchainFrameSlotDisposition::Reusable)
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidDisposition, mDisposition);
     }
 
-    const auto missing_command = [this, clear_color]() -> std::optional<VulkanSwapchainFrameSlotCommand>
+    if (recording_mode == RecordingMode::RenderPassClear &&
+        (!presentation_target_generation || mPresentationTargetGeneration != presentation_target_generation ||
+         !mLogicalDeviceGeneration || !mConfigurationGeneration || !mSwapchainGeneration || !mImagesGeneration ||
+         !presentation_target_generation->createdFor(*mLogicalDeviceGeneration, *mConfigurationGeneration, *mSwapchainGeneration,
+                                                     *mImagesGeneration)))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration, mDisposition);
+    }
+
+    const auto missing_command = [this, recording_mode]() -> std::optional<VulkanSwapchainFrameSlotCommand>
     {
         if (!mWaitForFences) return VulkanSwapchainFrameSlotCommand::WaitForFences;
         if (!mAcquireNextImage) return VulkanSwapchainFrameSlotCommand::AcquireNextImage;
         if (!mResetCommandBuffer) return VulkanSwapchainFrameSlotCommand::ResetCommandBuffer;
         if (!mBeginCommandBuffer) return VulkanSwapchainFrameSlotCommand::BeginCommandBuffer;
         if (!mCmdPipelineBarrier) return VulkanSwapchainFrameSlotCommand::CmdPipelineBarrier;
-        if (clear_color && !mCmdClearColorImage) return VulkanSwapchainFrameSlotCommand::CmdClearColorImage;
+        if (recording_mode == RecordingMode::TransferClear && !mCmdClearColorImage)
+            return VulkanSwapchainFrameSlotCommand::CmdClearColorImage;
+        if (recording_mode == RecordingMode::RenderPassClear && !mCmdBeginRenderPass)
+            return VulkanSwapchainFrameSlotCommand::CmdBeginRenderPass;
+        if (recording_mode == RecordingMode::RenderPassClear && !mCmdEndRenderPass)
+            return VulkanSwapchainFrameSlotCommand::CmdEndRenderPass;
         if (!mEndCommandBuffer) return VulkanSwapchainFrameSlotCommand::EndCommandBuffer;
         if (!mResetFences) return VulkanSwapchainFrameSlotCommand::ResetFences;
         if (!mQueueSubmit) return VulkanSwapchainFrameSlotCommand::QueueSubmit;
@@ -849,6 +944,14 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::AcquiredImageIndexOutOfRange, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::AcquireNextImage, result, image_index);
     }
+    if (recording_mode == RecordingMode::RenderPassClear &&
+        (!presentation_target_generation->createdFor(*mLogicalDeviceGeneration, *mConfigurationGeneration, *mSwapchainGeneration,
+                                                     *mImagesGeneration) ||
+         presentation_target_generation->framebuffer(image_index) == VK_NULL_HANDLE))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration, mDisposition,
+                                std::nullopt, VK_SUCCESS, image_index);
+    }
 
     result = mResetCommandBuffer(mCommandBuffer, 0);
     if (result != VK_SUCCESS)
@@ -877,9 +980,16 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     VkImageMemoryBarrier barrier{};
     barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.srcAccessMask                   = 0;
-    barrier.dstAccessMask                   = clear_color ? VK_ACCESS_TRANSFER_WRITE_BIT : 0;
+    barrier.dstAccessMask                   = recording_mode == RecordingMode::TransferClear
+                                                  ? VK_ACCESS_TRANSFER_WRITE_BIT
+                                                  : recording_mode == RecordingMode::RenderPassClear ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                                                                                                     : 0;
     barrier.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout                       = clear_color ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout                       = recording_mode == RecordingMode::TransferClear
+                                                  ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                                                  : recording_mode == RecordingMode::RenderPassClear
+                                                        ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                        : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
     barrier.image                           = mImagesGeneration->image(image_index);
@@ -888,11 +998,19 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     barrier.subresourceRange.levelCount     = 1;
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount     = 1;
-    mCmdPipelineBarrier(mCommandBuffer, clear_color ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                        clear_color ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0,
-                        nullptr, 1, &barrier);
+    const VkPipelineStageFlags first_stage = recording_mode == RecordingMode::TransferClear
+                                                  ? VK_PIPELINE_STAGE_TRANSFER_BIT
+                                                  : recording_mode == RecordingMode::RenderPassClear
+                                                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                                        : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    const VkPipelineStageFlags first_destination_stage = recording_mode == RecordingMode::TransferClear
+                                                             ? VK_PIPELINE_STAGE_TRANSFER_BIT
+                                                             : recording_mode == RecordingMode::RenderPassClear
+                                                                   ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                                                   : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    mCmdPipelineBarrier(mCommandBuffer, first_stage, first_destination_stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-    if (clear_color)
+    if (recording_mode == RecordingMode::TransferClear)
     {
         VkClearColorValue clear_value{};
         std::copy(clear_color->mRgba.begin(), clear_color->mRgba.end(), clear_value.float32);
@@ -905,6 +1023,28 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         barrier.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         mCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
                             0, nullptr, 1, &barrier);
+    }
+    else if (recording_mode == RecordingMode::RenderPassClear)
+    {
+        VkClearValue clear_value{};
+        std::copy(clear_color->mRgba.begin(), clear_color->mRgba.end(), clear_value.color.float32);
+
+        VkRenderPassBeginInfo render_pass_begin{};
+        render_pass_begin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        render_pass_begin.renderPass        = presentation_target_generation->renderPass();
+        render_pass_begin.framebuffer       = presentation_target_generation->framebuffer(image_index);
+        render_pass_begin.renderArea.extent = presentation_target_generation->imageExtent();
+        render_pass_begin.clearValueCount   = 1;
+        render_pass_begin.pClearValues      = &clear_value;
+        mCmdBeginRenderPass(mCommandBuffer, &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+        mCmdEndRenderPass(mCommandBuffer);
+
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask = 0;
+        barrier.oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        mCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
     }
 
     result = mEndCommandBuffer(mCommandBuffer);
@@ -939,8 +1079,11 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     mSubmissionFenceSignaled        = false;
     mPresentCompletionFenceSignaled = false;
 
-    const VkPipelineStageFlags wait_stage =
-        clear_color ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    const VkPipelineStageFlags wait_stage = recording_mode == RecordingMode::TransferClear
+                                                ? VK_PIPELINE_STAGE_TRANSFER_BIT
+                                                : recording_mode == RecordingMode::RenderPassClear
+                                                      ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                                      : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     VkSubmitInfo submit_info{};
     submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.waitSemaphoreCount   = 1;
@@ -1361,6 +1504,9 @@ void VulkanSwapchainFrameSlotGeneration::reset() noexcept
     mCommandPool   = VK_NULL_HANDLE;
     mCommandBuffer = VK_NULL_HANDLE;
 
+    mLogicalDeviceGeneration             = nullptr;
+    mConfigurationGeneration             = nullptr;
+    mSwapchainGeneration                 = nullptr;
     mGetInstanceProcAddr                 = nullptr;
     mInstance                            = VK_NULL_HANDLE;
     mSurface                             = VK_NULL_HANDLE;
@@ -1375,6 +1521,7 @@ void VulkanSwapchainFrameSlotGeneration::reset() noexcept
     mImageFormat                         = VK_FORMAT_UNDEFINED;
     mImageCount                          = 0;
     mImagesGeneration                    = nullptr;
+    mPresentationTargetGeneration        = nullptr;
     mDestroyCommandPool                  = nullptr;
     mDestroySemaphore                    = nullptr;
     mDestroyFence                        = nullptr;
@@ -1387,6 +1534,8 @@ void VulkanSwapchainFrameSlotGeneration::reset() noexcept
     mAcquireNextImage                    = nullptr;
     mCmdPipelineBarrier                  = nullptr;
     mCmdClearColorImage                  = nullptr;
+    mCmdBeginRenderPass                  = nullptr;
+    mCmdEndRenderPass                    = nullptr;
     mQueuePresent                        = nullptr;
     mReleaseSwapchainImages              = nullptr;
     mDisposition                         = VulkanSwapchainFrameSlotDisposition::Reusable;

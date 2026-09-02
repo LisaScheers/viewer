@@ -169,6 +169,14 @@ struct FakeState
     std::size_t                mAcquireNextImageCalls        = 0;
     std::size_t                mPipelineBarrierCalls         = 0;
     std::size_t                mClearColorImageCalls          = 0;
+    std::size_t                mBeginRenderPassCalls         = 0;
+    std::size_t                mEndRenderPassCalls           = 0;
+    VkCommandBuffer            mRenderPassCommandBuffer      = VK_NULL_HANDLE;
+    VkRenderPass               mRenderPass                   = VK_NULL_HANDLE;
+    VkFramebuffer              mRenderPassFramebuffer        = VK_NULL_HANDLE;
+    VkRect2D                   mRenderPassArea{};
+    VkClearValue               mRenderPassClear{};
+    VkSubpassContents          mRenderPassContents           = VK_SUBPASS_CONTENTS_MAX_ENUM;
     VkCommandBuffer            mClearCommandBuffer            = VK_NULL_HANDLE;
     VkImage                    mClearedImage                  = VK_NULL_HANDLE;
     VkImageLayout              mClearImageLayout             = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -176,6 +184,7 @@ struct FakeState
     VkImageSubresourceRange    mClearRange{};
     std::size_t                mQueuePresentCalls            = 0;
     std::size_t                mReleaseSwapchainImagesCalls  = 0;
+    VkPipelineStageFlags       mSubmitWaitStage              = 0;
     VkResult                   mEndCommandBufferResult       = VK_SUCCESS;
     VkResult                   mAcquireNextImageResult       = VK_SUCCESS;
     std::uint32_t              mAcquiredImageIndex           = 0;
@@ -779,6 +788,10 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeQueueSubmit(VkQueue             queue,
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gVulkanState->mQueueSubmitCalls;
+    if (submits[0].waitSemaphoreCount != 0 && submits[0].pWaitDstStageMask)
+    {
+        gVulkanState->mSubmitWaitStage = submits[0].pWaitDstStageMask[0];
+    }
     return VK_SUCCESS;
 }
 
@@ -811,8 +824,8 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_b
                                                   std::uint32_t               image_barrier_count,
                                                   const VkImageMemoryBarrier* image_barriers) noexcept
 {
-    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && source_stage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT &&
-        destination_stage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT && image_barrier_count == 1 && image_barriers)
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && source_stage != 0 && destination_stage != 0 &&
+        image_barrier_count == 1 && image_barriers)
     {
         ++gVulkanState->mPipelineBarrierCalls;
     }
@@ -833,6 +846,32 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer               
         gVulkanState->mClearImageLayout   = image_layout;
         gVulkanState->mClearColor         = *color;
         gVulkanState->mClearRange         = ranges[0];
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBeginRenderPass(VkCommandBuffer              command_buffer,
+                                                   const VkRenderPassBeginInfo* begin_info,
+                                                   VkSubpassContents            contents) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && begin_info &&
+        begin_info->sType == VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO && begin_info->clearValueCount == 1 &&
+        begin_info->pClearValues)
+    {
+        ++gVulkanState->mBeginRenderPassCalls;
+        gVulkanState->mRenderPassCommandBuffer = command_buffer;
+        gVulkanState->mRenderPass              = begin_info->renderPass;
+        gVulkanState->mRenderPassFramebuffer   = begin_info->framebuffer;
+        gVulkanState->mRenderPassArea          = begin_info->renderArea;
+        gVulkanState->mRenderPassClear         = begin_info->pClearValues[0];
+        gVulkanState->mRenderPassContents      = contents;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdEndRenderPass(VkCommandBuffer command_buffer) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer)
+    {
+        ++gVulkanState->mEndRenderPassCalls;
     }
 }
 
@@ -903,6 +942,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeAcquireNextImage);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdPipelineBarrier);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdClearColorImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdBeginRenderPass);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdEndRenderPass);
     if (std::strcmp(name, "vkQueuePresentKHR") == 0)
         return eraseFunctionType(fakeQueuePresent);
     if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
@@ -1236,6 +1277,11 @@ void window_sdl_vulkan_object::test<1>()
                                      std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireClearToPresentSwapchainFrameSlot(
+        std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireRenderPassClearToPresentSwapchainFrameSlot(
+                                     std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireRenderPassClearToPresentSwapchainFrameSlot(
         std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentation()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentationCompletion()));
@@ -2462,6 +2508,127 @@ void window_sdl_vulkan_object::test<21>()
     ensure("presentation-target adapter fixture tears down its retained parents", owner->reset());
     ensure_equals("presentation-target adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
     ensure_equals("presentation-target adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<22>()
+{
+    using namespace LLRenderVulkan;
+
+    const VulkanSwapchainFrameClearColor render_clear{ { 0.0625f, 0.3125f, 0.6875f, 1.0f } };
+
+    FakeState         missing_state;
+    ScopedVulkanState vulkan_state(missing_state);
+    auto              missing_result = acquireLLWindowSDLVulkan(createInfo(), 191, fakeOperations(missing_state));
+    auto*             missing_owner  = acquiredWindow(missing_result);
+    ensure("render-pass adapter fixture acquires its SDL owner", missing_owner != nullptr);
+
+    const auto  missing_instance_result = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* missing_instance        = presentationError(missing_instance_result);
+    ensure("render-pass clear requires a live instance before sampling SDL pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               missing_state.mDrawableSizeCalls == 0 && missing_state.mBeginRenderPassCalls == 0);
+
+    ensure("the missing-target fixture acquires every lower frame-slot parent",
+           !missing_owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled,
+                                                      VulkanInstancePortabilityMode::Disabled) &&
+               !missing_owner->acquireSurfaceGeneration() && !missing_owner->acquirePresentationDeviceGeneration() &&
+               !missing_owner->acquireLogicalDeviceGeneration() &&
+               !missing_owner->acquireSwapchainConfigurationGeneration() && !missing_owner->acquireSwapchainGeneration() &&
+               !missing_owner->acquireSwapchainImagesGeneration() && !missing_owner->acquireSwapchainFrameSlotGeneration());
+    const std::size_t missing_target_queries = missing_state.mDrawableSizeCalls;
+    const auto  missing_target_result = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* missing_target        = presentationError(missing_target_result);
+    ensure("render-pass clear reports the exact missing presentation-target parent after one fresh pixel sample",
+           missing_target && missing_target->mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationTargetNotLive &&
+               missing_state.mDrawableSizeCalls == missing_target_queries + 1 && missing_state.mAcquireNextImageCalls == 0 &&
+               missing_state.mBeginRenderPassCalls == 0 && missing_state.mEndRenderPassCalls == 0);
+    ensure("the lower frame-slot path remains independently usable without a presentation target",
+           operationSucceeded(missing_owner->roundTripEmptySwapchainFrameSlot(), VulkanSwapchainFrameSlotDisposition::Reusable) &&
+               missing_state.mBeginRenderPassCalls == 0 && missing_state.mEndRenderPassCalls == 0);
+    ensure("the missing-target fixture tears down child-first", missing_owner->reset());
+
+    FakeState state;
+    vulkan_state.use(state);
+    auto  result = acquireLLWindowSDLVulkan(createInfo(), 192, fakeOperations(state));
+    auto* owner  = acquiredWindow(result);
+    ensure("render-pass clear fixture acquires a complete authenticated frame-slot chain",
+           owner && acquireCompleteFrameSlot(*owner));
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("render-pass clear fixture retains its exact current SDL parent",
+           instance && owner->isGenerationCurrent(192) && instance->nativeWindowGeneration() == 192);
+
+    const std::size_t drawable_queries_before_failures = state.mDrawableSizeCalls;
+    state.mDrawableSizeSucceeds                        = false;
+    const auto  failed_query_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* failed_query        = presentationError(failed_query_result);
+    ensure("render-pass clear rejects a failed SDL backing-pixel sample before acquiring an image",
+           failed_query && failed_query->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 1 && state.mAcquireNextImageCalls == 0 &&
+               state.mBeginRenderPassCalls == 0);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = 1600;
+    state.mDrawableHeight       = 900;
+    const auto  changed_extent_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* changed_extent        = presentationError(changed_extent_result);
+    ensure("render-pass clear forwards freshly sampled positive pixels to exact parent authentication",
+           changed_extent && changed_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 2 && state.mAcquireNextImageCalls == 0 &&
+               state.mBeginRenderPassCalls == 0);
+
+    VulkanSwapchainFrameClearColor invalid_clear = render_clear;
+    invalid_clear.mRgba[3]                       = 1.01f;
+    state.mDrawableWidth                         = 1280;
+    state.mDrawableHeight                        = 720;
+    const auto  invalid_clear_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(invalid_clear);
+    const auto* invalid_clear_error  = presentationError(invalid_clear_result);
+    ensure("render-pass clear preserves the core's typed normalized-color preflight",
+           invalid_clear_error && invalid_clear_error->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor &&
+               !invalid_clear_error->mOperationError && state.mDrawableSizeCalls == drawable_queries_before_failures + 3 &&
+               state.mAcquireNextImageCalls == 0 && state.mBeginRenderPassCalls == 0);
+
+    state.mAcquiredImageIndex = 2;
+    const VkRenderPass  expected_render_pass = instance->swapchainPresentationRenderPass();
+    const VkFramebuffer expected_framebuffer = instance->swapchainPresentationFramebuffer(2);
+    const VkExtent2D    expected_extent      = instance->swapchainImageExtent();
+    const auto          render_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const VulkanSwapchainFrameSlotPresentationSuccess expected_success{
+        VulkanSwapchainFrameSlotPresentationOutcome::Presented, std::uint32_t{ 2 }
+    };
+    ensure("render-pass clear returns the exact parent success and reusable image disposition",
+           render_result == VulkanSwapchainFrameSlotParentPresentationResult{ expected_success } &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+    ensure("render-pass clear samples pixels once and records one balanced render pass without a transfer clear",
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 4 && state.mAcquireNextImageCalls == 1 &&
+               state.mPipelineBarrierCalls == 2 && state.mBeginRenderPassCalls == 1 && state.mEndRenderPassCalls == 1 &&
+               state.mClearColorImageCalls == 0 && state.mQueueSubmitCalls == 1 && state.mQueuePresentCalls == 1 &&
+               state.mSubmitWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    ensure("the recorded pass uses the exact acquired framebuffer, full image extent, and inline contents",
+           state.mRenderPassCommandBuffer == state.mCommandBuffer && state.mRenderPass == expected_render_pass &&
+               state.mRenderPassFramebuffer == expected_framebuffer && state.mRenderPassArea.offset.x == 0 &&
+               state.mRenderPassArea.offset.y == 0 && state.mRenderPassArea.extent.width == expected_extent.width &&
+               state.mRenderPassArea.extent.height == expected_extent.height && state.mRenderPassContents == VK_SUBPASS_CONTENTS_INLINE);
+    ensure("the wrapper copies the exact clear value into the render-pass begin record",
+           state.mRenderPassClear.color.float32[0] == render_clear.mRgba[0] &&
+               state.mRenderPassClear.color.float32[1] == render_clear.mRgba[1] &&
+               state.mRenderPassClear.color.float32[2] == render_clear.mRgba[2] &&
+               state.mRenderPassClear.color.float32[3] == render_clear.mRgba[3]);
+
+    const VulkanSwapchainFrameClearColor transfer_clear{ { 0.75f, 0.125f, 0.25f, 1.0f } };
+    state.mAcquiredImageIndex = 1;
+    const auto legacy_result  = owner->acquireClearToPresentSwapchainFrameSlot(transfer_clear);
+    ensure("the legacy transfer-clear wrapper remains independently reusable after a render-pass cycle",
+           presentationSucceeded(legacy_result, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
+               state.mBeginRenderPassCalls == 1 && state.mEndRenderPassCalls == 1 && state.mClearColorImageCalls == 1 &&
+               state.mClearedImage == state.mImages[1] && state.mClearColor.float32[0] == transfer_clear.mRgba[0] &&
+               state.mSubmitWaitStage == VK_PIPELINE_STAGE_TRANSFER_BIT &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+
+    ensure("the render-pass clear fixture tears down child-first", owner->reset());
 }
 
 } // namespace tut
