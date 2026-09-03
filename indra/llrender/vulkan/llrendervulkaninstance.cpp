@@ -124,6 +124,13 @@ namespace
         return { code, resolution_error };
     }
 
+    VulkanTextureUploadDestinationAcquireError textureUploadDestinationFailure(
+        VulkanTextureUploadDestinationAcquireCode                    code,
+        std::optional<VulkanTextureUploadDestinationResolutionError> resolution_error = std::nullopt) noexcept
+    {
+        return { code, resolution_error };
+    }
+
     VulkanUploadDestinationAcquireError uploadDestinationFailure(
         VulkanUploadDestinationAcquireCode                    code,
         std::optional<VulkanUploadDestinationResolutionError> resolution_error = std::nullopt) noexcept
@@ -346,6 +353,40 @@ namespace
         if (!window_current)
         {
             return uploadSourceFailure(VulkanUploadSourceAcquireCode::StaleWindowGeneration);
+        }
+        return std::nullopt;
+    }
+
+    VulkanTextureUploadDestinationAcquireResult textureUploadDestinationFreshness(const VulkanTextureUploadDestinationRequest& request,
+                                                                                  const VulkanInstanceGeneration&              generation,
+                                                                                  const std::uint64_t* ownership_epoch,
+                                                                                  std::uint64_t        expected_epoch) noexcept
+    {
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasTextureUploadDestinationGeneration())
+        {
+            return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::TextureUploadDestinationAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::LogicalDeviceNotLive);
+        }
+        if (!owner_current)
+        {
+            return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::StaleInstanceOwner);
+        }
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasTextureUploadDestinationGeneration())
+        {
+            return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::TextureUploadDestinationAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::LogicalDeviceNotLive);
+        }
+        if (!window_current)
+        {
+            return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::StaleWindowGeneration);
         }
         return std::nullopt;
     }
@@ -958,6 +999,11 @@ struct VulkanInstanceGenerationFactory
                                                                const VulkanUploadSourceRequest&           request,
                                                                VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
 
+    static VulkanTextureUploadDestinationAcquireResult acquireTextureUploadDestination(
+        VulkanInstanceGeneration&                    instance_generation,
+        const VulkanTextureUploadDestinationRequest& request,
+        VulkanInstanceDetail::AllocationCheckpoint   allocation_checkpoint) noexcept;
+
     static VulkanUploadDestinationAcquireResult acquireUploadDestination(
         VulkanInstanceGeneration&                  instance_generation,
         const VulkanUploadDestinationRequest&      request,
@@ -1142,6 +1188,7 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& ot
     mSurfaceGeneration                = std::move(other.mSurfaceGeneration);
     mPresentationDeviceGeneration     = std::move(other.mPresentationDeviceGeneration);
     mLogicalDeviceGeneration          = std::move(other.mLogicalDeviceGeneration);
+    mTextureUploadDestinationGeneration      = std::move(other.mTextureUploadDestinationGeneration);
     mUploadSourceGeneration                  = std::move(other.mUploadSourceGeneration);
     mUploadDestinationGeneration             = std::move(other.mUploadDestinationGeneration);
     mUploadTransferGeneration                = std::move(other.mUploadTransferGeneration);
@@ -1152,6 +1199,7 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& ot
     mSwapchainPresentationPipelineGeneration = std::move(other.mSwapchainPresentationPipelineGeneration);
     mSwapchainReadbackGeneration             = std::move(other.mSwapchainReadbackGeneration);
     mSwapchainFrameSlotGeneration            = std::move(other.mSwapchainFrameSlotGeneration);
+    mTextureUploadDestinationEpoch           = std::exchange(other.mTextureUploadDestinationEpoch, 0);
     mUploadSourceEpoch                       = std::exchange(other.mUploadSourceEpoch, 0);
     mUploadDestinationEpoch                  = std::exchange(other.mUploadDestinationEpoch, 0);
     mUploadTransferEpoch                     = std::exchange(other.mUploadTransferEpoch, 0);
@@ -1349,6 +1397,178 @@ VkMemoryPropertyFlags VulkanInstanceGeneration::uploadSourceMemoryPropertyFlags(
 bool VulkanInstanceGeneration::uploadSourceIsCoherent() const noexcept
 {
     return mUploadSourceGeneration && mUploadSourceGeneration->isCoherent();
+}
+
+bool VulkanInstanceGeneration::hasTextureUploadDestinationGeneration() const noexcept
+{
+    return mTextureUploadDestinationGeneration != nullptr;
+}
+
+LLRenderContract::ImageHandle VulkanInstanceGeneration::textureUploadDestinationResourceHandle() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->resourceHandle() : LLRenderContract::ImageHandle{};
+}
+
+std::uint64_t VulkanInstanceGeneration::textureUploadDestinationExpectedRevision() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->expectedRevision() : 0;
+}
+
+VkExtent3D VulkanInstanceGeneration::textureUploadDestinationResidentExtent() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->residentExtent() : VkExtent3D{};
+}
+
+LLRenderContract::Extent2D VulkanInstanceGeneration::textureUploadDestinationLogicalExtent() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->logicalExtent() : LLRenderContract::Extent2D{};
+}
+
+std::uint32_t VulkanInstanceGeneration::textureUploadDestinationResidentDiscard() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->residentDiscard() : 0;
+}
+
+LLRenderContract::PixelFormat VulkanInstanceGeneration::textureUploadDestinationPixelFormat() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->pixelFormat()
+                                               : LLRenderContract::PixelFormat::RGBA8Unorm;
+}
+
+LLRenderContract::ImageState VulkanInstanceGeneration::textureUploadDestinationInitialState() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->initialState()
+                                               : LLRenderContract::ImageState::Undefined;
+}
+
+VkImageCreateFlags VulkanInstanceGeneration::textureUploadDestinationFlags() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->flags() : 0;
+}
+
+VkImageType VulkanInstanceGeneration::textureUploadDestinationImageType() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->imageType() : VK_IMAGE_TYPE_MAX_ENUM;
+}
+
+VkFormat VulkanInstanceGeneration::textureUploadDestinationFormat() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->format() : VK_FORMAT_UNDEFINED;
+}
+
+std::uint32_t VulkanInstanceGeneration::textureUploadDestinationMipLevels() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->mipLevels() : 0;
+}
+
+std::uint32_t VulkanInstanceGeneration::textureUploadDestinationArrayLayers() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->arrayLayers() : 0;
+}
+
+VkSampleCountFlagBits VulkanInstanceGeneration::textureUploadDestinationSamples() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->samples() : VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM;
+}
+
+VkImageTiling VulkanInstanceGeneration::textureUploadDestinationTiling() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->tiling() : VK_IMAGE_TILING_MAX_ENUM;
+}
+
+VkImageUsageFlags VulkanInstanceGeneration::textureUploadDestinationUsage() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->usage() : 0;
+}
+
+VkSharingMode VulkanInstanceGeneration::textureUploadDestinationSharingMode() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->sharingMode() : VK_SHARING_MODE_MAX_ENUM;
+}
+
+VkImageLayout VulkanInstanceGeneration::textureUploadDestinationInitialLayout() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->initialLayout() : VK_IMAGE_LAYOUT_MAX_ENUM;
+}
+
+VkFormatFeatureFlags VulkanInstanceGeneration::textureUploadDestinationFormatFeatures() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->formatFeatures() : 0;
+}
+
+VkImageFormatProperties VulkanInstanceGeneration::textureUploadDestinationImageFormatProperties() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->imageFormatProperties() : VkImageFormatProperties{};
+}
+
+VkImage VulkanInstanceGeneration::textureUploadDestinationImage() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->image() : VK_NULL_HANDLE;
+}
+
+VkDeviceMemory VulkanInstanceGeneration::textureUploadDestinationMemory() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->memory() : VK_NULL_HANDLE;
+}
+
+VkMemoryRequirements VulkanInstanceGeneration::textureUploadDestinationMemoryRequirements() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->memoryRequirements() : VkMemoryRequirements{};
+}
+
+VkDeviceSize VulkanInstanceGeneration::textureUploadDestinationAllocationSize() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->allocationSize() : 0;
+}
+
+VkDeviceSize VulkanInstanceGeneration::textureUploadDestinationAllocationAlignment() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->allocationAlignment() : 0;
+}
+
+std::uint32_t VulkanInstanceGeneration::textureUploadDestinationCompatibleMemoryTypeBits() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->compatibleMemoryTypeBits() : 0;
+}
+
+std::uint32_t VulkanInstanceGeneration::textureUploadDestinationMemoryTypeIndex() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->memoryTypeIndex() : 0;
+}
+
+VkMemoryPropertyFlags VulkanInstanceGeneration::textureUploadDestinationMemoryPropertyFlags() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->memoryPropertyFlags() : 0;
+}
+
+bool VulkanInstanceGeneration::textureUploadDestinationIsDeviceLocal() const noexcept
+{
+    return mTextureUploadDestinationGeneration && mTextureUploadDestinationGeneration->isDeviceLocal();
+}
+
+bool VulkanInstanceGeneration::textureUploadDestinationPrefersDedicatedAllocation() const noexcept
+{
+    return mTextureUploadDestinationGeneration && mTextureUploadDestinationGeneration->prefersDedicatedAllocation();
+}
+
+bool VulkanInstanceGeneration::textureUploadDestinationRequiresDedicatedAllocation() const noexcept
+{
+    return mTextureUploadDestinationGeneration && mTextureUploadDestinationGeneration->requiresDedicatedAllocation();
+}
+
+VkImageView VulkanInstanceGeneration::textureUploadDestinationImageView() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->imageView() : VK_NULL_HANDLE;
+}
+
+VkImageViewType VulkanInstanceGeneration::textureUploadDestinationImageViewType() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->imageViewType() : VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+}
+
+VkImageSubresourceRange VulkanInstanceGeneration::textureUploadDestinationViewRange() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->viewRange() : VkImageSubresourceRange{};
 }
 
 bool VulkanInstanceGeneration::hasUploadDestinationGeneration() const noexcept
@@ -1762,6 +1982,12 @@ VulkanUploadSourceAcquireResult VulkanInstanceGeneration::acquireUploadSourceGen
     return VulkanInstanceDetail::acquireUploadSource(*this, request, nullptr);
 }
 
+VulkanTextureUploadDestinationAcquireResult VulkanInstanceGeneration::acquireTextureUploadDestinationGeneration(
+    const VulkanTextureUploadDestinationRequest& request) noexcept
+{
+    return VulkanInstanceDetail::acquireTextureUploadDestination(*this, request, nullptr);
+}
+
 VulkanUploadDestinationAcquireResult VulkanInstanceGeneration::acquireUploadDestinationGeneration(
     const VulkanUploadDestinationRequest& request) noexcept
 {
@@ -2104,6 +2330,20 @@ bool VulkanInstanceGeneration::resetUploadSourceGeneration() noexcept
     return true;
 }
 
+bool VulkanInstanceGeneration::resetTextureUploadDestinationGeneration() noexcept
+{
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
+    if (mTextureUploadDestinationGeneration)
+    {
+        mTextureUploadDestinationGeneration.reset();
+        noteTextureUploadDestinationTransition();
+    }
+    return true;
+}
+
 bool VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
 {
     if (mNativeAcquisitionDepth != 0)
@@ -2117,6 +2357,10 @@ bool VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
         return false;
     }
     if (!resetSwapchainConfigurationGeneration())
+    {
+        return false;
+    }
+    if (!resetTextureUploadDestinationGeneration())
     {
         return false;
     }
@@ -2684,6 +2928,250 @@ VulkanUploadSourceAcquireResult VulkanInstanceGenerationFactory::acquireUploadSo
     catch (const std::bad_alloc&)
     {
         return uploadSourceFailure(VulkanUploadSourceAcquireCode::AllocationFailure);
+    }
+}
+
+VulkanTextureUploadDestinationAcquireResult VulkanInstanceGenerationFactory::acquireTextureUploadDestination(
+    VulkanInstanceGeneration&                    instance_generation,
+    const VulkanTextureUploadDestinationRequest& request,
+    VulkanInstanceDetail::AllocationCheckpoint   allocation_checkpoint) noexcept
+{
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::InvalidInstanceOwnerCheck);
+    }
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::InvalidWindowGenerationCheck);
+    }
+    if (request.mNativeWindowGeneration == 0)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::InvalidNativeWindowGeneration);
+    }
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance || !instance_generation.mGlobalDispatch ||
+        !instance_generation.mGlobalDispatch->getInstanceProcAddr() || instance_generation.mNativeWindowGeneration == 0)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::InstanceNotLive);
+    }
+    if (!instance_generation.mSurfaceGeneration || instance_generation.surface() == VK_NULL_HANDLE ||
+        instance_generation.surfaceNativeWindowGeneration() == 0)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::SurfaceNotLive);
+    }
+    if (!instance_generation.mPresentationDeviceGeneration || instance_generation.physicalDevice() == VK_NULL_HANDLE)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::PresentationDeviceNotLive);
+    }
+    if (!instance_generation.mLogicalDeviceGeneration || instance_generation.logicalDevice() == VK_NULL_HANDLE ||
+        instance_generation.presentationQueue() == VK_NULL_HANDLE)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::LogicalDeviceNotLive);
+    }
+    if (instance_generation.mTextureUploadDestinationGeneration)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::TextureUploadDestinationAlreadyOwned);
+    }
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+        request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::NativeWindowGenerationMismatch);
+    }
+
+    const VulkanTextureUploadDestinationDescription description               = request.mDescription;
+    const std::uint64_t                             ownership_epoch           = instance_generation.mOwnershipTransitionEpoch;
+    const std::uint64_t                             texture_destination_epoch = instance_generation.mTextureUploadDestinationEpoch;
+    const VulkanGlobalDispatchGeneration*           global_dispatch           = &*instance_generation.mGlobalDispatch;
+    const PFN_vkGetInstanceProcAddr                 get_instance_proc_addr    = global_dispatch->getInstanceProcAddr();
+    const VkInstance                                instance                  = instance_generation.mInstance;
+    const std::uint64_t                             native_window_generation  = instance_generation.mNativeWindowGeneration;
+    const auto*                                     surface_generation        = instance_generation.mSurfaceGeneration.get();
+    const std::uint64_t                             surface_window_generation = instance_generation.surfaceNativeWindowGeneration();
+    const VkSurfaceKHR                              surface                   = instance_generation.surface();
+    const VulkanPhysicalDeviceGeneration*           selection                 = instance_generation.mPresentationDeviceGeneration.get();
+    const VulkanLogicalDeviceGeneration*            logical_device            = instance_generation.mLogicalDeviceGeneration.get();
+    const VkPhysicalDevice                          physical_device           = selection->physicalDevice();
+    const std::uint32_t                             physical_index            = selection->physicalDeviceIndex();
+    const VkDevice                                  device                    = logical_device->device();
+    const VkQueue                                   queue                     = logical_device->queue();
+    const std::uint32_t                             queue_family              = logical_device->queueFamilyIndex();
+    const std::uint32_t                             queue_index               = logical_device->queueIndex();
+
+    const auto exact_parent_chain = [&]() noexcept
+    {
+        return instance_generation.mOwnershipTransitionEpoch == ownership_epoch &&
+               instance_generation.mTextureUploadDestinationEpoch == texture_destination_epoch && instance_generation.mGlobalDispatch &&
+               &*instance_generation.mGlobalDispatch == global_dispatch &&
+               instance_generation.mGlobalDispatch->getInstanceProcAddr() == get_instance_proc_addr &&
+               instance_generation.mInstance == instance && instance_generation.mDestroyInstance &&
+               instance_generation.mNativeWindowGeneration == native_window_generation &&
+               native_window_generation == request.mNativeWindowGeneration &&
+               instance_generation.mSurfaceGeneration.get() == surface_generation && surface_generation &&
+               surface_generation->nativeWindowGeneration() == surface_window_generation &&
+               surface_window_generation == request.mNativeWindowGeneration && surface_generation->surface() == surface &&
+               instance_generation.mPresentationDeviceGeneration.get() == selection && selection &&
+               selection->getInstanceProcAddr() == get_instance_proc_addr && selection->instance() == instance &&
+               selection->surface() == surface && selection->physicalDevice() == physical_device &&
+               selection->physicalDeviceIndex() == physical_index && selection->selectedFor(instance, surface) &&
+               instance_generation.mLogicalDeviceGeneration.get() == logical_device && logical_device &&
+               logical_device->getInstanceProcAddr() == get_instance_proc_addr && logical_device->instance() == instance &&
+               logical_device->surface() == surface && logical_device->physicalDevice() == physical_device &&
+               logical_device->physicalDeviceIndex() == physical_index && logical_device->device() == device &&
+               logical_device->queue() == queue && logical_device->queueFamilyIndex() == queue_family &&
+               logical_device->queueIndex() == queue_index && logical_device->createdFor(*selection) && request.mDescription == description;
+    };
+    const auto freshness_check = [&]() noexcept -> VulkanTextureUploadDestinationAcquireResult
+    {
+        if (VulkanTextureUploadDestinationAcquireResult freshness = textureUploadDestinationFreshness(
+                request, instance_generation, &instance_generation.mOwnershipTransitionEpoch, ownership_epoch))
+        {
+            return freshness;
+        }
+        if (!exact_parent_chain())
+        {
+            return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::LogicalDeviceNotLive);
+        }
+        return std::nullopt;
+    };
+
+    if (VulkanTextureUploadDestinationAcquireResult freshness = freshness_check())
+    {
+        return freshness;
+    }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
+
+    VulkanTextureUploadDestinationResolutionResult resolution_result =
+        resolveVulkanTextureUploadDestinationGeneration(*selection, *logical_device, description);
+    if (const auto* error = std::get_if<VulkanTextureUploadDestinationResolutionError>(&resolution_result))
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::ResolutionFailure, *error);
+    }
+
+    const auto&                         resolved                = std::get<VulkanTextureUploadDestinationGeneration>(resolution_result);
+    const LLRenderContract::ImageHandle resource_handle         = resolved.resourceHandle();
+    const std::uint64_t                 expected_revision       = resolved.expectedRevision();
+    const VkExtent3D                    resident_extent         = resolved.residentExtent();
+    const LLRenderContract::Extent2D    logical_extent          = resolved.logicalExtent();
+    const std::uint32_t                 resident_discard        = resolved.residentDiscard();
+    const LLRenderContract::PixelFormat pixel_format            = resolved.pixelFormat();
+    const LLRenderContract::ImageState  initial_state           = resolved.initialState();
+    const VkImageCreateFlags            image_flags             = resolved.flags();
+    const VkImageType                   image_type              = resolved.imageType();
+    const VkFormat                      image_format            = resolved.format();
+    const std::uint32_t                 mip_levels              = resolved.mipLevels();
+    const std::uint32_t                 array_layers            = resolved.arrayLayers();
+    const VkSampleCountFlagBits         samples                 = resolved.samples();
+    const VkImageTiling                 tiling                  = resolved.tiling();
+    const VkImageUsageFlags             usage                   = resolved.usage();
+    const VkSharingMode                 sharing_mode            = resolved.sharingMode();
+    const VkImageLayout                 initial_layout          = resolved.initialLayout();
+    const VkFormatFeatureFlags          format_features         = resolved.formatFeatures();
+    const VkImageFormatProperties       image_format_properties = resolved.imageFormatProperties();
+    const VkImage                       image                   = resolved.image();
+    const VkDeviceMemory                memory                  = resolved.memory();
+    const VkMemoryRequirements          memory_requirements     = resolved.memoryRequirements();
+    const VkDeviceSize                  allocation_size         = resolved.allocationSize();
+    const VkDeviceSize                  allocation_alignment    = resolved.allocationAlignment();
+    const std::uint32_t                 compatible_memory_bits  = resolved.compatibleMemoryTypeBits();
+    const std::uint32_t                 memory_type_index       = resolved.memoryTypeIndex();
+    const VkMemoryPropertyFlags         memory_property_flags   = resolved.memoryPropertyFlags();
+    const bool                          device_local            = resolved.isDeviceLocal();
+    const bool                          prefers_dedicated       = resolved.prefersDedicatedAllocation();
+    const bool                          requires_dedicated      = resolved.requiresDedicatedAllocation();
+    const VkImageView                   image_view              = resolved.imageView();
+    const VkImageViewType               image_view_type         = resolved.imageViewType();
+    const VkImageSubresourceRange       view_range              = resolved.viewRange();
+
+    const auto exact_candidate = [&](const VulkanTextureUploadDestinationGeneration& candidate) noexcept
+    {
+        const VkExtent3D                 candidate_resident_extent     = candidate.residentExtent();
+        const LLRenderContract::Extent2D candidate_logical_extent      = candidate.logicalExtent();
+        const VkImageFormatProperties&   candidate_format_properties   = candidate.imageFormatProperties();
+        const VkMemoryRequirements&      candidate_memory_requirements = candidate.memoryRequirements();
+        const VkImageSubresourceRange    candidate_view_range          = candidate.viewRange();
+
+        return candidate.createdFor(*selection, *logical_device) && candidate.matchesDescription(description) &&
+               candidate.resourceHandle() == resource_handle && resource_handle == description.mHandle &&
+               candidate.expectedRevision() == expected_revision && expected_revision == description.mExpectedRevision &&
+               candidate_resident_extent.width == resident_extent.width && candidate_resident_extent.height == resident_extent.height &&
+               candidate_resident_extent.depth == resident_extent.depth && resident_extent.width == description.mResidentExtent.mWidth &&
+               resident_extent.height == description.mResidentExtent.mHeight && resident_extent.depth == 1 &&
+               candidate_logical_extent.mWidth == logical_extent.mWidth && candidate_logical_extent.mHeight == logical_extent.mHeight &&
+               logical_extent.mWidth == description.mLogicalExtent.mWidth && logical_extent.mHeight == description.mLogicalExtent.mHeight &&
+               candidate.residentDiscard() == resident_discard && resident_discard == description.mResidentDiscard &&
+               candidate.pixelFormat() == pixel_format && pixel_format == description.mFormat &&
+               candidate.initialState() == initial_state && initial_state == description.mInitialState &&
+               candidate.flags() == image_flags && candidate.imageType() == image_type && candidate.format() == image_format &&
+               candidate.mipLevels() == mip_levels && mip_levels == description.mMipLevels && candidate.arrayLayers() == array_layers &&
+               array_layers == description.mArrayLayers && candidate.samples() == samples && candidate.tiling() == tiling &&
+               candidate.usage() == usage && candidate.sharingMode() == sharing_mode && candidate.initialLayout() == initial_layout &&
+               candidate.formatFeatures() == format_features &&
+               candidate_format_properties.maxExtent.width == image_format_properties.maxExtent.width &&
+               candidate_format_properties.maxExtent.height == image_format_properties.maxExtent.height &&
+               candidate_format_properties.maxExtent.depth == image_format_properties.maxExtent.depth &&
+               candidate_format_properties.maxMipLevels == image_format_properties.maxMipLevels &&
+               candidate_format_properties.maxArrayLayers == image_format_properties.maxArrayLayers &&
+               candidate_format_properties.sampleCounts == image_format_properties.sampleCounts &&
+               candidate_format_properties.maxResourceSize == image_format_properties.maxResourceSize && candidate.image() == image &&
+               image != VK_NULL_HANDLE && candidate.memory() == memory && memory != VK_NULL_HANDLE &&
+               candidate_memory_requirements.size == memory_requirements.size &&
+               candidate_memory_requirements.alignment == memory_requirements.alignment &&
+               candidate_memory_requirements.memoryTypeBits == memory_requirements.memoryTypeBits &&
+               candidate.allocationSize() == allocation_size && allocation_size != 0 &&
+               candidate.allocationAlignment() == allocation_alignment && allocation_alignment != 0 &&
+               candidate.compatibleMemoryTypeBits() == compatible_memory_bits && compatible_memory_bits != 0 &&
+               candidate.memoryTypeIndex() == memory_type_index && memory_type_index < VK_MAX_MEMORY_TYPES &&
+               (compatible_memory_bits & (std::uint32_t{ 1 } << memory_type_index)) != 0 &&
+               candidate.memoryPropertyFlags() == memory_property_flags && candidate.isDeviceLocal() == device_local && device_local &&
+               candidate.prefersDedicatedAllocation() == prefers_dedicated &&
+               candidate.requiresDedicatedAllocation() == requires_dedicated && candidate.imageView() == image_view &&
+               image_view != VK_NULL_HANDLE && candidate.imageViewType() == image_view_type && image_view_type == VK_IMAGE_VIEW_TYPE_2D &&
+               candidate_view_range.aspectMask == view_range.aspectMask && candidate_view_range.baseMipLevel == view_range.baseMipLevel &&
+               candidate_view_range.levelCount == view_range.levelCount &&
+               candidate_view_range.baseArrayLayer == view_range.baseArrayLayer &&
+               candidate_view_range.layerCount == view_range.layerCount && request.mDescription == description;
+    };
+
+    try
+    {
+        if (allocation_checkpoint)
+        {
+            allocation_checkpoint();
+            if (instance_generation.mTextureUploadDestinationGeneration)
+            {
+                return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::TextureUploadDestinationAlreadyOwned);
+            }
+            if (!exact_parent_chain())
+            {
+                return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::LogicalDeviceNotLive);
+            }
+            if (!exact_candidate(resolved))
+            {
+                return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::LogicalDeviceNotLive);
+            }
+        }
+        auto pending = std::make_unique<VulkanTextureUploadDestinationGeneration>(
+            std::move(std::get<VulkanTextureUploadDestinationGeneration>(resolution_result)));
+
+        if (VulkanTextureUploadDestinationAcquireResult freshness = freshness_check())
+        {
+            return freshness;
+        }
+        if (instance_generation.mTextureUploadDestinationGeneration)
+        {
+            return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::TextureUploadDestinationAlreadyOwned);
+        }
+        if (!exact_parent_chain() || !exact_candidate(*pending))
+        {
+            return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::LogicalDeviceNotLive);
+        }
+
+        instance_generation.mTextureUploadDestinationGeneration = std::move(pending);
+        instance_generation.noteTextureUploadDestinationTransition();
+        return std::nullopt;
+    }
+    catch (const std::bad_alloc&)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::AllocationFailure);
     }
 }
 
@@ -6193,6 +6681,13 @@ namespace VulkanInstanceDetail
                                                         AllocationCheckpoint             allocation_checkpoint) noexcept
     {
         return VulkanInstanceGenerationFactory::acquireUploadSource(instance_generation, request, allocation_checkpoint);
+    }
+
+    VulkanTextureUploadDestinationAcquireResult acquireTextureUploadDestination(VulkanInstanceGeneration& instance_generation,
+                                                                                const VulkanTextureUploadDestinationRequest& request,
+                                                                                AllocationCheckpoint allocation_checkpoint) noexcept
+    {
+        return VulkanInstanceGenerationFactory::acquireTextureUploadDestination(instance_generation, request, allocation_checkpoint);
     }
 
     VulkanUploadDestinationAcquireResult acquireUploadDestination(VulkanInstanceGeneration&             instance_generation,

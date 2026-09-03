@@ -298,6 +298,127 @@ void window_vulkan_macos_wsi_object::test<1>()
     auto*                     mutable_instance_generation = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
     FrameSlotOperationContext operation_context{ owner, instance_generation };
 
+    LLRenderVulkan::VulkanTextureUploadDestinationRequest texture_destination_request;
+    texture_destination_request.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
+    texture_destination_request.mDescription            = LLRenderVulkan::vulkanTextureUploadDestinationDescription();
+    texture_destination_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    texture_destination_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+    const auto texture_destination_error =
+        mutable_instance_generation->acquireTextureUploadDestinationGeneration(texture_destination_request);
+    ensure("the exact logical-device chain acquires one native texture upload destination", !texture_destination_error.has_value());
+    const auto retained_texture_handle             = instance_generation->textureUploadDestinationResourceHandle();
+    const auto retained_texture_revision           = instance_generation->textureUploadDestinationExpectedRevision();
+    const auto retained_texture_resident_extent    = instance_generation->textureUploadDestinationResidentExtent();
+    const auto retained_texture_logical_extent     = instance_generation->textureUploadDestinationLogicalExtent();
+    const auto retained_texture_discard            = instance_generation->textureUploadDestinationResidentDiscard();
+    const auto retained_texture_format             = instance_generation->textureUploadDestinationFormat();
+    const auto retained_texture_format_features    = instance_generation->textureUploadDestinationFormatFeatures();
+    const auto retained_texture_format_properties  = instance_generation->textureUploadDestinationImageFormatProperties();
+    const auto retained_texture_image              = instance_generation->textureUploadDestinationImage();
+    const auto retained_texture_memory             = instance_generation->textureUploadDestinationMemory();
+    const auto retained_texture_allocation         = instance_generation->textureUploadDestinationAllocationSize();
+    const auto retained_texture_alignment          = instance_generation->textureUploadDestinationAllocationAlignment();
+    const auto retained_texture_memory_bits        = instance_generation->textureUploadDestinationCompatibleMemoryTypeBits();
+    const auto retained_texture_memory_type        = instance_generation->textureUploadDestinationMemoryTypeIndex();
+    const auto retained_texture_memory_flags       = instance_generation->textureUploadDestinationMemoryPropertyFlags();
+    const auto retained_texture_view               = instance_generation->textureUploadDestinationImageView();
+    const auto retained_texture_view_range         = instance_generation->textureUploadDestinationViewRange();
+    const bool retained_texture_prefers_dedicated  = instance_generation->textureUploadDestinationPrefersDedicatedAllocation();
+    const bool retained_texture_requires_dedicated = instance_generation->textureUploadDestinationRequiresDedicatedAllocation();
+    constexpr VkFormatFeatureFlags required_texture_features =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+        VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    const auto texture_destination_matches_contract = [&]() noexcept
+    {
+        const auto& description = texture_destination_request.mDescription;
+        const auto  resident    = instance_generation->textureUploadDestinationResidentExtent();
+        const auto  logical     = instance_generation->textureUploadDestinationLogicalExtent();
+        const auto  properties  = instance_generation->textureUploadDestinationImageFormatProperties();
+        const auto  requirements = instance_generation->textureUploadDestinationMemoryRequirements();
+        const auto  range        = instance_generation->textureUploadDestinationViewRange();
+        const auto  memory_type  = instance_generation->textureUploadDestinationMemoryTypeIndex();
+        return instance_generation->hasTextureUploadDestinationGeneration() &&
+               instance_generation->textureUploadDestinationResourceHandle() == description.mHandle &&
+               instance_generation->textureUploadDestinationExpectedRevision() == description.mExpectedRevision &&
+               resident.width == description.mResidentExtent.mWidth && resident.height == description.mResidentExtent.mHeight &&
+               resident.depth == 1 && logical.mWidth == description.mLogicalExtent.mWidth &&
+               logical.mHeight == description.mLogicalExtent.mHeight &&
+               instance_generation->textureUploadDestinationResidentDiscard() == description.mResidentDiscard &&
+               instance_generation->textureUploadDestinationPixelFormat() == description.mFormat &&
+               instance_generation->textureUploadDestinationInitialState() == description.mInitialState &&
+               instance_generation->textureUploadDestinationFlags() == 0 &&
+               instance_generation->textureUploadDestinationImageType() == VK_IMAGE_TYPE_2D &&
+               instance_generation->textureUploadDestinationFormat() == VK_FORMAT_R8G8B8A8_UNORM &&
+               instance_generation->textureUploadDestinationMipLevels() == description.mMipLevels &&
+               instance_generation->textureUploadDestinationArrayLayers() == description.mArrayLayers &&
+               instance_generation->textureUploadDestinationSamples() == VK_SAMPLE_COUNT_1_BIT &&
+               instance_generation->textureUploadDestinationTiling() == VK_IMAGE_TILING_OPTIMAL &&
+               instance_generation->textureUploadDestinationUsage() ==
+                   (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) &&
+               instance_generation->textureUploadDestinationSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
+               instance_generation->textureUploadDestinationInitialLayout() == VK_IMAGE_LAYOUT_UNDEFINED &&
+               (instance_generation->textureUploadDestinationFormatFeatures() & required_texture_features) == required_texture_features &&
+               properties.maxExtent.width >= description.mResidentExtent.mWidth &&
+               properties.maxExtent.height >= description.mResidentExtent.mHeight && properties.maxExtent.depth >= 1 &&
+               properties.maxMipLevels >= description.mMipLevels && properties.maxArrayLayers >= description.mArrayLayers &&
+               (properties.sampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0 &&
+               instance_generation->textureUploadDestinationImage() != VK_NULL_HANDLE &&
+               instance_generation->textureUploadDestinationMemory() != VK_NULL_HANDLE && requirements.size != 0 &&
+               requirements.alignment != 0 && requirements.memoryTypeBits != 0 &&
+               instance_generation->textureUploadDestinationAllocationSize() == requirements.size &&
+               instance_generation->textureUploadDestinationAllocationAlignment() == requirements.alignment &&
+               instance_generation->textureUploadDestinationCompatibleMemoryTypeBits() == requirements.memoryTypeBits &&
+               memory_type < VK_MAX_MEMORY_TYPES && (requirements.memoryTypeBits & (std::uint32_t{ 1 } << memory_type)) != 0 &&
+               (instance_generation->textureUploadDestinationMemoryPropertyFlags() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0 &&
+               instance_generation->textureUploadDestinationIsDeviceLocal() &&
+               instance_generation->textureUploadDestinationImageView() != VK_NULL_HANDLE &&
+               instance_generation->textureUploadDestinationImageViewType() == VK_IMAGE_VIEW_TYPE_2D &&
+               range.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && range.baseMipLevel == 0 &&
+               range.levelCount == description.mMipLevels && range.baseArrayLayer == 0 &&
+               range.layerCount == description.mArrayLayers;
+    };
+    const auto texture_destination_retained        = [&]() noexcept
+    {
+        const auto properties = instance_generation->textureUploadDestinationImageFormatProperties();
+        const auto range      = instance_generation->textureUploadDestinationViewRange();
+        return texture_destination_matches_contract() &&
+               instance_generation->textureUploadDestinationResourceHandle() == retained_texture_handle &&
+               instance_generation->textureUploadDestinationExpectedRevision() == retained_texture_revision &&
+               instance_generation->textureUploadDestinationResidentExtent().width == retained_texture_resident_extent.width &&
+               instance_generation->textureUploadDestinationResidentExtent().height == retained_texture_resident_extent.height &&
+               instance_generation->textureUploadDestinationLogicalExtent().mWidth == retained_texture_logical_extent.mWidth &&
+               instance_generation->textureUploadDestinationLogicalExtent().mHeight == retained_texture_logical_extent.mHeight &&
+               instance_generation->textureUploadDestinationResidentDiscard() == retained_texture_discard &&
+               instance_generation->textureUploadDestinationFormat() == retained_texture_format &&
+               instance_generation->textureUploadDestinationFormatFeatures() == retained_texture_format_features &&
+               properties.maxExtent.width == retained_texture_format_properties.maxExtent.width &&
+               properties.maxExtent.height == retained_texture_format_properties.maxExtent.height &&
+               properties.maxMipLevels == retained_texture_format_properties.maxMipLevels &&
+               properties.maxArrayLayers == retained_texture_format_properties.maxArrayLayers &&
+               properties.sampleCounts == retained_texture_format_properties.sampleCounts &&
+               properties.maxResourceSize == retained_texture_format_properties.maxResourceSize &&
+               instance_generation->textureUploadDestinationImage() == retained_texture_image &&
+               instance_generation->textureUploadDestinationMemory() == retained_texture_memory &&
+               instance_generation->textureUploadDestinationAllocationSize() == retained_texture_allocation &&
+               instance_generation->textureUploadDestinationAllocationAlignment() == retained_texture_alignment &&
+               instance_generation->textureUploadDestinationCompatibleMemoryTypeBits() == retained_texture_memory_bits &&
+               instance_generation->textureUploadDestinationMemoryTypeIndex() == retained_texture_memory_type &&
+               instance_generation->textureUploadDestinationMemoryPropertyFlags() == retained_texture_memory_flags &&
+               instance_generation->textureUploadDestinationIsDeviceLocal() &&
+               instance_generation->textureUploadDestinationPrefersDedicatedAllocation() == retained_texture_prefers_dedicated &&
+               instance_generation->textureUploadDestinationRequiresDedicatedAllocation() == retained_texture_requires_dedicated &&
+               instance_generation->textureUploadDestinationImageView() == retained_texture_view &&
+               range.aspectMask == retained_texture_view_range.aspectMask &&
+               range.baseMipLevel == retained_texture_view_range.baseMipLevel &&
+               range.levelCount == retained_texture_view_range.levelCount &&
+               range.baseArrayLayer == retained_texture_view_range.baseArrayLayer &&
+               range.layerCount == retained_texture_view_range.layerCount;
+    };
+    ensure("the native texture destination publishes the canonical image, allocation, view, and capability metadata",
+           texture_destination_matches_contract() && texture_destination_retained());
+    ensure_equals("texture-destination acquisition emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+
     const LLRenderContract::TextureUploadFixture upload_fixture = LLRenderContract::makeTextureUploadFixture();
     static_assert(sizeof(upload_fixture.mScreenTriangle) == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT);
     LLRenderVulkan::VulkanUploadSourceDescription upload_source_description;
@@ -809,6 +930,20 @@ void window_vulkan_macos_wsi_object::test<1>()
                                 initial_readback_extent));
     ensure_equals("changed-extent rebuild emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
+    ensure("same-surface rebuild preserves the exact native texture image, allocation, view, and contract metadata",
+           texture_destination_retained());
+    ensure("the native smoke directly resets the texture destination while all swapchain parents remain live",
+           mutable_instance_generation->resetTextureUploadDestinationGeneration() &&
+               !instance_generation->hasTextureUploadDestinationGeneration() &&
+               instance_generation->textureUploadDestinationImage() == VK_NULL_HANDLE &&
+               instance_generation->textureUploadDestinationMemory() == VK_NULL_HANDLE &&
+               instance_generation->textureUploadDestinationImageView() == VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
+               instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->hasSwapchainPresentationPipelineGeneration() && instance_generation->hasSwapchainReadbackGeneration() &&
+               instance_generation->hasSwapchainFrameSlotGeneration());
+    ensure_equals("texture-destination rebuild retention and direct reset emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
     ensure("changed-extent rebuild creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("changed-extent rebuild leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 

@@ -313,6 +313,32 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       INTEGRATION_TEST_llrendervulkanuploadsource
       PRIVATE VK_NO_PROTOTYPES)
 
+  add_library(llrendervulkantextureuploaddestination STATIC
+      vulkan/llrendervulkantextureuploaddestination.cpp
+      vulkan/llrendervulkantextureuploaddestination.h)
+  target_include_directories(llrendervulkantextureuploaddestination
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkantextureuploaddestination SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkantextureuploaddestination
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkantextureuploaddestination
+      PUBLIC
+          llrendervulkanlogicaldevice
+          llrendercontract)
+  set_target_properties(llrendervulkantextureuploaddestination PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkantextureuploaddestination_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkantextureuploaddestination
+      ""
+      "llrendervulkantextureuploaddestination;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkantextureuploaddestination
+      PRIVATE VK_NO_PROTOTYPES)
+
   add_library(llrendervulkanuploaddestination STATIC
       vulkan/llrendervulkanuploaddestination.cpp
       vulkan/llrendervulkanuploaddestination.h)
@@ -551,6 +577,7 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       PUBLIC
           llrendervulkanglobaldispatch
           llrendervulkanlogicaldevice
+          llrendervulkantextureuploaddestination
           llrendervulkanuploadsource
           llrendervulkanuploaddestination
           llrendervulkanuploadtransfer

@@ -94,8 +94,15 @@ struct FakeState
         mSurfaceCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         mSurfaceCapabilities.supportedUsageFlags =
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        mFormatProperties.optimalTilingFeatures =
-            VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+        mFormatProperties.optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                                  VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                                  VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        mImageFormatProperties.maxExtent       = { 4096, 4096, 1 };
+        mImageFormatProperties.maxMipLevels    = 12;
+        mImageFormatProperties.maxArrayLayers  = 1;
+        mImageFormatProperties.sampleCounts    = VK_SAMPLE_COUNT_1_BIT;
+        mImageFormatProperties.maxResourceSize = 64 * 1024 * 1024;
         mMemoryProperties.memoryHeapCount     = 1;
         mMemoryProperties.memoryHeaps[0].size = 64 * 1024 * 1024;
         mMemoryProperties.memoryTypeCount     = 1;
@@ -146,6 +153,7 @@ struct FakeState
     VkPhysicalDevice                 mPhysicalDevice = reinterpret_cast<VkPhysicalDevice>(static_cast<std::uintptr_t>(0x11110));
     VkPhysicalDeviceProperties       mPhysicalProperties{};
     VkFormatProperties               mFormatProperties{};
+    VkImageFormatProperties          mImageFormatProperties{};
     VkDevice                         mDevice                = reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(0x22220));
     VkQueue                          mQueue                 = reinterpret_cast<VkQueue>(static_cast<std::uintptr_t>(0x33330));
     VkSwapchainKHR                   mSwapchain             = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(0x44440));
@@ -177,6 +185,24 @@ struct FakeState
     VkDeviceMemory                   mUploadSourceMemory      = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x84000));
     VkBuffer                         mUploadDestinationBuffer = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x85000));
     VkDeviceMemory                   mUploadDestinationMemory = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x86000));
+    VkImage                          mTextureImage            = reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x87000));
+    VkDeviceMemory                   mTextureMemory           = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x88000));
+    VkImageView                      mTextureImageView        = reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x89000));
+    VkMemoryRequirements             mTextureMemoryRequirements{ 4096, 256, 1 };
+    VkImageCreateInfo                mTextureImageCreateInfo{};
+    VkImageViewCreateInfo            mTextureImageViewCreateInfo{};
+    std::size_t                      mCreateTextureImageCalls      = 0;
+    std::size_t                      mDestroyTextureImageCalls     = 0;
+    std::size_t                      mTextureRequirementsCalls     = 0;
+    std::size_t                      mAllocateTextureMemoryCalls   = 0;
+    std::size_t                      mBindTextureMemoryCalls       = 0;
+    std::size_t                      mCreateTextureImageViewCalls  = 0;
+    std::size_t                      mDestroyTextureImageViewCalls = 0;
+    std::size_t                      mFreeTextureMemoryCalls       = 0;
+    std::size_t                      mTextureDestroySequence       = 0;
+    std::size_t                      mTextureViewDestroyOrder      = 0;
+    std::size_t                      mTextureImageDestroyOrder     = 0;
+    std::size_t                      mTextureMemoryFreeOrder       = 0;
     VkBuffer                         mLastCreatedBuffer       = VK_NULL_HANDLE;
     std::array<std::uint8_t, LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT> mUploadMappedBytes{};
     std::uint8_t                                                              mReadbackMappedByte  = 0;
@@ -438,6 +464,25 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFormatProperties(VkPhysicalDevic
     }
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice         physical_device,
+                                                                          VkFormat                 format,
+                                                                          VkImageType              image_type,
+                                                                          VkImageTiling            tiling,
+                                                                          VkImageUsageFlags        usage,
+                                                                          VkImageCreateFlags       flags,
+                                                                          VkImageFormatProperties* properties) noexcept
+{
+    constexpr VkImageUsageFlags expected_usage =
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (!gVulkanState || physical_device != gVulkanState->mPhysicalDevice || format != VK_FORMAT_R8G8B8A8_UNORM ||
+        image_type != VK_IMAGE_TYPE_2D || tiling != VK_IMAGE_TILING_OPTIMAL || usage != expected_usage || flags != 0 || !properties)
+    {
+        return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    }
+    *properties = gVulkanState->mImageFormatProperties;
+    return VK_SUCCESS;
+}
+
 VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice         device,
                                                                       std::uint32_t*           count,
                                                                       VkQueueFamilyProperties* properties) noexcept
@@ -655,12 +700,23 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeGetSwapchainImages(VkDevice       device,
     return written == gVulkanState->mImages.size() ? VK_SUCCESS : VK_INCOMPLETE;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL fakeCreateImageView(VkDevice device,
-                                                   const VkImageViewCreateInfo*,
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateImageView(VkDevice                     device,
+                                                   const VkImageViewCreateInfo* create_info,
                                                    const VkAllocationCallbacks*,
                                                    VkImageView* image_view) noexcept
 {
-    if (!gVulkanState || device != gVulkanState->mDevice || !image_view || gVulkanState->mNextImageView >= gVulkanState->mImageViews.size())
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || !image_view)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (create_info->image == gVulkanState->mTextureImage)
+    {
+        ++gVulkanState->mCreateTextureImageViewCalls;
+        gVulkanState->mTextureImageViewCreateInfo = *create_info;
+        *image_view                               = gVulkanState->mTextureImageView;
+        return VK_SUCCESS;
+    }
+    if (gVulkanState->mNextImageView >= gVulkanState->mImageViews.size())
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -668,8 +724,13 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateImageView(VkDevice device,
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL fakeDestroyImageView(VkDevice, VkImageView, const VkAllocationCallbacks*) noexcept
+VKAPI_ATTR void VKAPI_CALL fakeDestroyImageView(VkDevice device, VkImageView image_view, const VkAllocationCallbacks*) noexcept
 {
+    if (gVulkanState && device == gVulkanState->mDevice && image_view == gVulkanState->mTextureImageView)
+    {
+        ++gVulkanState->mDestroyTextureImageViewCalls;
+        gVulkanState->mTextureViewDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateRenderPass(VkDevice device,
@@ -1144,6 +1205,63 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceMemoryProperties(VkPhysicalDevic
     }
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateImage(VkDevice                 device,
+                                               const VkImageCreateInfo* create_info,
+                                               const VkAllocationCallbacks*,
+                                               VkImage* image) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || !image)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateTextureImageCalls;
+    gVulkanState->mTextureImageCreateInfo = *create_info;
+    *image                                = gVulkanState->mTextureImage;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && image == gVulkanState->mTextureImage)
+    {
+        ++gVulkanState->mDestroyTextureImageCalls;
+        gVulkanState->mTextureImageDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetImageMemoryRequirements2(VkDevice                              device,
+                                                           const VkImageMemoryRequirementsInfo2* info,
+                                                           VkMemoryRequirements2*                requirements) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !info || info->sType != VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2 ||
+        info->image != gVulkanState->mTextureImage || !requirements || requirements->sType != VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2)
+    {
+        return;
+    }
+    ++gVulkanState->mTextureRequirementsCalls;
+    requirements->memoryRequirements = gVulkanState->mTextureMemoryRequirements;
+    for (VkBaseOutStructure* extension = static_cast<VkBaseOutStructure*>(requirements->pNext); extension; extension = extension->pNext)
+    {
+        if (extension->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS)
+        {
+            auto* dedicated                        = reinterpret_cast<VkMemoryDedicatedRequirements*>(extension);
+            dedicated->prefersDedicatedAllocation  = VK_TRUE;
+            dedicated->requiresDedicatedAllocation = VK_TRUE;
+        }
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize offset) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || image != gVulkanState->mTextureImage ||
+        memory != gVulkanState->mTextureMemory || offset != 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mBindTextureMemoryCalls;
+    return VK_SUCCESS;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice,
                                                 const VkBufferCreateInfo* create_info,
                                                 const VkAllocationCallbacks*,
@@ -1195,12 +1313,24 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice,
                                                   const VkAllocationCallbacks*,
                                                   VkDeviceMemory* memory) noexcept
 {
-    if (!gVulkanState || !allocate_info || !memory || allocate_info->allocationSize < gVulkanState->mReadbackBufferSize ||
-        allocate_info->memoryTypeIndex != 0)
+    if (!gVulkanState || !allocate_info || !memory || allocate_info->memoryTypeIndex != 0)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gVulkanState->mAllocateMemoryCalls;
+    const auto* dedicated = static_cast<const VkMemoryDedicatedAllocateInfo*>(allocate_info->pNext);
+    if (dedicated && dedicated->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO &&
+        dedicated->image == gVulkanState->mTextureImage && dedicated->buffer == VK_NULL_HANDLE &&
+        allocate_info->allocationSize == gVulkanState->mTextureMemoryRequirements.size)
+    {
+        ++gVulkanState->mAllocateTextureMemoryCalls;
+        *memory = gVulkanState->mTextureMemory;
+        return VK_SUCCESS;
+    }
+    if (allocate_info->allocationSize < gVulkanState->mReadbackBufferSize)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     *memory = gVulkanState->mLastCreatedBuffer == gVulkanState->mUploadSourceBuffer
                   ? gVulkanState->mUploadSourceMemory
                   : (gVulkanState->mLastCreatedBuffer == gVulkanState->mUploadDestinationBuffer ? gVulkanState->mUploadDestinationMemory
@@ -1210,7 +1340,12 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice,
 
 VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks*) noexcept
 {
-    if (gVulkanState && memory == gVulkanState->mReadbackMemory)
+    if (gVulkanState && memory == gVulkanState->mTextureMemory)
+    {
+        ++gVulkanState->mFreeTextureMemoryCalls;
+        gVulkanState->mTextureMemoryFreeOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+    else if (gVulkanState && memory == gVulkanState->mReadbackMemory)
     {
         ++gVulkanState->mFreeMemoryCalls;
     }
@@ -1274,6 +1409,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeGetSwapchainImages);
     LL_SDL_VULKAN_DEVICE_COMMAND(CreateImageView);
     LL_SDL_VULKAN_DEVICE_COMMAND(DestroyImageView);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(GetImageMemoryRequirements2);
+    LL_SDL_VULKAN_DEVICE_COMMAND(BindImageMemory);
     LL_SDL_VULKAN_DEVICE_COMMAND(CreateRenderPass);
     LL_SDL_VULKAN_DEVICE_COMMAND(DestroyRenderPass);
     LL_SDL_VULKAN_DEVICE_COMMAND(CreateFramebuffer);
@@ -1363,6 +1502,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance inst
         return eraseFunctionType(fakeGetPhysicalDeviceProperties);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceFormatProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceImageFormatProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceImageFormatProperties);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceMemoryProperties") == 0)
         return eraseFunctionType(fakeGetPhysicalDeviceMemoryProperties);
     if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceQueueFamilyProperties") == 0)
@@ -3453,6 +3594,130 @@ void window_sdl_vulkan_object::test<25>()
     ensure("the independent frame-slot sibling remains legal without readback",
            !owner->acquireSwapchainFrameSlotGeneration() && instance->hasSwapchainFrameSlotGeneration());
     ensure("readback adapter fixture tears down its retained chain", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<26>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 223, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("texture destination fixture acquires its SDL owner", owner != nullptr);
+    ensure("texture destination fixture acquires the exact device parents",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
+               !owner->acquireSurfaceGeneration() && !owner->acquirePresentationDeviceGeneration() &&
+               !owner->acquireLogicalDeviceGeneration());
+
+    auto* generation = const_cast<VulkanInstanceGeneration*>(owner->instanceGeneration());
+    ensure("texture destination fixture publishes its mutable aggregate", generation != nullptr);
+    UploadOperationContext                          context{ owner, generation };
+    const VulkanTextureUploadDestinationDescription description = vulkanTextureUploadDestinationDescription();
+    const VulkanTextureUploadDestinationRequest     request{ generation->nativeWindowGeneration(),
+                                                         description,
+                                                             { &context, uploadInstanceOwnerIsCurrent },
+                                                             { &context, uploadWindowGenerationIsCurrent } };
+
+    ensure("the SDL aggregate acquires one canonical texture upload destination",
+           !generation->acquireTextureUploadDestinationGeneration(request) && generation->hasTextureUploadDestinationGeneration());
+    const VkImageSubresourceRange  view_range        = generation->textureUploadDestinationViewRange();
+    const VkImageFormatProperties  image_limits      = generation->textureUploadDestinationImageFormatProperties();
+    constexpr VkFormatFeatureFlags required_features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+                                                       VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                                                       VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    ensure("the SDL aggregate publishes exact canonical texture metadata",
+           generation->textureUploadDestinationResourceHandle() == description.mHandle &&
+               generation->textureUploadDestinationExpectedRevision() == description.mExpectedRevision &&
+               generation->textureUploadDestinationResidentExtent().width == description.mResidentExtent.mWidth &&
+               generation->textureUploadDestinationResidentExtent().height == description.mResidentExtent.mHeight &&
+               generation->textureUploadDestinationResidentExtent().depth == 1 &&
+               generation->textureUploadDestinationLogicalExtent().mWidth == description.mLogicalExtent.mWidth &&
+               generation->textureUploadDestinationLogicalExtent().mHeight == description.mLogicalExtent.mHeight &&
+               generation->textureUploadDestinationResidentDiscard() == description.mResidentDiscard &&
+               generation->textureUploadDestinationPixelFormat() == description.mFormat &&
+               generation->textureUploadDestinationInitialState() == description.mInitialState &&
+               generation->textureUploadDestinationFlags() == 0 && generation->textureUploadDestinationImageType() == VK_IMAGE_TYPE_2D &&
+               generation->textureUploadDestinationFormat() == VK_FORMAT_R8G8B8A8_UNORM &&
+               generation->textureUploadDestinationMipLevels() == description.mMipLevels &&
+               generation->textureUploadDestinationArrayLayers() == description.mArrayLayers &&
+               generation->textureUploadDestinationSamples() == VK_SAMPLE_COUNT_1_BIT &&
+               generation->textureUploadDestinationTiling() == VK_IMAGE_TILING_OPTIMAL &&
+               generation->textureUploadDestinationUsage() ==
+                   (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) &&
+               generation->textureUploadDestinationSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
+               generation->textureUploadDestinationInitialLayout() == VK_IMAGE_LAYOUT_UNDEFINED &&
+               (generation->textureUploadDestinationFormatFeatures() & required_features) == required_features &&
+               image_limits.maxExtent.width >= description.mResidentExtent.mWidth &&
+               image_limits.maxExtent.height >= description.mResidentExtent.mHeight &&
+               image_limits.maxMipLevels >= description.mMipLevels && image_limits.maxArrayLayers >= description.mArrayLayers &&
+               (image_limits.sampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0);
+    ensure("the SDL aggregate publishes one dedicated device-local image allocation and full mip view",
+           generation->textureUploadDestinationImage() == state.mTextureImage &&
+               generation->textureUploadDestinationMemory() == state.mTextureMemory &&
+               generation->textureUploadDestinationImageView() == state.mTextureImageView &&
+               generation->textureUploadDestinationAllocationSize() == state.mTextureMemoryRequirements.size &&
+               generation->textureUploadDestinationAllocationAlignment() == state.mTextureMemoryRequirements.alignment &&
+               generation->textureUploadDestinationCompatibleMemoryTypeBits() == state.mTextureMemoryRequirements.memoryTypeBits &&
+               generation->textureUploadDestinationMemoryTypeIndex() == 0 && generation->textureUploadDestinationIsDeviceLocal() &&
+               generation->textureUploadDestinationPrefersDedicatedAllocation() &&
+               generation->textureUploadDestinationRequiresDedicatedAllocation() && view_range.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+               view_range.baseMipLevel == 0 && view_range.levelCount == description.mMipLevels && view_range.baseArrayLayer == 0 &&
+               view_range.layerCount == description.mArrayLayers);
+    ensure("the fake receives the exact canonical image and full-mip view descriptions",
+           state.mTextureImageCreateInfo.sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO &&
+               state.mTextureImageCreateInfo.pNext == nullptr && state.mTextureImageCreateInfo.flags == 0 &&
+               state.mTextureImageCreateInfo.imageType == VK_IMAGE_TYPE_2D &&
+               state.mTextureImageCreateInfo.format == VK_FORMAT_R8G8B8A8_UNORM &&
+               state.mTextureImageCreateInfo.extent.width == description.mResidentExtent.mWidth &&
+               state.mTextureImageCreateInfo.extent.height == description.mResidentExtent.mHeight &&
+               state.mTextureImageCreateInfo.extent.depth == 1 &&
+               state.mTextureImageCreateInfo.mipLevels == description.mMipLevels &&
+               state.mTextureImageCreateInfo.arrayLayers == description.mArrayLayers &&
+               state.mTextureImageCreateInfo.samples == VK_SAMPLE_COUNT_1_BIT &&
+               state.mTextureImageCreateInfo.tiling == VK_IMAGE_TILING_OPTIMAL &&
+               state.mTextureImageCreateInfo.usage ==
+                   (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) &&
+               state.mTextureImageCreateInfo.sharingMode == VK_SHARING_MODE_EXCLUSIVE &&
+               state.mTextureImageCreateInfo.queueFamilyIndexCount == 0 &&
+               state.mTextureImageCreateInfo.pQueueFamilyIndices == nullptr &&
+               state.mTextureImageCreateInfo.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+               state.mTextureImageViewCreateInfo.sType == VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &&
+               state.mTextureImageViewCreateInfo.pNext == nullptr && state.mTextureImageViewCreateInfo.flags == 0 &&
+               state.mTextureImageViewCreateInfo.image == state.mTextureImage &&
+               state.mTextureImageViewCreateInfo.viewType == VK_IMAGE_VIEW_TYPE_2D &&
+               state.mTextureImageViewCreateInfo.format == VK_FORMAT_R8G8B8A8_UNORM &&
+               state.mTextureImageViewCreateInfo.subresourceRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+               state.mTextureImageViewCreateInfo.subresourceRange.baseMipLevel == 0 &&
+               state.mTextureImageViewCreateInfo.subresourceRange.levelCount == description.mMipLevels &&
+               state.mTextureImageViewCreateInfo.subresourceRange.baseArrayLayer == 0 &&
+               state.mTextureImageViewCreateInfo.subresourceRange.layerCount == description.mArrayLayers);
+    ensure("texture acquisition does not consume swapchain views or buffer allocation routing",
+           state.mNextImageView == 0 && state.mLastCreatedBuffer == VK_NULL_HANDLE && state.mCreateBufferCalls == 0 &&
+               state.mCreateTextureImageCalls == 1 && state.mTextureRequirementsCalls == 1 && state.mAllocateTextureMemoryCalls == 1 &&
+               state.mBindTextureMemoryCalls == 1 && state.mCreateTextureImageViewCalls == 1);
+
+    ensure("direct texture reset preserves its exact logical-device parent",
+           generation->resetTextureUploadDestinationGeneration() && generation->hasLogicalDeviceGeneration() &&
+               generation->logicalDevice() == state.mDevice && generation->hasSurfaceGeneration());
+    ensure("direct texture reset removes every published native handle",
+           !generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationImage() == VK_NULL_HANDLE &&
+               generation->textureUploadDestinationMemory() == VK_NULL_HANDLE &&
+               generation->textureUploadDestinationImageView() == VK_NULL_HANDLE && state.mDestroyTextureImageViewCalls == 1 &&
+               state.mDestroyTextureImageCalls == 1 && state.mFreeTextureMemoryCalls == 1 &&
+               state.mTextureViewDestroyOrder < state.mTextureImageDestroyOrder &&
+               state.mTextureImageDestroyOrder < state.mTextureMemoryFreeOrder);
+
+    ensure("the retained parents reacquire an independent texture destination",
+           !generation->acquireTextureUploadDestinationGeneration(request) &&
+               generation->textureUploadDestinationImage() == state.mTextureImage && state.mCreateTextureImageCalls == 2);
+    ensure("surface retirement destroys the texture child before its device parents",
+           owner->resetSurfaceGeneration() && !generation->hasTextureUploadDestinationGeneration() &&
+               !generation->hasLogicalDeviceGeneration() && !generation->hasPresentationDeviceGeneration() &&
+               state.mDestroyTextureImageViewCalls == 2 && state.mDestroyTextureImageCalls == 2 && state.mFreeTextureMemoryCalls == 2);
+    ensure("texture destination fixture tears down its retained instance", owner->reset());
 }
 
 } // namespace tut

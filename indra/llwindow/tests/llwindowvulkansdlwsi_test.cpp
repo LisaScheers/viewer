@@ -154,6 +154,101 @@ bool frameSlotWindowGenerationIsCurrent(void* userdata, std::uint64_t native_win
     return context.mWindow && context.mWindow->isVulkanWindowGenerationCurrent(native_window_generation);
 }
 
+struct TextureDestinationSnapshot
+{
+    VkImage                 mImage                       = VK_NULL_HANDLE;
+    VkDeviceMemory          mMemory                      = VK_NULL_HANDLE;
+    VkImageView             mImageView                   = VK_NULL_HANDLE;
+    VkDeviceSize            mAllocationSize              = 0;
+    VkDeviceSize            mAllocationAlignment         = 0;
+    std::uint32_t           mCompatibleMemoryTypeBits    = 0;
+    std::uint32_t           mMemoryTypeIndex             = 0;
+    VkMemoryPropertyFlags   mMemoryPropertyFlags         = 0;
+    bool                    mPrefersDedicatedAllocation  = false;
+    bool                    mRequiresDedicatedAllocation = false;
+    VkFormatFeatureFlags    mFormatFeatures              = 0;
+    VkImageFormatProperties mImageFormatProperties{};
+    VkImageSubresourceRange mViewRange{};
+};
+
+TextureDestinationSnapshot textureDestinationSnapshot(const LLRenderVulkan::VulkanInstanceGeneration& generation) noexcept
+{
+    return { generation.textureUploadDestinationImage(),
+             generation.textureUploadDestinationMemory(),
+             generation.textureUploadDestinationImageView(),
+             generation.textureUploadDestinationAllocationSize(),
+             generation.textureUploadDestinationAllocationAlignment(),
+             generation.textureUploadDestinationCompatibleMemoryTypeBits(),
+             generation.textureUploadDestinationMemoryTypeIndex(),
+             generation.textureUploadDestinationMemoryPropertyFlags(),
+             generation.textureUploadDestinationPrefersDedicatedAllocation(),
+             generation.textureUploadDestinationRequiresDedicatedAllocation(),
+             generation.textureUploadDestinationFormatFeatures(),
+             generation.textureUploadDestinationImageFormatProperties(),
+             generation.textureUploadDestinationViewRange() };
+}
+
+bool textureDestinationMatches(const LLRenderVulkan::VulkanInstanceGeneration&                  generation,
+                               const LLRenderVulkan::VulkanTextureUploadDestinationDescription& description,
+                               const TextureDestinationSnapshot&                                retained) noexcept
+{
+    constexpr VkFormatFeatureFlags required_features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+                                                       VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                                                       VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    const VkExtent3D                 resident_extent = generation.textureUploadDestinationResidentExtent();
+    const LLRenderContract::Extent2D logical_extent  = generation.textureUploadDestinationLogicalExtent();
+    const VkImageFormatProperties    limits          = generation.textureUploadDestinationImageFormatProperties();
+    const VkImageSubresourceRange    view_range      = generation.textureUploadDestinationViewRange();
+    return generation.hasTextureUploadDestinationGeneration() &&
+           generation.textureUploadDestinationResourceHandle() == description.mHandle &&
+           generation.textureUploadDestinationExpectedRevision() == description.mExpectedRevision &&
+           resident_extent.width == description.mResidentExtent.mWidth && resident_extent.height == description.mResidentExtent.mHeight &&
+           resident_extent.depth == 1 && logical_extent.mWidth == description.mLogicalExtent.mWidth &&
+           logical_extent.mHeight == description.mLogicalExtent.mHeight &&
+           generation.textureUploadDestinationResidentDiscard() == description.mResidentDiscard &&
+           generation.textureUploadDestinationPixelFormat() == description.mFormat &&
+           generation.textureUploadDestinationInitialState() == description.mInitialState &&
+           generation.textureUploadDestinationFlags() == 0 && generation.textureUploadDestinationImageType() == VK_IMAGE_TYPE_2D &&
+           generation.textureUploadDestinationFormat() == VK_FORMAT_R8G8B8A8_UNORM &&
+           generation.textureUploadDestinationMipLevels() == description.mMipLevels &&
+           generation.textureUploadDestinationArrayLayers() == description.mArrayLayers &&
+           generation.textureUploadDestinationSamples() == VK_SAMPLE_COUNT_1_BIT &&
+           generation.textureUploadDestinationTiling() == VK_IMAGE_TILING_OPTIMAL &&
+           generation.textureUploadDestinationUsage() ==
+               (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) &&
+           generation.textureUploadDestinationSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
+           generation.textureUploadDestinationInitialLayout() == VK_IMAGE_LAYOUT_UNDEFINED &&
+           (generation.textureUploadDestinationFormatFeatures() & required_features) == required_features &&
+           limits.maxExtent.width >= description.mResidentExtent.mWidth && limits.maxExtent.height >= description.mResidentExtent.mHeight &&
+           limits.maxExtent.depth >= 1 && limits.maxMipLevels >= description.mMipLevels &&
+           limits.maxArrayLayers >= description.mArrayLayers && (limits.sampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0 &&
+           limits.maxResourceSize != 0 && generation.textureUploadDestinationImage() == retained.mImage &&
+           retained.mImage != VK_NULL_HANDLE && generation.textureUploadDestinationMemory() == retained.mMemory &&
+           retained.mMemory != VK_NULL_HANDLE && generation.textureUploadDestinationImageView() == retained.mImageView &&
+           retained.mImageView != VK_NULL_HANDLE && generation.textureUploadDestinationAllocationSize() == retained.mAllocationSize &&
+           retained.mAllocationSize != 0 && generation.textureUploadDestinationAllocationAlignment() == retained.mAllocationAlignment &&
+           retained.mAllocationAlignment != 0 &&
+           generation.textureUploadDestinationCompatibleMemoryTypeBits() == retained.mCompatibleMemoryTypeBits &&
+           retained.mCompatibleMemoryTypeBits != 0 && generation.textureUploadDestinationMemoryTypeIndex() == retained.mMemoryTypeIndex &&
+           generation.textureUploadDestinationMemoryPropertyFlags() == retained.mMemoryPropertyFlags &&
+           generation.textureUploadDestinationIsDeviceLocal() &&
+           generation.textureUploadDestinationPrefersDedicatedAllocation() == retained.mPrefersDedicatedAllocation &&
+           generation.textureUploadDestinationRequiresDedicatedAllocation() == retained.mRequiresDedicatedAllocation &&
+           generation.textureUploadDestinationFormatFeatures() == retained.mFormatFeatures &&
+           limits.maxExtent.width == retained.mImageFormatProperties.maxExtent.width &&
+           limits.maxExtent.height == retained.mImageFormatProperties.maxExtent.height &&
+           limits.maxExtent.depth == retained.mImageFormatProperties.maxExtent.depth &&
+           limits.maxMipLevels == retained.mImageFormatProperties.maxMipLevels &&
+           limits.maxArrayLayers == retained.mImageFormatProperties.maxArrayLayers &&
+           limits.sampleCounts == retained.mImageFormatProperties.sampleCounts &&
+           limits.maxResourceSize == retained.mImageFormatProperties.maxResourceSize &&
+           view_range.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && view_range.baseMipLevel == 0 &&
+           view_range.levelCount == description.mMipLevels && view_range.baseArrayLayer == 0 &&
+           view_range.layerCount == description.mArrayLayers && view_range.aspectMask == retained.mViewRange.aspectMask &&
+           view_range.baseMipLevel == retained.mViewRange.baseMipLevel && view_range.levelCount == retained.mViewRange.levelCount &&
+           view_range.baseArrayLayer == retained.mViewRange.baseArrayLayer && view_range.layerCount == retained.mViewRange.layerCount;
+}
+
 bool presentationCompleted(const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result,
                            std::uint32_t                                                           image_count) noexcept
 {
@@ -266,6 +361,13 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool logical_extensions_exact                            = false;
     bool logical_maintenance                                 = false;
     bool logical_device_removed                              = false;
+    bool texture_destination_acquired                        = false;
+    bool texture_destination_metadata_exact                  = false;
+    bool texture_destination_rebuild_retained                = false;
+    bool texture_destination_explicitly_reset                = false;
+    bool texture_destination_removed                         = false;
+    bool texture_destination_chain_retained                  = false;
+    bool texture_destination_validation_clean                = false;
     bool upload_source_acquired                              = false;
     bool upload_source_metadata_exact                        = false;
     bool upload_destination_acquired                         = false;
@@ -473,6 +575,20 @@ void window_vulkan_sdl_wsi_object::test<1>()
                                                     swapchain_configuration_acquired && swapchain_format_supported;
                 auto*                     mutable_generation = const_cast<LLRenderVulkan::VulkanInstanceGeneration*>(instance_generation);
                 FrameSlotOperationContext upload_source_context{ static_cast<const LLWindowSDL*>(window), instance_generation };
+                const LLRenderVulkan::VulkanTextureUploadDestinationDescription texture_description =
+                    LLRenderVulkan::vulkanTextureUploadDestinationDescription();
+                LLRenderVulkan::VulkanTextureUploadDestinationRequest texture_request;
+                texture_request.mNativeWindowGeneration = requirements->nativeWindowGeneration();
+                texture_request.mDescription            = texture_description;
+                texture_request.mInstanceOwnerCheck     = { &upload_source_context, frameSlotInstanceOwnerIsCurrent };
+                texture_request.mWindowGenerationCheck  = { &upload_source_context, frameSlotWindowGenerationIsCurrent };
+                texture_destination_acquired            = logical_device_acquired &&
+                                               !mutable_generation->acquireTextureUploadDestinationGeneration(texture_request) &&
+                                               instance_generation->hasTextureUploadDestinationGeneration();
+                const TextureDestinationSnapshot retained_texture_destination = textureDestinationSnapshot(*instance_generation);
+                texture_destination_metadata_exact =
+                    texture_destination_acquired &&
+                    textureDestinationMatches(*instance_generation, texture_description, retained_texture_destination);
                 const LLRenderVulkan::VulkanUploadSourceDescription upload_source_description = fixedUploadSourceDescription();
                 LLRenderVulkan::VulkanUploadSourceRequest           upload_source_request;
                 upload_source_request.mNativeWindowGeneration = requirements->nativeWindowGeneration();
@@ -895,6 +1011,9 @@ void window_vulkan_sdl_wsi_object::test<1>()
                             static_cast<VkDeviceSize>(rebuilt_image_extent.width) * rebuilt_image_extent.height * 4;
                     upload_destination_rebuild_retained = swapchain_rebuild_ready && swapchain_rebuild_chain_complete &&
                                                           upload_destination_draw_retained && upload_destination_retained();
+                    texture_destination_rebuild_retained =
+                        swapchain_rebuild_ready && swapchain_rebuild_chain_complete && texture_destination_metadata_exact &&
+                        textureDestinationMatches(*instance_generation, texture_description, retained_texture_destination);
                     frame_slot_initial_observation_detached = presentationObserved(draw_readback_before_rebuild,
                                                                                    initial_image_count,
                                                                                    initial_image_format,
@@ -964,6 +1083,26 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 upload_destination_chain_retained = upload_destination_removed && presentation_chain_retained();
                 upload_destination_validation_clean =
                     upload_destination_chain_retained && instance_generation->validationSnapshot().mMessageCount == 0;
+                texture_destination_explicitly_reset =
+                    texture_destination_rebuild_retained && mutable_generation->resetTextureUploadDestinationGeneration();
+                texture_destination_removed = texture_destination_explicitly_reset &&
+                                              !instance_generation->hasTextureUploadDestinationGeneration() &&
+                                              !instance_generation->textureUploadDestinationResourceHandle() &&
+                                              instance_generation->textureUploadDestinationExpectedRevision() == 0 &&
+                                              instance_generation->textureUploadDestinationResidentExtent().width == 0 &&
+                                              instance_generation->textureUploadDestinationResidentExtent().height == 0 &&
+                                              instance_generation->textureUploadDestinationResidentExtent().depth == 0 &&
+                                              instance_generation->textureUploadDestinationLogicalExtent().mWidth == 0 &&
+                                              instance_generation->textureUploadDestinationLogicalExtent().mHeight == 0 &&
+                                              instance_generation->textureUploadDestinationResidentDiscard() == 0 &&
+                                              instance_generation->textureUploadDestinationImage() == VK_NULL_HANDLE &&
+                                              instance_generation->textureUploadDestinationMemory() == VK_NULL_HANDLE &&
+                                              instance_generation->textureUploadDestinationImageView() == VK_NULL_HANDLE &&
+                                              instance_generation->textureUploadDestinationAllocationSize() == 0 &&
+                                              instance_generation->textureUploadDestinationUsage() == 0;
+                texture_destination_chain_retained = texture_destination_removed && presentation_chain_retained();
+                texture_destination_validation_clean =
+                    texture_destination_chain_retained && instance_generation->validationSnapshot().mMessageCount == 0;
 
                 const auto& required_extensions = requirements->requiredInstanceExtensions();
                 const auto& enabled_extensions  = instance_generation->enabledExtensions();
@@ -1094,6 +1233,9 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the logical device enables the required independent-blend capability", logical_feature_exact);
     ensure("the logical device enables the selected extensions in exact order", logical_extensions_exact);
     ensure("the logical device enables the swapchain-maintenance feature", logical_maintenance);
+    ensure("the native smoke acquires one canonical device-local texture destination", texture_destination_acquired);
+    ensure("the texture destination publishes exact image, memory, view, format, extent, mip, and dedicated-allocation metadata",
+           texture_destination_metadata_exact);
     ensure("the native smoke acquires the exact 48-byte fixture as one immutable upload source", upload_source_acquired);
     ensure("the upload source publishes exact typed, identity, allocation, and host-visible metadata", upload_source_metadata_exact);
     ensure("the native smoke acquires one device-local destination for the exact upload source", upload_destination_acquired);
@@ -1158,6 +1300,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the rebuilt target-pipeline-slot chain authenticates one green draw-readback observation at the changed extent",
            frame_slot_render_pass_draw_readback_after_rebuild);
     ensure("changed-extent rebuild preserves the resident device-local upload destination", upload_destination_rebuild_retained);
+    ensure("changed-extent rebuild preserves the exact texture image, memory, view, and metadata", texture_destination_rebuild_retained);
     ensure("the rebuilt observed draw preserves the resident destination identity and native allocation",
            upload_destination_rebuilt_draw_retained);
     ensure("a completion retry after Complete is rejected at the transfer state boundary", upload_transfer_complete_retry_rejected);
@@ -1174,6 +1317,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("explicit upload-destination reset removes every published handle and metadata value", upload_destination_removed);
     ensure("explicit upload-destination reset preserves the complete swapchain chain", upload_destination_chain_retained);
     ensure("upload-destination retirement emits no validation messages", upload_destination_validation_clean);
+    ensure("the native smoke directly resets the texture destination after changed-extent rebuild", texture_destination_explicitly_reset);
+    ensure("direct texture reset removes every published resource handle and metadata value", texture_destination_removed);
+    ensure("direct texture reset preserves the complete swapchain and presentation chain", texture_destination_chain_retained);
+    ensure("texture acquisition, rebuild retention, and retirement emit no validation messages", texture_destination_validation_clean);
     ensure("the native smoke explicitly resets the frame-slot child before its parents", frame_slot_explicitly_reset);
     ensure("the native smoke explicitly resets readback after the frame slot", readback_explicitly_reset);
     ensure("the native smoke explicitly resets the presentation pipeline after the frame slot", presentation_pipeline_explicitly_reset);
