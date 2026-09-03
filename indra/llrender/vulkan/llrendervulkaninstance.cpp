@@ -51,6 +51,12 @@ namespace
         ExecuteAcquireRenderPassDrawReadbackToPresent
     };
 
+    enum class UploadTransferParentOperation : std::uint8_t
+    {
+        Execute,
+        RetryCompletion
+    };
+
     using SwapchainFrameSlotParentResult = std::variant<VulkanSwapchainFrameSlotParentOperationError, VulkanSwapchainFrameSlotDisposition,
                                                         VulkanSwapchainFrameSlotPresentationSuccess>;
 
@@ -114,6 +120,27 @@ namespace
         std::optional<VulkanUploadSourceResolutionError> resolution_error = std::nullopt) noexcept
     {
         return { code, resolution_error };
+    }
+
+    VulkanUploadDestinationAcquireError uploadDestinationFailure(
+        VulkanUploadDestinationAcquireCode                    code,
+        std::optional<VulkanUploadDestinationResolutionError> resolution_error = std::nullopt) noexcept
+    {
+        return { code, resolution_error };
+    }
+
+    VulkanUploadTransferAcquireError uploadTransferFailure(
+        VulkanUploadTransferAcquireCode                    code,
+        std::optional<VulkanUploadTransferResolutionError> resolution_error = std::nullopt) noexcept
+    {
+        return { code, resolution_error };
+    }
+
+    VulkanUploadTransferParentOperationError uploadTransferOperationFailure(
+        VulkanUploadTransferParentOperationCode           code,
+        std::optional<VulkanUploadTransferOperationError> operation_error = std::nullopt) noexcept
+    {
+        return { code, operation_error };
     }
 
     VulkanSwapchainConfigurationAcquireError swapchainConfigurationFailure(
@@ -317,6 +344,89 @@ namespace
         if (!window_current)
         {
             return uploadSourceFailure(VulkanUploadSourceAcquireCode::StaleWindowGeneration);
+        }
+        return std::nullopt;
+    }
+
+    VulkanUploadDestinationAcquireResult uploadDestinationFreshness(const VulkanUploadDestinationRequest& request,
+                                                                    const VulkanInstanceGeneration&       generation,
+                                                                    const std::uint64_t*                  ownership_epoch,
+                                                                    std::uint64_t                         expected_epoch) noexcept
+    {
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasUploadDestinationGeneration())
+        {
+            return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::UploadDestinationAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::LogicalDeviceNotLive);
+        }
+        if (!owner_current)
+        {
+            return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::StaleInstanceOwner);
+        }
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasUploadDestinationGeneration())
+        {
+            return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::UploadDestinationAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::LogicalDeviceNotLive);
+        }
+        if (!window_current)
+        {
+            return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::StaleWindowGeneration);
+        }
+        return std::nullopt;
+    }
+
+    VulkanUploadTransferAcquireResult uploadTransferFreshness(const VulkanUploadTransferRequest& request,
+                                                              const VulkanInstanceGeneration&    generation,
+                                                              const std::uint64_t*               ownership_epoch,
+                                                              std::uint64_t                      expected_epoch) noexcept
+    {
+        const bool owner_current = request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation);
+        if (generation.hasUploadTransferGeneration())
+        {
+            return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadTransferAlreadyOwned);
+        }
+        if (!ownership_epoch || *ownership_epoch != expected_epoch)
+        {
+            return uploadTransferFailure(VulkanUploadTransferAcquireCode::LogicalDeviceNotLive);
+        }
+        if (!owner_current)
+        {
+            return uploadTransferFailure(VulkanUploadTransferAcquireCode::StaleInstanceOwner);
+        }
+        const bool window_current = current(request.mWindowGenerationCheck, request.mNativeWindowGeneration);
+        if (generation.hasUploadTransferGeneration())
+        {
+            return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadTransferAlreadyOwned);
+        }
+        if (*ownership_epoch != expected_epoch)
+        {
+            return uploadTransferFailure(VulkanUploadTransferAcquireCode::LogicalDeviceNotLive);
+        }
+        if (!window_current)
+        {
+            return uploadTransferFailure(VulkanUploadTransferAcquireCode::StaleWindowGeneration);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<VulkanUploadTransferParentOperationError> uploadTransferOperationFreshness(
+        const VulkanUploadTransferOperationRequest& request,
+        const VulkanInstanceGeneration&             generation) noexcept
+    {
+        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        {
+            return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::StaleInstanceOwner);
+        }
+        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        {
+            return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::StaleWindowGeneration);
         }
         return std::nullopt;
     }
@@ -846,6 +956,20 @@ struct VulkanInstanceGenerationFactory
                                                                const VulkanUploadSourceRequest&           request,
                                                                VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
 
+    static VulkanUploadDestinationAcquireResult acquireUploadDestination(
+        VulkanInstanceGeneration&                  instance_generation,
+        const VulkanUploadDestinationRequest&      request,
+        VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    static VulkanUploadTransferAcquireResult acquireUploadTransfer(
+        VulkanInstanceGeneration&                  instance_generation,
+        const VulkanUploadTransferRequest&         request,
+        VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    static VulkanUploadTransferParentOperationResult operateUploadTransfer(VulkanInstanceGeneration&                   instance_generation,
+                                                                           const VulkanUploadTransferOperationRequest& request,
+                                                                           UploadTransferParentOperation               operation) noexcept;
+
     static VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfiguration(
         VulkanInstanceGeneration&                  instance_generation,
         const VulkanSwapchainConfigurationRequest& request,
@@ -1017,6 +1141,8 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& ot
     mPresentationDeviceGeneration     = std::move(other.mPresentationDeviceGeneration);
     mLogicalDeviceGeneration          = std::move(other.mLogicalDeviceGeneration);
     mUploadSourceGeneration                  = std::move(other.mUploadSourceGeneration);
+    mUploadDestinationGeneration             = std::move(other.mUploadDestinationGeneration);
+    mUploadTransferGeneration                = std::move(other.mUploadTransferGeneration);
     mSwapchainConfigurationGeneration = std::move(other.mSwapchainConfigurationGeneration);
     mSwapchainGeneration              = std::move(other.mSwapchainGeneration);
     mSwapchainImagesGeneration               = std::move(other.mSwapchainImagesGeneration);
@@ -1025,6 +1151,8 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& ot
     mSwapchainReadbackGeneration             = std::move(other.mSwapchainReadbackGeneration);
     mSwapchainFrameSlotGeneration            = std::move(other.mSwapchainFrameSlotGeneration);
     mUploadSourceEpoch                       = std::exchange(other.mUploadSourceEpoch, 0);
+    mUploadDestinationEpoch                  = std::exchange(other.mUploadDestinationEpoch, 0);
+    mUploadTransferEpoch                     = std::exchange(other.mUploadTransferEpoch, 0);
     mSwapchainPresentationTargetEpoch        = std::exchange(other.mSwapchainPresentationTargetEpoch, 0);
     mSwapchainPresentationPipelineEpoch      = std::exchange(other.mSwapchainPresentationPipelineEpoch, 0);
     mSwapchainReadbackEpoch                  = std::exchange(other.mSwapchainReadbackEpoch, 0);
@@ -1219,6 +1347,146 @@ VkMemoryPropertyFlags VulkanInstanceGeneration::uploadSourceMemoryPropertyFlags(
 bool VulkanInstanceGeneration::uploadSourceIsCoherent() const noexcept
 {
     return mUploadSourceGeneration && mUploadSourceGeneration->isCoherent();
+}
+
+bool VulkanInstanceGeneration::hasUploadDestinationGeneration() const noexcept
+{
+    return mUploadDestinationGeneration != nullptr;
+}
+
+LLRenderContract::BufferHandle VulkanInstanceGeneration::uploadDestinationResourceHandle() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->resourceHandle() : LLRenderContract::BufferHandle{};
+}
+
+std::uint64_t VulkanInstanceGeneration::uploadDestinationExpectedContentIdentity() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->expectedContentIdentity() : 0;
+}
+
+std::uint64_t VulkanInstanceGeneration::uploadDestinationResidentContentIdentity() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->residentContentIdentity() : 0;
+}
+
+bool VulkanInstanceGeneration::uploadDestinationIsResident() const noexcept
+{
+    return mUploadDestinationGeneration && mUploadDestinationGeneration->isResident();
+}
+
+VkBuffer VulkanInstanceGeneration::uploadDestinationBuffer() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->buffer() : VK_NULL_HANDLE;
+}
+
+VkDeviceMemory VulkanInstanceGeneration::uploadDestinationMemory() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->memory() : VK_NULL_HANDLE;
+}
+
+VkDeviceSize VulkanInstanceGeneration::uploadDestinationByteCount() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->byteCount() : 0;
+}
+
+VkBufferUsageFlags VulkanInstanceGeneration::uploadDestinationUsage() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->usage() : 0;
+}
+
+VkDeviceSize VulkanInstanceGeneration::uploadDestinationAllocationSize() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->allocationSize() : 0;
+}
+
+std::uint32_t VulkanInstanceGeneration::uploadDestinationMemoryTypeIndex() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->memoryTypeIndex() : 0;
+}
+
+VkMemoryPropertyFlags VulkanInstanceGeneration::uploadDestinationMemoryPropertyFlags() const noexcept
+{
+    return mUploadDestinationGeneration ? mUploadDestinationGeneration->memoryPropertyFlags() : 0;
+}
+
+bool VulkanInstanceGeneration::uploadDestinationIsDeviceLocal() const noexcept
+{
+    return mUploadDestinationGeneration && mUploadDestinationGeneration->isDeviceLocal();
+}
+
+bool VulkanInstanceGeneration::uploadDestinationIsMapped() const noexcept
+{
+    return mUploadDestinationGeneration && mUploadDestinationGeneration->isMapped();
+}
+
+bool VulkanInstanceGeneration::hasUploadTransferGeneration() const noexcept
+{
+    return mUploadTransferGeneration != nullptr;
+}
+
+LLRenderContract::BufferHandle VulkanInstanceGeneration::uploadTransferResourceHandle() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->resourceHandle() : LLRenderContract::BufferHandle{};
+}
+
+std::uint64_t VulkanInstanceGeneration::uploadTransferContentIdentity() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->contentIdentity() : 0;
+}
+
+VkBuffer VulkanInstanceGeneration::uploadTransferSourceBuffer() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->sourceBuffer() : VK_NULL_HANDLE;
+}
+
+VkBuffer VulkanInstanceGeneration::uploadTransferDestinationBuffer() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->destinationBuffer() : VK_NULL_HANDLE;
+}
+
+VkQueue VulkanInstanceGeneration::uploadTransferQueue() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->queue() : VK_NULL_HANDLE;
+}
+
+std::uint32_t VulkanInstanceGeneration::uploadTransferQueueFamilyIndex() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->queueFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
+}
+
+std::uint32_t VulkanInstanceGeneration::uploadTransferQueueIndex() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->queueIndex() : std::numeric_limits<std::uint32_t>::max();
+}
+
+VkCommandPool VulkanInstanceGeneration::uploadTransferCommandPool() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->commandPool() : VK_NULL_HANDLE;
+}
+
+VkCommandBuffer VulkanInstanceGeneration::uploadTransferCommandBuffer() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->commandBuffer() : VK_NULL_HANDLE;
+}
+
+VkFence VulkanInstanceGeneration::uploadTransferFence() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->fence() : VK_NULL_HANDLE;
+}
+
+std::uint32_t VulkanInstanceGeneration::uploadTransferSubmissionCount() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->submissionAttemptCount() : 0;
+}
+
+std::uint32_t VulkanInstanceGeneration::uploadTransferCompletionWaitCount() const noexcept
+{
+    return mUploadTransferGeneration ? mUploadTransferGeneration->completionWaitCount() : 0;
+}
+
+std::optional<VulkanUploadTransferDisposition> VulkanInstanceGeneration::uploadTransferDisposition() const noexcept
+{
+    return mUploadTransferGeneration ? std::optional{ mUploadTransferGeneration->disposition() } : std::nullopt;
 }
 
 bool VulkanInstanceGeneration::hasSwapchainConfigurationGeneration() const noexcept
@@ -1492,6 +1760,30 @@ VulkanUploadSourceAcquireResult VulkanInstanceGeneration::acquireUploadSourceGen
     return VulkanInstanceDetail::acquireUploadSource(*this, request, nullptr);
 }
 
+VulkanUploadDestinationAcquireResult VulkanInstanceGeneration::acquireUploadDestinationGeneration(
+    const VulkanUploadDestinationRequest& request) noexcept
+{
+    return VulkanInstanceDetail::acquireUploadDestination(*this, request, nullptr);
+}
+
+VulkanUploadTransferAcquireResult VulkanInstanceGeneration::acquireUploadTransferGeneration(
+    const VulkanUploadTransferRequest& request) noexcept
+{
+    return VulkanInstanceDetail::acquireUploadTransfer(*this, request, nullptr);
+}
+
+VulkanUploadTransferParentOperationResult VulkanInstanceGeneration::executeUploadTransfer(
+    const VulkanUploadTransferOperationRequest& request) noexcept
+{
+    return VulkanInstanceGenerationFactory::operateUploadTransfer(*this, request, UploadTransferParentOperation::Execute);
+}
+
+VulkanUploadTransferParentOperationResult VulkanInstanceGeneration::retryUploadTransferCompletion(
+    const VulkanUploadTransferOperationRequest& request) noexcept
+{
+    return VulkanInstanceGenerationFactory::operateUploadTransfer(*this, request, UploadTransferParentOperation::RetryCompletion);
+}
+
 VulkanSwapchainConfigurationAcquireResult VulkanInstanceGeneration::acquireSwapchainConfigurationGeneration(
     const VulkanSwapchainConfigurationRequest& request) noexcept
 {
@@ -1748,9 +2040,49 @@ bool VulkanInstanceGeneration::resetSwapchainConfigurationGeneration() noexcept
     return true;
 }
 
+bool VulkanInstanceGeneration::resetUploadTransferGeneration() noexcept
+{
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
+    if (mUploadTransferGeneration && !mUploadTransferGeneration->reset())
+    {
+        return false;
+    }
+    if (mUploadTransferGeneration)
+    {
+        mUploadTransferGeneration.reset();
+        noteUploadTransferTransition();
+    }
+    return true;
+}
+
+bool VulkanInstanceGeneration::resetUploadDestinationGeneration() noexcept
+{
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
+    if (!resetUploadTransferGeneration())
+    {
+        return false;
+    }
+    if (mUploadDestinationGeneration)
+    {
+        mUploadDestinationGeneration.reset();
+        noteUploadDestinationTransition();
+    }
+    return true;
+}
+
 bool VulkanInstanceGeneration::resetUploadSourceGeneration() noexcept
 {
     if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
+    if (!resetUploadTransferGeneration())
     {
         return false;
     }
@@ -1768,7 +2100,21 @@ bool VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
     {
         return false;
     }
+    // Preflight the device-scoped pending obligation before touching the
+    // independent swapchain chain.
+    if (mUploadTransferGeneration && mUploadTransferGeneration->disposition() == VulkanUploadTransferDisposition::Pending)
+    {
+        return false;
+    }
     if (!resetSwapchainConfigurationGeneration())
+    {
+        return false;
+    }
+    if (!resetUploadTransferGeneration())
+    {
+        return false;
+    }
+    if (!resetUploadDestinationGeneration())
     {
         return false;
     }
@@ -2329,6 +2675,556 @@ VulkanUploadSourceAcquireResult VulkanInstanceGenerationFactory::acquireUploadSo
     {
         return uploadSourceFailure(VulkanUploadSourceAcquireCode::AllocationFailure);
     }
+}
+
+VulkanUploadDestinationAcquireResult VulkanInstanceGenerationFactory::acquireUploadDestination(
+    VulkanInstanceGeneration&                  instance_generation,
+    const VulkanUploadDestinationRequest&      request,
+    VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept
+{
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::InvalidInstanceOwnerCheck);
+    }
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::InvalidWindowGenerationCheck);
+    }
+    if (request.mNativeWindowGeneration == 0)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::InvalidNativeWindowGeneration);
+    }
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance || !instance_generation.mGlobalDispatch ||
+        !instance_generation.mGlobalDispatch->getInstanceProcAddr() || instance_generation.mNativeWindowGeneration == 0)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::InstanceNotLive);
+    }
+    if (!instance_generation.mSurfaceGeneration || instance_generation.surface() == VK_NULL_HANDLE)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::SurfaceNotLive);
+    }
+    if (!instance_generation.mPresentationDeviceGeneration || instance_generation.physicalDevice() == VK_NULL_HANDLE)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::PresentationDeviceNotLive);
+    }
+    if (!instance_generation.mLogicalDeviceGeneration || instance_generation.logicalDevice() == VK_NULL_HANDLE ||
+        instance_generation.presentationQueue() == VK_NULL_HANDLE)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::LogicalDeviceNotLive);
+    }
+    if (!instance_generation.mUploadSourceGeneration || instance_generation.uploadSourceBuffer() == VK_NULL_HANDLE ||
+        instance_generation.uploadSourceMemory() == VK_NULL_HANDLE)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::UploadSourceNotLive);
+    }
+    if (instance_generation.mUploadDestinationGeneration)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::UploadDestinationAlreadyOwned);
+    }
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+        request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::NativeWindowGenerationMismatch);
+    }
+
+    const VulkanUploadSourceDescription   description               = request.mDescription;
+    const std::uint64_t                   acquisition_epoch         = instance_generation.mOwnershipTransitionEpoch;
+    const std::uint64_t                   source_epoch              = instance_generation.mUploadSourceEpoch;
+    const std::uint64_t                   destination_epoch         = instance_generation.mUploadDestinationEpoch;
+    const VulkanGlobalDispatchGeneration* global_dispatch           = &*instance_generation.mGlobalDispatch;
+    const PFN_vkGetInstanceProcAddr       get_instance_proc_addr    = global_dispatch->getInstanceProcAddr();
+    const VkInstance                      instance                  = instance_generation.mInstance;
+    const auto*                           surface_generation        = instance_generation.mSurfaceGeneration.get();
+    const std::uint64_t                   surface_window_generation = instance_generation.surfaceNativeWindowGeneration();
+    const VkSurfaceKHR                    surface                   = instance_generation.surface();
+    const VulkanPhysicalDeviceGeneration* selection                 = instance_generation.mPresentationDeviceGeneration.get();
+    const VulkanLogicalDeviceGeneration*  logical_device            = instance_generation.mLogicalDeviceGeneration.get();
+    const VulkanUploadSourceGeneration*   source                    = instance_generation.mUploadSourceGeneration.get();
+    const VkPhysicalDevice                physical_device           = selection->physicalDevice();
+    const std::uint32_t                   physical_index            = selection->physicalDeviceIndex();
+    const VkDevice                        device                    = logical_device->device();
+    const VkQueue                         queue                     = logical_device->queue();
+    const std::uint32_t                   queue_family              = logical_device->queueFamilyIndex();
+    const std::uint32_t                   queue_index               = logical_device->queueIndex();
+    const LLRenderContract::BufferHandle  source_handle             = source->resourceHandle();
+    const std::uint64_t                   source_identity           = source->contentIdentity();
+    const VkBuffer                        source_buffer             = source->buffer();
+    const VkDeviceMemory                  source_memory             = source->memory();
+    const VkDeviceSize                    source_byte_count         = source->byteCount();
+
+    const auto exact_source_chain = [&]() noexcept
+    {
+        return instance_generation.mOwnershipTransitionEpoch == acquisition_epoch &&
+               instance_generation.mUploadSourceEpoch == source_epoch && instance_generation.mUploadDestinationEpoch == destination_epoch &&
+               instance_generation.mGlobalDispatch && &*instance_generation.mGlobalDispatch == global_dispatch &&
+               instance_generation.mGlobalDispatch->getInstanceProcAddr() == get_instance_proc_addr &&
+               instance_generation.mInstance == instance && instance_generation.mDestroyInstance &&
+               instance_generation.mNativeWindowGeneration == request.mNativeWindowGeneration &&
+               instance_generation.mSurfaceGeneration.get() == surface_generation &&
+               instance_generation.surfaceNativeWindowGeneration() == surface_window_generation &&
+               surface_window_generation == request.mNativeWindowGeneration && instance_generation.surface() == surface &&
+               instance_generation.mPresentationDeviceGeneration.get() == selection &&
+               selection->getInstanceProcAddr() == get_instance_proc_addr && selection->instance() == instance &&
+               selection->surface() == surface && selection->physicalDevice() == physical_device &&
+               selection->physicalDeviceIndex() == physical_index && selection->selectedFor(instance, surface) &&
+               instance_generation.mLogicalDeviceGeneration.get() == logical_device &&
+               logical_device->getInstanceProcAddr() == get_instance_proc_addr && logical_device->instance() == instance &&
+               logical_device->surface() == surface && logical_device->physicalDevice() == physical_device &&
+               logical_device->physicalDeviceIndex() == physical_index && logical_device->device() == device &&
+               logical_device->queue() == queue && logical_device->queueFamilyIndex() == queue_family &&
+               logical_device->queueIndex() == queue_index && logical_device->createdFor(*selection) &&
+               instance_generation.mUploadSourceGeneration.get() == source && source && source->resourceHandle() == source_handle &&
+               source_handle == description.mHandle && source->contentIdentity() == source_identity && source_identity != 0 &&
+               source->buffer() == source_buffer && source_buffer != VK_NULL_HANDLE && source->memory() == source_memory &&
+               source_memory != VK_NULL_HANDLE && source->byteCount() == source_byte_count &&
+               source_byte_count == VULKAN_UPLOAD_SOURCE_BYTE_COUNT && source->createdFor(*selection, *logical_device) &&
+               source->matchesDescription(description) && request.mDescription == description;
+    };
+    const auto freshness_check = [&]() noexcept -> VulkanUploadDestinationAcquireResult
+    {
+        if (VulkanUploadDestinationAcquireResult freshness =
+                uploadDestinationFreshness(request, instance_generation, &instance_generation.mOwnershipTransitionEpoch, acquisition_epoch))
+        {
+            return freshness;
+        }
+        if (!exact_source_chain())
+        {
+            return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::UploadSourceNotLive);
+        }
+        return std::nullopt;
+    };
+
+    if (VulkanUploadDestinationAcquireResult freshness = freshness_check())
+    {
+        return freshness;
+    }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
+
+    VulkanUploadDestinationResolutionResult resolution_result =
+        resolveVulkanUploadDestinationGeneration(*selection, *logical_device, *source, description);
+    if (const auto* error = std::get_if<VulkanUploadDestinationResolutionError>(&resolution_result))
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::ResolutionFailure, *error);
+    }
+
+    try
+    {
+        if (allocation_checkpoint)
+        {
+            allocation_checkpoint();
+            if (instance_generation.mUploadDestinationGeneration)
+            {
+                return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::UploadDestinationAlreadyOwned);
+            }
+            if (!exact_source_chain())
+            {
+                return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::UploadSourceNotLive);
+            }
+        }
+        auto pending =
+            std::make_unique<VulkanUploadDestinationGeneration>(std::move(std::get<VulkanUploadDestinationGeneration>(resolution_result)));
+
+        if (VulkanUploadDestinationAcquireResult freshness = freshness_check())
+        {
+            return freshness;
+        }
+        if (instance_generation.mUploadDestinationGeneration)
+        {
+            return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::UploadDestinationAlreadyOwned);
+        }
+        if (!exact_source_chain() || !pending->createdFor(*selection, *logical_device) || !pending->matchesDescription(description) ||
+            !pending->matchesUploadSource(*source) || pending->isResident())
+        {
+            return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::UploadSourceNotLive);
+        }
+
+        instance_generation.mUploadDestinationGeneration = std::move(pending);
+        instance_generation.noteUploadDestinationTransition();
+        return std::nullopt;
+    }
+    catch (const std::bad_alloc&)
+    {
+        return uploadDestinationFailure(VulkanUploadDestinationAcquireCode::AllocationFailure);
+    }
+}
+
+VulkanUploadTransferAcquireResult VulkanInstanceGenerationFactory::acquireUploadTransfer(
+    VulkanInstanceGeneration&                  instance_generation,
+    const VulkanUploadTransferRequest&         request,
+    VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept
+{
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::InvalidInstanceOwnerCheck);
+    }
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::InvalidWindowGenerationCheck);
+    }
+    if (request.mNativeWindowGeneration == 0)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::InvalidNativeWindowGeneration);
+    }
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance || !instance_generation.mGlobalDispatch ||
+        !instance_generation.mGlobalDispatch->getInstanceProcAddr() || instance_generation.mNativeWindowGeneration == 0)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::InstanceNotLive);
+    }
+    if (!instance_generation.mSurfaceGeneration || instance_generation.surface() == VK_NULL_HANDLE)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::SurfaceNotLive);
+    }
+    if (!instance_generation.mPresentationDeviceGeneration || instance_generation.physicalDevice() == VK_NULL_HANDLE)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::PresentationDeviceNotLive);
+    }
+    if (!instance_generation.mLogicalDeviceGeneration || instance_generation.logicalDevice() == VK_NULL_HANDLE ||
+        instance_generation.presentationQueue() == VK_NULL_HANDLE)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::LogicalDeviceNotLive);
+    }
+    if (!instance_generation.mUploadSourceGeneration || instance_generation.uploadSourceBuffer() == VK_NULL_HANDLE ||
+        instance_generation.uploadSourceMemory() == VK_NULL_HANDLE)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadSourceNotLive);
+    }
+    if (!instance_generation.mUploadDestinationGeneration || instance_generation.uploadDestinationBuffer() == VK_NULL_HANDLE ||
+        instance_generation.uploadDestinationMemory() == VK_NULL_HANDLE)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadDestinationNotLive);
+    }
+    if (instance_generation.mUploadTransferGeneration)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadTransferAlreadyOwned);
+    }
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+        request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::NativeWindowGenerationMismatch);
+    }
+
+    const VulkanUploadSourceDescription   description               = request.mDescription;
+    const std::uint64_t                   acquisition_epoch         = instance_generation.mOwnershipTransitionEpoch;
+    const std::uint64_t                   source_epoch              = instance_generation.mUploadSourceEpoch;
+    const std::uint64_t                   destination_epoch         = instance_generation.mUploadDestinationEpoch;
+    const std::uint64_t                   transfer_epoch            = instance_generation.mUploadTransferEpoch;
+    const VulkanGlobalDispatchGeneration* global_dispatch           = &*instance_generation.mGlobalDispatch;
+    const PFN_vkGetInstanceProcAddr       get_instance_proc_addr    = global_dispatch->getInstanceProcAddr();
+    const VkInstance                      instance                  = instance_generation.mInstance;
+    const auto*                           surface_generation        = instance_generation.mSurfaceGeneration.get();
+    const std::uint64_t                   surface_window_generation = instance_generation.surfaceNativeWindowGeneration();
+    const VkSurfaceKHR                    surface                   = instance_generation.surface();
+    const VulkanPhysicalDeviceGeneration* selection                 = instance_generation.mPresentationDeviceGeneration.get();
+    const VulkanLogicalDeviceGeneration*  logical_device            = instance_generation.mLogicalDeviceGeneration.get();
+    const VulkanUploadSourceGeneration*   source                    = instance_generation.mUploadSourceGeneration.get();
+    VulkanUploadDestinationGeneration*    destination               = instance_generation.mUploadDestinationGeneration.get();
+    const VkPhysicalDevice                physical_device           = selection->physicalDevice();
+    const std::uint32_t                   physical_index            = selection->physicalDeviceIndex();
+    const VkDevice                        device                    = logical_device->device();
+    const VkQueue                         queue                     = logical_device->queue();
+    const std::uint32_t                   queue_family              = logical_device->queueFamilyIndex();
+    const std::uint32_t                   queue_index               = logical_device->queueIndex();
+    const LLRenderContract::BufferHandle  resource_handle           = source->resourceHandle();
+    const std::uint64_t                   content_identity          = source->contentIdentity();
+    const VkBuffer                        source_buffer             = source->buffer();
+    const VkDeviceMemory                  source_memory             = source->memory();
+    const VkDeviceSize                    source_byte_count         = source->byteCount();
+    const VkBuffer                        destination_buffer        = destination->buffer();
+    const VkDeviceMemory                  destination_memory        = destination->memory();
+    const VkDeviceSize                    destination_byte_count    = destination->byteCount();
+    const std::uint64_t                   resident_identity         = destination->residentContentIdentity();
+
+    const auto exact_upload_chain = [&]() noexcept
+    {
+        return instance_generation.mOwnershipTransitionEpoch == acquisition_epoch &&
+               instance_generation.mUploadSourceEpoch == source_epoch && instance_generation.mUploadDestinationEpoch == destination_epoch &&
+               instance_generation.mUploadTransferEpoch == transfer_epoch && instance_generation.mGlobalDispatch &&
+               &*instance_generation.mGlobalDispatch == global_dispatch &&
+               instance_generation.mGlobalDispatch->getInstanceProcAddr() == get_instance_proc_addr &&
+               instance_generation.mInstance == instance && instance_generation.mDestroyInstance &&
+               instance_generation.mNativeWindowGeneration == request.mNativeWindowGeneration &&
+               instance_generation.mSurfaceGeneration.get() == surface_generation &&
+               instance_generation.surfaceNativeWindowGeneration() == surface_window_generation &&
+               surface_window_generation == request.mNativeWindowGeneration && instance_generation.surface() == surface &&
+               instance_generation.mPresentationDeviceGeneration.get() == selection &&
+               selection->getInstanceProcAddr() == get_instance_proc_addr && selection->instance() == instance &&
+               selection->surface() == surface && selection->physicalDevice() == physical_device &&
+               selection->physicalDeviceIndex() == physical_index && selection->selectedFor(instance, surface) &&
+               instance_generation.mLogicalDeviceGeneration.get() == logical_device &&
+               logical_device->getInstanceProcAddr() == get_instance_proc_addr && logical_device->instance() == instance &&
+               logical_device->surface() == surface && logical_device->physicalDevice() == physical_device &&
+               logical_device->physicalDeviceIndex() == physical_index && logical_device->device() == device &&
+               logical_device->queue() == queue && logical_device->queueFamilyIndex() == queue_family &&
+               logical_device->queueIndex() == queue_index && logical_device->createdFor(*selection) &&
+               instance_generation.mUploadSourceGeneration.get() == source && source && source->resourceHandle() == resource_handle &&
+               resource_handle == description.mHandle && source->contentIdentity() == content_identity && content_identity != 0 &&
+               source->buffer() == source_buffer && source_buffer != VK_NULL_HANDLE && source->memory() == source_memory &&
+               source_memory != VK_NULL_HANDLE && source->byteCount() == source_byte_count &&
+               source_byte_count == VULKAN_UPLOAD_SOURCE_BYTE_COUNT && source->createdFor(*selection, *logical_device) &&
+               source->matchesDescription(description) && instance_generation.mUploadDestinationGeneration.get() == destination &&
+               destination && destination->resourceHandle() == resource_handle &&
+               destination->expectedContentIdentity() == content_identity && destination->buffer() == destination_buffer &&
+               destination_buffer != VK_NULL_HANDLE && destination_buffer != source_buffer && destination->memory() == destination_memory &&
+               destination_memory != VK_NULL_HANDLE && destination->byteCount() == destination_byte_count &&
+               destination_byte_count == source_byte_count && destination->residentContentIdentity() == resident_identity &&
+               !destination->isResident() && destination->createdFor(*selection, *logical_device) &&
+               destination->matchesDescription(description) && destination->matchesUploadSource(*source) &&
+               request.mDescription == description;
+    };
+    const auto freshness_check = [&]() noexcept -> VulkanUploadTransferAcquireResult
+    {
+        if (VulkanUploadTransferAcquireResult freshness =
+                uploadTransferFreshness(request, instance_generation, &instance_generation.mOwnershipTransitionEpoch, acquisition_epoch))
+        {
+            return freshness;
+        }
+        if (!exact_upload_chain())
+        {
+            return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadDestinationNotLive);
+        }
+        return std::nullopt;
+    };
+
+    if (VulkanUploadTransferAcquireResult freshness = freshness_check())
+    {
+        return freshness;
+    }
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
+
+    VulkanUploadTransferResolutionResult resolution_result =
+        resolveVulkanUploadTransferGeneration(*selection, *logical_device, description, *source, *destination);
+    if (const auto* error = std::get_if<VulkanUploadTransferResolutionError>(&resolution_result))
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::ResolutionFailure, *error);
+    }
+
+    try
+    {
+        if (allocation_checkpoint)
+        {
+            allocation_checkpoint();
+            if (instance_generation.mUploadTransferGeneration)
+            {
+                return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadTransferAlreadyOwned);
+            }
+            if (!exact_upload_chain())
+            {
+                return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadDestinationNotLive);
+            }
+        }
+        auto pending =
+            std::make_unique<VulkanUploadTransferGeneration>(std::move(std::get<VulkanUploadTransferGeneration>(resolution_result)));
+
+        if (VulkanUploadTransferAcquireResult freshness = freshness_check())
+        {
+            return freshness;
+        }
+        if (instance_generation.mUploadTransferGeneration)
+        {
+            return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadTransferAlreadyOwned);
+        }
+        if (!exact_upload_chain() || !pending->createdFor(*selection, *logical_device) || !pending->matchesDescription(description) ||
+            !pending->retainsUploadResources(*source, *destination) || pending->disposition() != VulkanUploadTransferDisposition::Ready)
+        {
+            return uploadTransferFailure(VulkanUploadTransferAcquireCode::UploadDestinationNotLive);
+        }
+
+        instance_generation.mUploadTransferGeneration = std::move(pending);
+        instance_generation.noteUploadTransferTransition();
+        return std::nullopt;
+    }
+    catch (const std::bad_alloc&)
+    {
+        return uploadTransferFailure(VulkanUploadTransferAcquireCode::AllocationFailure);
+    }
+}
+
+VulkanUploadTransferParentOperationResult VulkanInstanceGenerationFactory::operateUploadTransfer(
+    VulkanInstanceGeneration&                   instance_generation,
+    const VulkanUploadTransferOperationRequest& request,
+    UploadTransferParentOperation               operation) noexcept
+{
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::InvalidInstanceOwnerCheck);
+    }
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::InvalidWindowGenerationCheck);
+    }
+    if (request.mNativeWindowGeneration == 0)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::InvalidNativeWindowGeneration);
+    }
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance || !instance_generation.mGlobalDispatch ||
+        !instance_generation.mGlobalDispatch->getInstanceProcAddr() || instance_generation.mNativeWindowGeneration == 0)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::InstanceNotLive);
+    }
+    if (!instance_generation.mSurfaceGeneration || instance_generation.surface() == VK_NULL_HANDLE)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::SurfaceNotLive);
+    }
+    if (!instance_generation.mPresentationDeviceGeneration || instance_generation.physicalDevice() == VK_NULL_HANDLE)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::PresentationDeviceNotLive);
+    }
+    if (!instance_generation.mLogicalDeviceGeneration || instance_generation.logicalDevice() == VK_NULL_HANDLE ||
+        instance_generation.presentationQueue() == VK_NULL_HANDLE)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::LogicalDeviceNotLive);
+    }
+    if (!instance_generation.mUploadSourceGeneration)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::UploadSourceNotLive);
+    }
+    if (!instance_generation.mUploadDestinationGeneration)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::UploadDestinationNotLive);
+    }
+    if (!instance_generation.mUploadTransferGeneration)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::UploadTransferNotLive);
+    }
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+        request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::NativeWindowGenerationMismatch);
+    }
+
+    const VulkanUploadSourceDescription   description               = request.mDescription;
+    const std::uint64_t                   ownership_epoch           = instance_generation.mOwnershipTransitionEpoch;
+    const std::uint64_t                   source_epoch              = instance_generation.mUploadSourceEpoch;
+    const std::uint64_t                   destination_epoch         = instance_generation.mUploadDestinationEpoch;
+    const std::uint64_t                   transfer_epoch            = instance_generation.mUploadTransferEpoch;
+    const VulkanGlobalDispatchGeneration* global_dispatch           = &*instance_generation.mGlobalDispatch;
+    const PFN_vkGetInstanceProcAddr       get_instance_proc_addr    = global_dispatch->getInstanceProcAddr();
+    const VkInstance                      instance                  = instance_generation.mInstance;
+    const auto*                           surface_generation        = instance_generation.mSurfaceGeneration.get();
+    const std::uint64_t                   surface_window_generation = instance_generation.surfaceNativeWindowGeneration();
+    const VkSurfaceKHR                    surface                   = instance_generation.surface();
+    const VulkanPhysicalDeviceGeneration* selection                 = instance_generation.mPresentationDeviceGeneration.get();
+    const VulkanLogicalDeviceGeneration*  logical_device            = instance_generation.mLogicalDeviceGeneration.get();
+    const VulkanUploadSourceGeneration*   source                    = instance_generation.mUploadSourceGeneration.get();
+    VulkanUploadDestinationGeneration*    destination               = instance_generation.mUploadDestinationGeneration.get();
+    VulkanUploadTransferGeneration*       transfer                  = instance_generation.mUploadTransferGeneration.get();
+    const VkPhysicalDevice                physical_device           = selection->physicalDevice();
+    const std::uint32_t                   physical_index            = selection->physicalDeviceIndex();
+    const VkDevice                        device                    = logical_device->device();
+    const VkQueue                         queue                     = logical_device->queue();
+    const std::uint32_t                   queue_family              = logical_device->queueFamilyIndex();
+    const std::uint32_t                   queue_index               = logical_device->queueIndex();
+    const LLRenderContract::BufferHandle  resource_handle           = source->resourceHandle();
+    const std::uint64_t                   content_identity          = source->contentIdentity();
+    const VkBuffer                        source_buffer             = source->buffer();
+    const VkDeviceMemory                  source_memory             = source->memory();
+    const VkDeviceSize                    source_byte_count         = source->byteCount();
+    const VkBuffer                        destination_buffer        = destination->buffer();
+    const VkDeviceMemory                  destination_memory        = destination->memory();
+    const VkDeviceSize                    destination_byte_count    = destination->byteCount();
+    const std::uint64_t                   resident_identity         = destination->residentContentIdentity();
+    const VkCommandPool                   command_pool              = transfer->commandPool();
+    const VkCommandBuffer                 command_buffer            = transfer->commandBuffer();
+    const VkFence                         fence                     = transfer->fence();
+    const VulkanUploadTransferDisposition disposition               = transfer->disposition();
+    const std::uint32_t                   submission_count          = transfer->submissionAttemptCount();
+    const std::uint32_t                   completion_wait_count     = transfer->completionWaitCount();
+
+    const auto exact_state_error = [&]() noexcept -> std::optional<VulkanUploadTransferParentOperationError>
+    {
+        if (instance_generation.mOwnershipTransitionEpoch != ownership_epoch || !instance_generation.mGlobalDispatch ||
+            &*instance_generation.mGlobalDispatch != global_dispatch ||
+            instance_generation.mGlobalDispatch->getInstanceProcAddr() != get_instance_proc_addr ||
+            instance_generation.mInstance != instance || !instance_generation.mDestroyInstance ||
+            instance_generation.mNativeWindowGeneration != request.mNativeWindowGeneration)
+        {
+            return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::InstanceNotLive);
+        }
+        if (instance_generation.mSurfaceGeneration.get() != surface_generation ||
+            instance_generation.surfaceNativeWindowGeneration() != surface_window_generation ||
+            surface_window_generation != request.mNativeWindowGeneration || instance_generation.surface() != surface)
+        {
+            return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::SurfaceNotLive);
+        }
+        if (instance_generation.mPresentationDeviceGeneration.get() != selection ||
+            selection->getInstanceProcAddr() != get_instance_proc_addr || selection->instance() != instance ||
+            selection->surface() != surface || selection->physicalDevice() != physical_device ||
+            selection->physicalDeviceIndex() != physical_index || !selection->selectedFor(instance, surface))
+        {
+            return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::PresentationDeviceNotLive);
+        }
+        if (instance_generation.mLogicalDeviceGeneration.get() != logical_device ||
+            logical_device->getInstanceProcAddr() != get_instance_proc_addr || logical_device->instance() != instance ||
+            logical_device->surface() != surface || logical_device->physicalDevice() != physical_device ||
+            logical_device->physicalDeviceIndex() != physical_index || logical_device->device() != device ||
+            logical_device->queue() != queue || logical_device->queueFamilyIndex() != queue_family ||
+            logical_device->queueIndex() != queue_index || !logical_device->createdFor(*selection))
+        {
+            return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::LogicalDeviceNotLive);
+        }
+        if (instance_generation.mUploadSourceEpoch != source_epoch || instance_generation.mUploadSourceGeneration.get() != source ||
+            !source || source->resourceHandle() != resource_handle || resource_handle != description.mHandle ||
+            source->contentIdentity() != content_identity || content_identity == 0 || source->buffer() != source_buffer ||
+            source_buffer == VK_NULL_HANDLE || source->memory() != source_memory || source_memory == VK_NULL_HANDLE ||
+            source->byteCount() != source_byte_count || source_byte_count != VULKAN_UPLOAD_SOURCE_BYTE_COUNT ||
+            !source->createdFor(*selection, *logical_device) || !source->matchesDescription(description))
+        {
+            return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::UploadSourceNotLive);
+        }
+        if (instance_generation.mUploadDestinationEpoch != destination_epoch ||
+            instance_generation.mUploadDestinationGeneration.get() != destination || !destination ||
+            destination->resourceHandle() != resource_handle || destination->expectedContentIdentity() != content_identity ||
+            destination->buffer() != destination_buffer || destination_buffer == VK_NULL_HANDLE || destination_buffer == source_buffer ||
+            destination->memory() != destination_memory || destination_memory == VK_NULL_HANDLE ||
+            destination->byteCount() != destination_byte_count || destination_byte_count != source_byte_count ||
+            destination->residentContentIdentity() != resident_identity || !destination->isDeviceLocal() ||
+            !destination->createdFor(*selection, *logical_device) || !destination->matchesDescription(description) ||
+            !destination->matchesUploadSource(*source))
+        {
+            return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::UploadDestinationNotLive);
+        }
+        if (instance_generation.mUploadTransferEpoch != transfer_epoch || instance_generation.mUploadTransferGeneration.get() != transfer ||
+            !transfer || transfer->resourceHandle() != resource_handle || transfer->contentIdentity() != content_identity ||
+            transfer->sourceBuffer() != source_buffer || transfer->destinationBuffer() != destination_buffer ||
+            transfer->queue() != queue || transfer->queueFamilyIndex() != queue_family || transfer->queueIndex() != queue_index ||
+            transfer->commandPool() != command_pool || command_pool == VK_NULL_HANDLE || transfer->commandBuffer() != command_buffer ||
+            command_buffer == VK_NULL_HANDLE || transfer->fence() != fence || fence == VK_NULL_HANDLE ||
+            transfer->disposition() != disposition || transfer->submissionAttemptCount() != submission_count ||
+            transfer->completionWaitCount() != completion_wait_count || !transfer->createdFor(*selection, *logical_device) ||
+            !transfer->matchesDescription(description) ||
+            transfer->retainsUploadResources(*source, *destination) !=
+                (disposition == VulkanUploadTransferDisposition::Ready || disposition == VulkanUploadTransferDisposition::Pending) ||
+            (disposition == VulkanUploadTransferDisposition::Complete &&
+             (!destination->isResident() || resident_identity != content_identity)) ||
+            (disposition != VulkanUploadTransferDisposition::Complete && destination->isResident()) || request.mDescription != description)
+        {
+            return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::UploadTransferNotLive);
+        }
+        return std::nullopt;
+    };
+
+    if (auto error = uploadTransferOperationFreshness(request, instance_generation))
+    {
+        return *error;
+    }
+    if (auto error = exact_state_error())
+    {
+        return *error;
+    }
+
+    VulkanInstanceGeneration::NativeAcquisitionGuard native_guard(instance_generation);
+    if (auto error = exact_state_error())
+    {
+        return *error;
+    }
+
+    const VulkanUploadTransferOperationResult result =
+        operation == UploadTransferParentOperation::Execute ? transfer->execute() : transfer->retryCompletion();
+    if (const auto* error = std::get_if<VulkanUploadTransferOperationError>(&result))
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::OperationFailure, *error);
+    }
+    return std::get<VulkanUploadTransferDisposition>(result);
 }
 
 VulkanSwapchainConfigurationAcquireResult VulkanInstanceGenerationFactory::acquireSwapchainConfiguration(
@@ -5182,6 +6078,20 @@ namespace VulkanInstanceDetail
                                                         AllocationCheckpoint             allocation_checkpoint) noexcept
     {
         return VulkanInstanceGenerationFactory::acquireUploadSource(instance_generation, request, allocation_checkpoint);
+    }
+
+    VulkanUploadDestinationAcquireResult acquireUploadDestination(VulkanInstanceGeneration&             instance_generation,
+                                                                  const VulkanUploadDestinationRequest& request,
+                                                                  AllocationCheckpoint                  allocation_checkpoint) noexcept
+    {
+        return VulkanInstanceGenerationFactory::acquireUploadDestination(instance_generation, request, allocation_checkpoint);
+    }
+
+    VulkanUploadTransferAcquireResult acquireUploadTransfer(VulkanInstanceGeneration&          instance_generation,
+                                                            const VulkanUploadTransferRequest& request,
+                                                            AllocationCheckpoint               allocation_checkpoint) noexcept
+    {
+        return VulkanInstanceGenerationFactory::acquireUploadTransfer(instance_generation, request, allocation_checkpoint);
     }
 
     VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfiguration(VulkanInstanceGeneration&                  instance_generation,

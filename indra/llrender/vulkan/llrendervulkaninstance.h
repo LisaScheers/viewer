@@ -19,7 +19,9 @@
 #include "llrendervulkanglobaldispatch.h"
 #include "llrendervulkanlogicaldevice.h"
 #include "llrendervulkanphysicaldevice.h"
+#include "llrendervulkanuploaddestination.h"
 #include "llrendervulkanuploadsource.h"
+#include "llrendervulkanuploadtransfer.h"
 #include "llrendervulkanswapchain.h"
 #include "llrendervulkanswapchainconfiguration.h"
 #include "llrendervulkanswapchainframeslot.h"
@@ -305,6 +307,122 @@ struct VulkanUploadSourceAcquireError
 };
 
 using VulkanUploadSourceAcquireResult = std::optional<VulkanUploadSourceAcquireError>;
+
+struct VulkanUploadDestinationRequest
+{
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent and native-window lifetime changes during acquisition.
+    std::uint64_t                 mNativeWindowGeneration = 0;
+    VulkanUploadSourceDescription mDescription;
+    VulkanInstanceOwnerCheck      mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck   mWindowGenerationCheck;
+};
+
+enum class VulkanUploadDestinationAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    UploadSourceNotLive,
+    UploadDestinationAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanUploadDestinationAcquireError
+{
+    VulkanUploadDestinationAcquireCode                    mCode = VulkanUploadDestinationAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanUploadDestinationResolutionError> mResolutionError;
+
+    friend constexpr bool operator==(const VulkanUploadDestinationAcquireError&, const VulkanUploadDestinationAcquireError&) = default;
+};
+
+using VulkanUploadDestinationAcquireResult = std::optional<VulkanUploadDestinationAcquireError>;
+
+struct VulkanUploadTransferRequest
+{
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent and native-window lifetime changes during acquisition.
+    std::uint64_t                 mNativeWindowGeneration = 0;
+    VulkanUploadSourceDescription mDescription;
+    VulkanInstanceOwnerCheck      mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck   mWindowGenerationCheck;
+};
+
+enum class VulkanUploadTransferAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    UploadSourceNotLive,
+    UploadDestinationNotLive,
+    UploadTransferAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanUploadTransferAcquireError
+{
+    VulkanUploadTransferAcquireCode                    mCode = VulkanUploadTransferAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanUploadTransferResolutionError> mResolutionError;
+
+    friend constexpr bool operator==(const VulkanUploadTransferAcquireError&, const VulkanUploadTransferAcquireError&) = default;
+};
+
+using VulkanUploadTransferAcquireResult = std::optional<VulkanUploadTransferAcquireError>;
+
+struct VulkanUploadTransferOperationRequest
+{
+    // Authentication callbacks run before native transfer work. No callback is
+    // invoked after command recording or fence waiting begins.
+    std::uint64_t                 mNativeWindowGeneration = 0;
+    VulkanUploadSourceDescription mDescription;
+    VulkanInstanceOwnerCheck      mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck   mWindowGenerationCheck;
+};
+
+enum class VulkanUploadTransferParentOperationCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    UploadSourceNotLive,
+    UploadDestinationNotLive,
+    UploadTransferNotLive,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    OperationFailure
+};
+
+struct VulkanUploadTransferParentOperationError
+{
+    VulkanUploadTransferParentOperationCode           mCode = VulkanUploadTransferParentOperationCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanUploadTransferOperationError> mOperationError;
+
+    friend constexpr bool operator==(const VulkanUploadTransferParentOperationError&,
+                                     const VulkanUploadTransferParentOperationError&) = default;
+};
+
+using VulkanUploadTransferParentOperationResult = std::variant<VulkanUploadTransferParentOperationError, VulkanUploadTransferDisposition>;
 
 struct VulkanSwapchainConfigurationRequest
 {
@@ -731,8 +849,11 @@ using VulkanSwapchainChainRebuildResult =
 // pending, and no swapchain image remains acquired before destruction or any
 // reset that can transitively destroy it. Destruction while the frame-slot
 // disposition names an acquired or pending obligation violates the caller
-// contract. The bool reset APIs defensively retain the live owner for those
-// obligations and while an unpublished native acquisition candidate exists.
+// contract. An upload transfer must likewise leave Pending through successful
+// completion retry before aggregate destruction; its queue work can still use
+// the transfer, destination, and source. The bool reset APIs defensively retain
+// the live owner for those obligations and while an unpublished native
+// acquisition candidate exists.
 class VulkanInstanceGeneration
 {
 public:
@@ -788,6 +909,34 @@ public:
     std::uint32_t                     uploadSourceMemoryTypeIndex() const noexcept;
     VkMemoryPropertyFlags             uploadSourceMemoryPropertyFlags() const noexcept;
     bool                              uploadSourceIsCoherent() const noexcept;
+    bool                                           hasUploadDestinationGeneration() const noexcept;
+    LLRenderContract::BufferHandle                 uploadDestinationResourceHandle() const noexcept;
+    std::uint64_t                                  uploadDestinationExpectedContentIdentity() const noexcept;
+    std::uint64_t                                  uploadDestinationResidentContentIdentity() const noexcept;
+    bool                                           uploadDestinationIsResident() const noexcept;
+    VkBuffer                                       uploadDestinationBuffer() const noexcept;
+    VkDeviceMemory                                 uploadDestinationMemory() const noexcept;
+    VkDeviceSize                                   uploadDestinationByteCount() const noexcept;
+    VkBufferUsageFlags                             uploadDestinationUsage() const noexcept;
+    VkDeviceSize                                   uploadDestinationAllocationSize() const noexcept;
+    std::uint32_t                                  uploadDestinationMemoryTypeIndex() const noexcept;
+    VkMemoryPropertyFlags                          uploadDestinationMemoryPropertyFlags() const noexcept;
+    bool                                           uploadDestinationIsDeviceLocal() const noexcept;
+    bool                                           uploadDestinationIsMapped() const noexcept;
+    bool                                           hasUploadTransferGeneration() const noexcept;
+    LLRenderContract::BufferHandle                 uploadTransferResourceHandle() const noexcept;
+    std::uint64_t                                  uploadTransferContentIdentity() const noexcept;
+    VkBuffer                                       uploadTransferSourceBuffer() const noexcept;
+    VkBuffer                                       uploadTransferDestinationBuffer() const noexcept;
+    VkQueue                                        uploadTransferQueue() const noexcept;
+    std::uint32_t                                  uploadTransferQueueFamilyIndex() const noexcept;
+    std::uint32_t                                  uploadTransferQueueIndex() const noexcept;
+    VkCommandPool                                  uploadTransferCommandPool() const noexcept;
+    VkCommandBuffer                                uploadTransferCommandBuffer() const noexcept;
+    VkFence                                        uploadTransferFence() const noexcept;
+    std::uint32_t                                  uploadTransferSubmissionCount() const noexcept;
+    std::uint32_t                                  uploadTransferCompletionWaitCount() const noexcept;
+    std::optional<VulkanUploadTransferDisposition> uploadTransferDisposition() const noexcept;
     bool                              hasSwapchainConfigurationGeneration() const noexcept;
     VkExtent2D                        swapchainDrawableExtent() const noexcept;
     VkSurfaceCapabilitiesKHR          swapchainSurfaceCapabilities() const noexcept;
@@ -843,6 +992,10 @@ public:
     VulkanPresentationDeviceAcquireResult     acquirePresentationDeviceGeneration(const VulkanPresentationDeviceRequest& request) noexcept;
     VulkanLogicalDeviceAcquireResult          acquireLogicalDeviceGeneration(const VulkanLogicalDeviceRequest& request) noexcept;
     VulkanUploadSourceAcquireResult           acquireUploadSourceGeneration(const VulkanUploadSourceRequest& request) noexcept;
+    VulkanUploadDestinationAcquireResult      acquireUploadDestinationGeneration(const VulkanUploadDestinationRequest& request) noexcept;
+    VulkanUploadTransferAcquireResult         acquireUploadTransferGeneration(const VulkanUploadTransferRequest& request) noexcept;
+    VulkanUploadTransferParentOperationResult executeUploadTransfer(const VulkanUploadTransferOperationRequest& request) noexcept;
+    VulkanUploadTransferParentOperationResult retryUploadTransferCompletion(const VulkanUploadTransferOperationRequest& request) noexcept;
     VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfigurationGeneration(
         const VulkanSwapchainConfigurationRequest& request) noexcept;
     VulkanSwapchainAcquireResult       acquireSwapchainGeneration(const VulkanSwapchainRequest& request) noexcept;
@@ -879,8 +1032,11 @@ public:
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentOperationResult retrySwapchainFrameSlotCancellationCompletion(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
-    // Callers externally serialize these resets. The upload source is a
-    // logical-device child independent of drawable and swapchain lifetime.
+    // Callers externally serialize these resets. Upload resources are
+    // logical-device children independent of drawable and swapchain lifetime.
+    // A pending transfer refuses direct and transitive reset without mutation.
+    // Destination and source reset first retire a resettable transfer. Either
+    // direct resource reset preserves the other resource and the swapchain.
     // Image teardown retires the
     // frame slot, readback destination, presentation pipeline, and presentation
     // target in that order. Direct readback reset preserves every presentation
@@ -896,6 +1052,8 @@ public:
     bool resetSwapchainImagesGeneration() noexcept;
     bool resetSwapchainGeneration() noexcept;
     bool resetSwapchainConfigurationGeneration() noexcept;
+    bool resetUploadTransferGeneration() noexcept;
+    bool resetUploadDestinationGeneration() noexcept;
     bool resetUploadSourceGeneration() noexcept;
     bool resetLogicalDeviceGeneration() noexcept;
     bool resetPresentationDeviceGeneration() noexcept;
@@ -924,6 +1082,16 @@ private:
     void noteUploadSourceTransition() noexcept
     {
         ++mUploadSourceEpoch;
+        noteOwnershipTransition();
+    }
+    void noteUploadDestinationTransition() noexcept
+    {
+        ++mUploadDestinationEpoch;
+        noteOwnershipTransition();
+    }
+    void noteUploadTransferTransition() noexcept
+    {
+        ++mUploadTransferEpoch;
         noteOwnershipTransition();
     }
     void noteSwapchainPresentationTargetTransition() noexcept
@@ -961,6 +1129,8 @@ private:
     std::unique_ptr<VulkanPhysicalDeviceGeneration>         mPresentationDeviceGeneration;
     std::unique_ptr<VulkanLogicalDeviceGeneration>          mLogicalDeviceGeneration;
     std::unique_ptr<VulkanUploadSourceGeneration>                  mUploadSourceGeneration;
+    std::unique_ptr<VulkanUploadDestinationGeneration>             mUploadDestinationGeneration;
+    std::unique_ptr<VulkanUploadTransferGeneration>                mUploadTransferGeneration;
     std::unique_ptr<VulkanSwapchainConfigurationGeneration>    mSwapchainConfigurationGeneration;
     std::unique_ptr<VulkanSwapchainGeneration>                 mSwapchainGeneration;
     std::unique_ptr<VulkanSwapchainImagesGeneration>               mSwapchainImagesGeneration;
@@ -969,6 +1139,8 @@ private:
     std::unique_ptr<VulkanSwapchainReadbackGeneration>             mSwapchainReadbackGeneration;
     std::unique_ptr<VulkanSwapchainFrameSlotGeneration>            mSwapchainFrameSlotGeneration;
     std::uint64_t                                                  mUploadSourceEpoch                  = 0;
+    std::uint64_t                                                  mUploadDestinationEpoch             = 0;
+    std::uint64_t                                                  mUploadTransferEpoch                = 0;
     std::uint64_t                                                  mSwapchainPresentationTargetEpoch   = 0;
     std::uint64_t                                                  mSwapchainPresentationPipelineEpoch = 0;
     std::uint64_t                                                  mSwapchainReadbackEpoch             = 0;
@@ -1005,6 +1177,14 @@ namespace VulkanInstanceDetail
     VulkanUploadSourceAcquireResult acquireUploadSource(VulkanInstanceGeneration&        instance_generation,
                                                         const VulkanUploadSourceRequest& request,
                                                         AllocationCheckpoint             allocation_checkpoint) noexcept;
+
+    VulkanUploadDestinationAcquireResult acquireUploadDestination(VulkanInstanceGeneration&             instance_generation,
+                                                                  const VulkanUploadDestinationRequest& request,
+                                                                  AllocationCheckpoint                  allocation_checkpoint) noexcept;
+
+    VulkanUploadTransferAcquireResult acquireUploadTransfer(VulkanInstanceGeneration&          instance_generation,
+                                                            const VulkanUploadTransferRequest& request,
+                                                            AllocationCheckpoint               allocation_checkpoint) noexcept;
 
     VulkanSwapchainConfigurationAcquireResult acquireSwapchainConfiguration(VulkanInstanceGeneration&                  instance_generation,
                                                                             const VulkanSwapchainConfigurationRequest& request,

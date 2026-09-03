@@ -313,6 +313,54 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       INTEGRATION_TEST_llrendervulkanuploadsource
       PRIVATE VK_NO_PROTOTYPES)
 
+  add_library(llrendervulkanuploaddestination STATIC
+      vulkan/llrendervulkanuploaddestination.cpp
+      vulkan/llrendervulkanuploaddestination.h)
+  target_include_directories(llrendervulkanuploaddestination
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanuploaddestination SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanuploaddestination
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanuploaddestination
+      PUBLIC llrendervulkanuploadsource)
+  set_target_properties(llrendervulkanuploaddestination PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanuploaddestination_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanuploaddestination
+      ""
+      "llrendervulkanuploaddestination;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanuploaddestination
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanuploadtransfer STATIC
+      vulkan/llrendervulkanuploadtransfer.cpp
+      vulkan/llrendervulkanuploadtransfer.h)
+  target_include_directories(llrendervulkanuploadtransfer
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanuploadtransfer SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanuploadtransfer
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanuploadtransfer
+      PUBLIC llrendervulkanuploaddestination)
+  set_target_properties(llrendervulkanuploadtransfer PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanuploadtransfer_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanuploadtransfer
+      ""
+      "llrendervulkanuploadtransfer;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanuploadtransfer
+      PRIVATE VK_NO_PROTOTYPES)
+
   add_library(llrendervulkanswapchainconfiguration STATIC
       vulkan/llrendervulkanswapchainconfiguration.cpp
       vulkan/llrendervulkanswapchainconfiguration.h)
@@ -503,6 +551,8 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
           llrendervulkanglobaldispatch
           llrendervulkanlogicaldevice
           llrendervulkanuploadsource
+          llrendervulkanuploaddestination
+          llrendervulkanuploadtransfer
           llrendervulkanphysicaldevice
           llrendervulkanswapchain
           llrendervulkanswapchainimages

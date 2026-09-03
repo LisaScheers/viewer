@@ -48,6 +48,7 @@ constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_CLEAR_ONE{ { 0.
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor INITIAL_CLEAR_TWO{ { 0.75f, 0.125f, 0.375f, 1.0f } };
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_CLEAR_ONE{ { 0.0625f, 0.625f, 0.25f, 1.0f } };
 constexpr LLRenderVulkan::VulkanSwapchainFrameClearColor REBUILT_CLEAR_TWO{ { 0.875f, 0.375f, 0.0625f, 1.0f } };
+constexpr VkBufferUsageFlags UPLOAD_DESTINATION_USAGE = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 
 static_assert(INITIAL_CLEAR_ONE != INITIAL_CLEAR_TWO && INITIAL_CLEAR_ONE != REBUILT_CLEAR_ONE &&
               INITIAL_CLEAR_ONE != REBUILT_CLEAR_TWO && INITIAL_CLEAR_TWO != REBUILT_CLEAR_ONE &&
@@ -355,6 +356,163 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->uploadSourceIsCoherent() == retained_upload_source_coherent;
     };
 
+    LLRenderVulkan::VulkanUploadDestinationRequest upload_destination_request;
+    upload_destination_request.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
+    upload_destination_request.mDescription            = upload_source_description;
+    upload_destination_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    upload_destination_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+
+    const auto upload_destination_error = mutable_instance_generation->acquireUploadDestinationGeneration(upload_destination_request);
+    ensure("the exact upload source creates one device-local 48-byte vertex destination", !upload_destination_error.has_value());
+    ensure("the unpublished destination owns distinct native storage and exact source identity",
+           instance_generation->hasUploadDestinationGeneration() &&
+               instance_generation->uploadDestinationResourceHandle() == upload_source_description.mHandle &&
+               instance_generation->uploadDestinationExpectedContentIdentity() == retained_upload_source_identity &&
+               instance_generation->uploadDestinationResidentContentIdentity() == 0 &&
+               !instance_generation->uploadDestinationIsResident() && instance_generation->uploadDestinationBuffer() != VK_NULL_HANDLE &&
+               instance_generation->uploadDestinationBuffer() != retained_upload_source_buffer &&
+               instance_generation->uploadDestinationMemory() != VK_NULL_HANDLE &&
+               instance_generation->uploadDestinationMemory() != retained_upload_source_memory &&
+               instance_generation->uploadDestinationByteCount() == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+               instance_generation->uploadDestinationUsage() == UPLOAD_DESTINATION_USAGE &&
+               instance_generation->uploadDestinationAllocationSize() >= instance_generation->uploadDestinationByteCount() &&
+               (instance_generation->uploadDestinationMemoryPropertyFlags() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0 &&
+               instance_generation->uploadDestinationIsDeviceLocal() && !instance_generation->uploadDestinationIsMapped());
+    ensure_equals("upload-destination acquisition emits no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("upload-destination acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("upload-destination acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    LLRenderVulkan::VulkanUploadTransferRequest upload_transfer_request;
+    upload_transfer_request.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
+    upload_transfer_request.mDescription            = upload_source_description;
+    upload_transfer_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    upload_transfer_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+
+    const auto upload_transfer_error = mutable_instance_generation->acquireUploadTransferGeneration(upload_transfer_request);
+    ensure("the exact source and destination acquire one ready device-scoped transfer", !upload_transfer_error.has_value());
+    ensure("the ready transfer retains exact resource, queue, and synchronization identity",
+           instance_generation->hasUploadTransferGeneration() &&
+               instance_generation->uploadTransferResourceHandle() == upload_source_description.mHandle &&
+               instance_generation->uploadTransferContentIdentity() == retained_upload_source_identity &&
+               instance_generation->uploadTransferSourceBuffer() == retained_upload_source_buffer &&
+               instance_generation->uploadTransferDestinationBuffer() == instance_generation->uploadDestinationBuffer() &&
+               instance_generation->uploadTransferQueue() == instance_generation->presentationQueue() &&
+               instance_generation->uploadTransferQueueFamilyIndex() == instance_generation->logicalDeviceQueueFamilyIndex() &&
+               instance_generation->uploadTransferQueueIndex() == instance_generation->logicalDeviceQueueIndex() &&
+               instance_generation->uploadTransferCommandPool() != VK_NULL_HANDLE &&
+               instance_generation->uploadTransferCommandBuffer() != VK_NULL_HANDLE &&
+               instance_generation->uploadTransferFence() != VK_NULL_HANDLE && instance_generation->uploadTransferSubmissionCount() == 0 &&
+               instance_generation->uploadTransferCompletionWaitCount() == 0 &&
+               instance_generation->uploadTransferDisposition() == LLRenderVulkan::VulkanUploadTransferDisposition::Ready);
+
+    LLRenderVulkan::VulkanUploadTransferOperationRequest upload_transfer_operation;
+    upload_transfer_operation.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
+    upload_transfer_operation.mDescription            = upload_source_description;
+    upload_transfer_operation.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    upload_transfer_operation.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+
+    const auto  upload_transfer_result      = mutable_instance_generation->executeUploadTransfer(upload_transfer_operation);
+    const auto* upload_transfer_disposition = std::get_if<LLRenderVulkan::VulkanUploadTransferDisposition>(&upload_transfer_result);
+    ensure("the native copy submits once, waits once, and reaches complete fence retirement",
+           upload_transfer_disposition && *upload_transfer_disposition == LLRenderVulkan::VulkanUploadTransferDisposition::Complete &&
+               instance_generation->uploadTransferDisposition() == LLRenderVulkan::VulkanUploadTransferDisposition::Complete &&
+               instance_generation->uploadTransferSubmissionCount() == 1 && instance_generation->uploadTransferCompletionWaitCount() == 1);
+    ensure("completed fence retirement publishes the exact source identity on the device-local destination",
+           instance_generation->uploadDestinationIsResident() &&
+               instance_generation->uploadDestinationExpectedContentIdentity() == retained_upload_source_identity &&
+               instance_generation->uploadDestinationResidentContentIdentity() == retained_upload_source_identity &&
+               upload_source_retained());
+
+    const auto  completed_retry       = mutable_instance_generation->retryUploadTransferCompletion(upload_transfer_operation);
+    const auto* completed_retry_error = std::get_if<LLRenderVulkan::VulkanUploadTransferParentOperationError>(&completed_retry);
+    ensure("the complete transfer rejects a pending-only retry without another submit or fence wait",
+           completed_retry_error &&
+               completed_retry_error->mCode == LLRenderVulkan::VulkanUploadTransferParentOperationCode::OperationFailure &&
+               completed_retry_error->mOperationError &&
+               completed_retry_error->mOperationError->mCode == LLRenderVulkan::VulkanUploadTransferOperationCode::InvalidDisposition &&
+               completed_retry_error->mOperationError->mDisposition == LLRenderVulkan::VulkanUploadTransferDisposition::Complete &&
+               instance_generation->uploadTransferSubmissionCount() == 1 && instance_generation->uploadTransferCompletionWaitCount() == 1);
+    ensure_equals("upload completion and rejected retry emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("upload completion preserves the private Cocoa owner and exact drawable geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == upload_source_backing_scale &&
+               owner->drawableWidth() == BACKING_WIDTH && owner->drawableHeight() == BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("upload completion creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("upload completion leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const LLRenderContract::BufferHandle retained_upload_destination_handle = instance_generation->uploadDestinationResourceHandle();
+    const std::uint64_t  retained_upload_destination_expected_identity   = instance_generation->uploadDestinationExpectedContentIdentity();
+    const std::uint64_t  retained_upload_destination_resident_identity   = instance_generation->uploadDestinationResidentContentIdentity();
+    const VkBuffer       retained_upload_destination_buffer              = instance_generation->uploadDestinationBuffer();
+    const VkDeviceMemory retained_upload_destination_memory              = instance_generation->uploadDestinationMemory();
+    const VkDeviceSize   retained_upload_destination_bytes               = instance_generation->uploadDestinationByteCount();
+    const VkBufferUsageFlags    retained_upload_destination_usage        = instance_generation->uploadDestinationUsage();
+    const VkDeviceSize          retained_upload_destination_allocation   = instance_generation->uploadDestinationAllocationSize();
+    const std::uint32_t         retained_upload_destination_memory_type  = instance_generation->uploadDestinationMemoryTypeIndex();
+    const VkMemoryPropertyFlags retained_upload_destination_memory_flags = instance_generation->uploadDestinationMemoryPropertyFlags();
+    const auto                  upload_destination_retained              = [&]() noexcept
+    {
+        return instance_generation->hasUploadDestinationGeneration() &&
+               instance_generation->uploadDestinationResourceHandle() == retained_upload_destination_handle &&
+               instance_generation->uploadDestinationExpectedContentIdentity() == retained_upload_destination_expected_identity &&
+               instance_generation->uploadDestinationResidentContentIdentity() == retained_upload_destination_resident_identity &&
+               retained_upload_destination_expected_identity == retained_upload_source_identity &&
+               retained_upload_destination_resident_identity == retained_upload_source_identity &&
+               instance_generation->uploadDestinationIsResident() &&
+               instance_generation->uploadDestinationBuffer() == retained_upload_destination_buffer &&
+               instance_generation->uploadDestinationMemory() == retained_upload_destination_memory &&
+               instance_generation->uploadDestinationByteCount() == retained_upload_destination_bytes &&
+               instance_generation->uploadDestinationUsage() == retained_upload_destination_usage &&
+               retained_upload_destination_usage == UPLOAD_DESTINATION_USAGE &&
+               instance_generation->uploadDestinationAllocationSize() == retained_upload_destination_allocation &&
+               instance_generation->uploadDestinationMemoryTypeIndex() == retained_upload_destination_memory_type &&
+               instance_generation->uploadDestinationMemoryPropertyFlags() == retained_upload_destination_memory_flags &&
+               instance_generation->uploadDestinationIsDeviceLocal() && !instance_generation->uploadDestinationIsMapped();
+    };
+
+    const LLRenderContract::BufferHandle retained_upload_transfer_handle         = instance_generation->uploadTransferResourceHandle();
+    const std::uint64_t                  retained_upload_transfer_identity       = instance_generation->uploadTransferContentIdentity();
+    const VkBuffer                       retained_upload_transfer_source         = instance_generation->uploadTransferSourceBuffer();
+    const VkBuffer                       retained_upload_transfer_destination    = instance_generation->uploadTransferDestinationBuffer();
+    const VkQueue                        retained_upload_transfer_queue          = instance_generation->uploadTransferQueue();
+    const std::uint32_t                  retained_upload_transfer_queue_family   = instance_generation->uploadTransferQueueFamilyIndex();
+    const std::uint32_t                  retained_upload_transfer_queue_index    = instance_generation->uploadTransferQueueIndex();
+    const VkCommandPool                  retained_upload_transfer_command_pool   = instance_generation->uploadTransferCommandPool();
+    const VkCommandBuffer                retained_upload_transfer_command_buffer = instance_generation->uploadTransferCommandBuffer();
+    const VkFence                        retained_upload_transfer_fence          = instance_generation->uploadTransferFence();
+    const std::uint32_t                  retained_upload_transfer_submissions    = instance_generation->uploadTransferSubmissionCount();
+    const std::uint32_t                  retained_upload_transfer_waits          = instance_generation->uploadTransferCompletionWaitCount();
+    const auto                           upload_transfer_retained                = [&]() noexcept
+    {
+        return instance_generation->hasUploadTransferGeneration() &&
+               instance_generation->uploadTransferResourceHandle() == retained_upload_transfer_handle &&
+               instance_generation->uploadTransferContentIdentity() == retained_upload_transfer_identity &&
+               retained_upload_transfer_identity == retained_upload_source_identity &&
+               instance_generation->uploadTransferSourceBuffer() == retained_upload_transfer_source &&
+               retained_upload_transfer_source == retained_upload_source_buffer &&
+               instance_generation->uploadTransferDestinationBuffer() == retained_upload_transfer_destination &&
+               retained_upload_transfer_destination == retained_upload_destination_buffer &&
+               instance_generation->uploadTransferQueue() == retained_upload_transfer_queue &&
+               instance_generation->uploadTransferQueueFamilyIndex() == retained_upload_transfer_queue_family &&
+               instance_generation->uploadTransferQueueIndex() == retained_upload_transfer_queue_index &&
+               instance_generation->uploadTransferCommandPool() == retained_upload_transfer_command_pool &&
+               instance_generation->uploadTransferCommandBuffer() == retained_upload_transfer_command_buffer &&
+               instance_generation->uploadTransferFence() == retained_upload_transfer_fence &&
+               instance_generation->uploadTransferSubmissionCount() == retained_upload_transfer_submissions &&
+               instance_generation->uploadTransferCompletionWaitCount() == retained_upload_transfer_waits &&
+               retained_upload_transfer_submissions == 1 && retained_upload_transfer_waits == 1 &&
+               instance_generation->uploadTransferDisposition() == LLRenderVulkan::VulkanUploadTransferDisposition::Complete;
+    };
+    const auto upload_chain_retained = [&]() noexcept
+    {
+        return upload_source_retained() && upload_destination_retained() && upload_transfer_retained();
+    };
+
     const auto swapchain_configuration_error = owner->acquireSwapchainConfigurationGeneration();
     ensure("the exact logical-device chain selects one swapchain configuration", !swapchain_configuration_error.has_value());
     ensure("the instance parent owns one swapchain-configuration generation", instance_generation->hasSwapchainConfigurationGeneration());
@@ -556,7 +714,7 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->swapchainFramePresentationReadySemaphore() == initial_presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == initial_submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == initial_present_completion_fence);
-    ensure("the initial observed draw retains the exact immutable upload-source owner, handles, and identity", upload_source_retained());
+    ensure("the initial observed draw retains the exact complete upload chain without resubmission", upload_chain_retained());
     ensure_equals("the initial observed draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
     ensure("the initial observed draw preserves the private Cocoa owner and exact Vulkan generation",
@@ -594,7 +752,7 @@ void window_vulkan_macos_wsi_object::test<1>()
            instance_generation->surface() == retained_surface && instance_generation->physicalDevice() == retained_physical_device &&
                instance_generation->logicalDevice() == retained_logical_device &&
                instance_generation->presentationQueue() == retained_queue);
-    ensure("same-surface rebuild retains the exact immutable upload-source owner, handles, and identity", upload_source_retained());
+    ensure("same-surface rebuild retains the exact complete upload chain without resubmission", upload_chain_retained());
     resolved_image_count = instance_generation->resolvedSwapchainImageCount();
     ensure("the rebuilt MoltenVK swapchain publishes a complete nonempty image and frame-slot chain",
            resolved_image_count != 0 && instance_generation->swapchain() != VK_NULL_HANDLE &&
@@ -689,7 +847,7 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->swapchainFramePresentationReadySemaphore() == presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == present_completion_fence);
-    ensure("the rebuilt observed draw retains the exact immutable upload-source owner, handles, and identity", upload_source_retained());
+    ensure("the rebuilt observed draw retains the exact complete upload chain without resubmission", upload_chain_retained());
     ensure_equals("the rebuilt observed draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
     ensure("the rebuilt observed draw preserves the private Cocoa owner and exact changed geometry",
@@ -700,7 +858,7 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("the rebuilt observed draw creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("the rebuilt observed draw leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
-    ensure("the native smoke independently resets the upload source while the swapchain chain is reusable",
+    ensure("the native smoke resets the upload source and its completed transfer while the swapchain chain is reusable",
            mutable_instance_generation->resetUploadSourceGeneration());
     ensure("explicit upload-source reset removes its owner, identity, buffer, memory, and allocation metadata",
            !instance_generation->hasUploadSourceGeneration() &&
@@ -709,7 +867,21 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->uploadSourceMemory() == VK_NULL_HANDLE && instance_generation->uploadSourceByteCount() == 0 &&
                instance_generation->uploadSourceAllocationSize() == 0 && instance_generation->uploadSourceMemoryTypeIndex() == 0 &&
                instance_generation->uploadSourceMemoryPropertyFlags() == 0 && !instance_generation->uploadSourceIsCoherent());
-    ensure("upload-source reset leaves the complete presentation and observation chain live",
+    ensure("upload-source reset retires the completed transfer without changing the resident destination",
+           !instance_generation->hasUploadTransferGeneration() &&
+               instance_generation->uploadTransferResourceHandle() == LLRenderContract::BufferHandle{} &&
+               instance_generation->uploadTransferContentIdentity() == 0 &&
+               instance_generation->uploadTransferSourceBuffer() == VK_NULL_HANDLE &&
+               instance_generation->uploadTransferDestinationBuffer() == VK_NULL_HANDLE &&
+               instance_generation->uploadTransferQueue() == VK_NULL_HANDLE &&
+               instance_generation->uploadTransferQueueFamilyIndex() == VK_QUEUE_FAMILY_IGNORED &&
+               instance_generation->uploadTransferQueueIndex() == std::numeric_limits<std::uint32_t>::max() &&
+               instance_generation->uploadTransferCommandPool() == VK_NULL_HANDLE &&
+               instance_generation->uploadTransferCommandBuffer() == VK_NULL_HANDLE &&
+               instance_generation->uploadTransferFence() == VK_NULL_HANDLE && instance_generation->uploadTransferSubmissionCount() == 0 &&
+               instance_generation->uploadTransferCompletionWaitCount() == 0 && !instance_generation->uploadTransferDisposition() &&
+               upload_destination_retained());
+    ensure("upload-source and terminal-transfer reset leaves the complete presentation and observation chain live",
            instance_generation->hasSurfaceGeneration() && instance_generation->surface() != VK_NULL_HANDLE &&
                instance_generation->hasPresentationDeviceGeneration() && instance_generation->physicalDevice() != VK_NULL_HANDLE &&
                instance_generation->hasLogicalDeviceGeneration() && instance_generation->logicalDevice() != VK_NULL_HANDLE &&
@@ -723,7 +895,8 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->hasSwapchainReadbackGeneration() && instance_generation->swapchainReadbackBuffer() != VK_NULL_HANDLE &&
                instance_generation->hasSwapchainFrameSlotGeneration() &&
                instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable);
-    ensure_equals("upload-source destruction emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+    ensure_equals("upload-source and terminal-transfer destruction emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
     ensure("upload-source reset preserves the private Cocoa owner and exact changed geometry",
            owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
@@ -732,6 +905,44 @@ void window_vulkan_macos_wsi_object::test<1>()
                LLWindow::instanceCount() == initial_window_count);
     ensure("upload-source reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("upload-source reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    ensure("the native smoke resets the resident upload destination while the swapchain child chain is live",
+           mutable_instance_generation->resetUploadDestinationGeneration());
+    ensure("explicit upload-destination reset removes its owner, identities, usage, storage, and allocation metadata",
+           !instance_generation->hasUploadDestinationGeneration() &&
+               instance_generation->uploadDestinationResourceHandle() == LLRenderContract::BufferHandle{} &&
+               instance_generation->uploadDestinationExpectedContentIdentity() == 0 &&
+               instance_generation->uploadDestinationResidentContentIdentity() == 0 &&
+               !instance_generation->uploadDestinationIsResident() && instance_generation->uploadDestinationBuffer() == VK_NULL_HANDLE &&
+               instance_generation->uploadDestinationMemory() == VK_NULL_HANDLE && instance_generation->uploadDestinationByteCount() == 0 &&
+               instance_generation->uploadDestinationUsage() == 0 && instance_generation->uploadDestinationAllocationSize() == 0 &&
+               instance_generation->uploadDestinationMemoryTypeIndex() == 0 &&
+               instance_generation->uploadDestinationMemoryPropertyFlags() == 0 && !instance_generation->uploadDestinationIsDeviceLocal() &&
+               !instance_generation->uploadDestinationIsMapped());
+    ensure("upload-destination reset leaves the complete presentation and observation chain live",
+           instance_generation->hasSurfaceGeneration() && instance_generation->surface() != VK_NULL_HANDLE &&
+               instance_generation->hasPresentationDeviceGeneration() && instance_generation->physicalDevice() != VK_NULL_HANDLE &&
+               instance_generation->hasLogicalDeviceGeneration() && instance_generation->logicalDevice() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
+               instance_generation->swapchain() != VK_NULL_HANDLE && instance_generation->hasSwapchainImagesGeneration() &&
+               instance_generation->resolvedSwapchainImageCount() == resolved_image_count &&
+               instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainPresentationPipelineGeneration() &&
+               instance_generation->swapchainPresentationPipeline() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainReadbackGeneration() && instance_generation->swapchainReadbackBuffer() != VK_NULL_HANDLE &&
+               instance_generation->hasSwapchainFrameSlotGeneration() &&
+               instance_generation->swapchainFrameSlotDisposition() == LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure_equals("upload-destination destruction emits no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("upload-destination reset preserves the private Cocoa owner and exact changed geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == rebuilt_draw_backing_scale &&
+               owner->drawableWidth() == REBUILT_BACKING_WIDTH && owner->drawableHeight() == REBUILT_BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("upload-destination reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("upload-destination reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
     ensure("the native smoke explicitly resets the frame slot before swapchain images", owner->resetSwapchainFrameSlotGeneration());
     ensure("explicit frame-slot reset removes all six owned handles",
