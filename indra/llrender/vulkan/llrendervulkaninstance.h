@@ -20,6 +20,7 @@
 #include "llrendervulkanlogicaldevice.h"
 #include "llrendervulkanphysicaldevice.h"
 #include "llrendervulkantextureuploaddestination.h"
+#include "llrendervulkantextureuploadsamplebinding.h"
 #include "llrendervulkantextureuploadsource.h"
 #include "llrendervulkantextureuploadtransfer.h"
 #include "llrendervulkanuploaddestination.h"
@@ -466,6 +467,47 @@ struct VulkanTextureUploadTransferParentOperationError
 };
 using VulkanTextureUploadTransferParentOperationResult =
     std::variant<VulkanTextureUploadTransferParentOperationError, VulkanTextureUploadTransferDisposition>;
+
+struct VulkanTextureUploadSampleBindingRequest
+{
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent and native-window lifetime changes during acquisition.
+    std::uint64_t                               mNativeWindowGeneration = 0;
+    VulkanTextureUploadDestinationDescription   mDestinationDescription;
+    VulkanTextureUploadSampleBindingDescription mDescription;
+    VulkanInstanceOwnerCheck                    mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck                 mWindowGenerationCheck;
+};
+
+enum class VulkanTextureUploadSampleBindingAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    NativeTeardownInProgress,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    TextureUploadDestinationNotLive,
+    TextureUploadSampleBindingAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanTextureUploadSampleBindingAcquireError
+{
+    VulkanTextureUploadSampleBindingAcquireCode mCode = VulkanTextureUploadSampleBindingAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanTextureUploadSampleBindingResolutionError> mResolutionError;
+
+    friend constexpr bool operator==(const VulkanTextureUploadSampleBindingAcquireError&,
+                                     const VulkanTextureUploadSampleBindingAcquireError&) = default;
+};
+
+using VulkanTextureUploadSampleBindingAcquireResult = std::optional<VulkanTextureUploadSampleBindingAcquireError>;
 
 struct VulkanUploadDestinationRequest
 {
@@ -1142,12 +1184,27 @@ public:
     std::uint32_t                                         textureUploadTransferSubmissionCount() const noexcept;
     std::uint32_t                                         textureUploadTransferCompletionWaitCount() const noexcept;
     std::optional<VulkanTextureUploadTransferDisposition> textureUploadTransferDisposition() const noexcept;
-    bool                                           hasUploadDestinationGeneration() const noexcept;
-    LLRenderContract::BufferHandle                 uploadDestinationResourceHandle() const noexcept;
-    std::uint64_t                                  uploadDestinationExpectedContentIdentity() const noexcept;
-    std::uint64_t                                  uploadDestinationResidentContentIdentity() const noexcept;
-    bool                                           uploadDestinationIsResident() const noexcept;
-    VkBuffer                                       uploadDestinationBuffer() const noexcept;
+    bool                                                  hasTextureUploadSampleBindingGeneration() const noexcept;
+    LLRenderContract::SamplerHandle                       textureUploadSampleBindingSamplerResourceHandle() const noexcept;
+    LLRenderContract::ImageHandle                         textureUploadSampleBindingDestinationResourceHandle() const noexcept;
+    std::uint64_t                                         textureUploadSampleBindingExpectedRevision() const noexcept;
+    std::uint64_t                                         textureUploadSampleBindingResidentRevision() const noexcept;
+    std::uint64_t                                         textureUploadSampleBindingResidentContentIdentity() const noexcept;
+    VkImageView                                           textureUploadSampleBindingDestinationImageView() const noexcept;
+    VkImageLayout                                         textureUploadSampleBindingDestinationImageLayout() const noexcept;
+    std::uint32_t                                         textureUploadSampleBindingDescriptorSetIndex() const noexcept;
+    std::uint32_t                                         textureUploadSampleBindingBinding() const noexcept;
+    VkSampler                                             textureUploadSampleBindingSampler() const noexcept;
+    VkDescriptorSetLayout                                 textureUploadSampleBindingDescriptorSetLayout() const noexcept;
+    VkPipelineLayout                                      textureUploadSampleBindingPipelineLayout() const noexcept;
+    VkDescriptorPool                                      textureUploadSampleBindingDescriptorPool() const noexcept;
+    VkDescriptorSet                                       textureUploadSampleBindingDescriptorSet() const noexcept;
+    bool                                                  hasUploadDestinationGeneration() const noexcept;
+    LLRenderContract::BufferHandle                        uploadDestinationResourceHandle() const noexcept;
+    std::uint64_t                                         uploadDestinationExpectedContentIdentity() const noexcept;
+    std::uint64_t                                         uploadDestinationResidentContentIdentity() const noexcept;
+    bool                                                  uploadDestinationIsResident() const noexcept;
+    VkBuffer                                              uploadDestinationBuffer() const noexcept;
     VkDeviceMemory                                 uploadDestinationMemory() const noexcept;
     VkDeviceSize                                   uploadDestinationByteCount() const noexcept;
     VkBufferUsageFlags                             uploadDestinationUsage() const noexcept;
@@ -1234,6 +1291,8 @@ public:
         const VulkanTextureUploadTransferOperationRequest& request) noexcept;
     VulkanTextureUploadTransferParentOperationResult retryTextureUploadTransferCompletion(
         const VulkanTextureUploadTransferOperationRequest& request) noexcept;
+    VulkanTextureUploadSampleBindingAcquireResult acquireTextureUploadSampleBindingGeneration(
+        const VulkanTextureUploadSampleBindingRequest& request) noexcept;
     VulkanUploadDestinationAcquireResult      acquireUploadDestinationGeneration(const VulkanUploadDestinationRequest& request) noexcept;
     VulkanUploadTransferAcquireResult         acquireUploadTransferGeneration(const VulkanUploadTransferRequest& request) noexcept;
     VulkanUploadTransferParentOperationResult executeUploadTransfer(const VulkanUploadTransferOperationRequest& request) noexcept;
@@ -1279,9 +1338,11 @@ public:
     // A pending transfer refuses direct and transitive reset without mutation.
     // Destination and source reset first retire a resettable transfer. Either
     // direct resource reset preserves the other resource and the swapchain.
-    // The texture source depends on the texture destination: direct source
-    // reset preserves its destination, while destination reset retires the
-    // source first. Neither texture owner belongs to the swapchain chain.
+    // The texture source depends on the texture destination, while the sampled
+    // binding retains only a completed destination. Direct source and transfer
+    // reset preserve the binding. Destination reset preflights a pending
+    // transfer, then retires the binding, terminal transfer, source, and image.
+    // None of these texture owners belongs to the swapchain chain.
     // Image teardown retires the
     // frame slot, readback destination, presentation pipeline, and presentation
     // target in that order. Direct readback reset preserves every presentation
@@ -1302,6 +1363,7 @@ public:
     bool resetUploadSourceGeneration() noexcept;
     bool resetTextureUploadSourceGeneration() noexcept;
     bool resetTextureUploadTransferGeneration() noexcept;
+    bool resetTextureUploadSampleBindingGeneration() noexcept;
     bool resetTextureUploadDestinationGeneration() noexcept;
     bool resetLogicalDeviceGeneration() noexcept;
     bool resetPresentationDeviceGeneration() noexcept;
@@ -1317,6 +1379,7 @@ private:
     class TextureUploadDestinationTeardownGuard;
     class TextureUploadSourceTeardownGuard;
     class TextureUploadTransferTeardownGuard;
+    class TextureUploadSampleBindingTeardownGuard;
     class VulkanSurfaceGeneration;
 
     VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
@@ -1349,6 +1412,11 @@ private:
     void noteTextureUploadTransferTransition() noexcept
     {
         ++mTextureUploadTransferEpoch;
+        noteOwnershipTransition();
+    }
+    void noteTextureUploadSampleBindingTransition() noexcept
+    {
+        ++mTextureUploadSampleBindingEpoch;
         noteOwnershipTransition();
     }
     void noteUploadDestinationTransition() noexcept
@@ -1392,12 +1460,13 @@ private:
     PFN_vkDestroyInstance                                   mDestroyInstance        = nullptr;
     VkDebugUtilsMessengerEXT                                mDebugMessenger         = VK_NULL_HANDLE;
     PFN_vkDestroyDebugUtilsMessengerEXT                     mDestroyDebugMessenger  = nullptr;
-    std::unique_ptr<VulkanSurfaceGeneration>                mSurfaceGeneration;
-    std::unique_ptr<VulkanPhysicalDeviceGeneration>         mPresentationDeviceGeneration;
-    std::unique_ptr<VulkanLogicalDeviceGeneration>          mLogicalDeviceGeneration;
-    std::unique_ptr<VulkanTextureUploadDestinationGeneration>     mTextureUploadDestinationGeneration;
+    std::unique_ptr<VulkanSurfaceGeneration>                       mSurfaceGeneration;
+    std::unique_ptr<VulkanPhysicalDeviceGeneration>                mPresentationDeviceGeneration;
+    std::unique_ptr<VulkanLogicalDeviceGeneration>                 mLogicalDeviceGeneration;
+    std::unique_ptr<VulkanTextureUploadDestinationGeneration>      mTextureUploadDestinationGeneration;
     std::unique_ptr<VulkanTextureUploadSourceGeneration>           mTextureUploadSourceGeneration;
     std::unique_ptr<VulkanTextureUploadTransferGeneration>         mTextureUploadTransferGeneration;
+    std::unique_ptr<VulkanTextureUploadSampleBindingGeneration>    mTextureUploadSampleBindingGeneration;
     std::unique_ptr<VulkanUploadSourceGeneration>                  mUploadSourceGeneration;
     std::unique_ptr<VulkanUploadDestinationGeneration>             mUploadDestinationGeneration;
     std::unique_ptr<VulkanUploadTransferGeneration>                mUploadTransferGeneration;
@@ -1408,21 +1477,23 @@ private:
     std::unique_ptr<VulkanSwapchainPresentationPipelineGeneration> mSwapchainPresentationPipelineGeneration;
     std::unique_ptr<VulkanSwapchainReadbackGeneration>             mSwapchainReadbackGeneration;
     std::unique_ptr<VulkanSwapchainFrameSlotGeneration>            mSwapchainFrameSlotGeneration;
-    std::uint64_t                                                  mTextureUploadDestinationEpoch       = 0;
-    std::uint64_t                                                  mTextureUploadSourceEpoch            = 0;
-    std::uint64_t                                                  mTextureUploadTransferEpoch            = 0;
-    std::uint64_t                                                  mUploadSourceEpoch                  = 0;
-    std::uint64_t                                                  mUploadDestinationEpoch             = 0;
-    std::uint64_t                                                  mUploadTransferEpoch                = 0;
-    std::uint64_t                                                  mSwapchainPresentationTargetEpoch   = 0;
-    std::uint64_t                                                  mSwapchainPresentationPipelineEpoch = 0;
-    std::uint64_t                                                  mSwapchainReadbackEpoch             = 0;
-    std::uint64_t                                                  mSwapchainFrameSlotEpoch            = 0;
-    std::uint64_t                                                  mOwnershipTransitionEpoch           = 0;
-    std::size_t                                                    mNativeAcquisitionDepth             = 0;
-    std::size_t                                                    mTextureUploadDestinationTeardownDepth = 0;
-    std::size_t                                                    mTextureUploadSourceTeardownDepth    = 0;
-    std::size_t                                                    mTextureUploadTransferTeardownDepth    = 0;
+    std::uint64_t                                                  mTextureUploadDestinationEpoch           = 0;
+    std::uint64_t                                                  mTextureUploadSourceEpoch                = 0;
+    std::uint64_t                                                  mTextureUploadTransferEpoch              = 0;
+    std::uint64_t                                                  mTextureUploadSampleBindingEpoch         = 0;
+    std::uint64_t                                                  mUploadSourceEpoch                       = 0;
+    std::uint64_t                                                  mUploadDestinationEpoch                  = 0;
+    std::uint64_t                                                  mUploadTransferEpoch                     = 0;
+    std::uint64_t                                                  mSwapchainPresentationTargetEpoch        = 0;
+    std::uint64_t                                                  mSwapchainPresentationPipelineEpoch      = 0;
+    std::uint64_t                                                  mSwapchainReadbackEpoch                  = 0;
+    std::uint64_t                                                  mSwapchainFrameSlotEpoch                 = 0;
+    std::uint64_t                                                  mOwnershipTransitionEpoch                = 0;
+    std::size_t                                                    mNativeAcquisitionDepth                  = 0;
+    std::size_t                                                    mTextureUploadDestinationTeardownDepth   = 0;
+    std::size_t                                                    mTextureUploadSourceTeardownDepth        = 0;
+    std::size_t                                                    mTextureUploadTransferTeardownDepth      = 0;
+    std::size_t                                                    mTextureUploadSampleBindingTeardownDepth = 0;
 };
 
 using VulkanInstanceAcquireResult = std::variant<VulkanInstanceAcquireError, VulkanInstanceGeneration>;
@@ -1465,6 +1536,10 @@ namespace VulkanInstanceDetail
     VulkanTextureUploadTransferAcquireResult acquireTextureUploadTransfer(VulkanInstanceGeneration&                 instance_generation,
                                                                           const VulkanTextureUploadTransferRequest& request,
                                                                           AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    VulkanTextureUploadSampleBindingAcquireResult acquireTextureUploadSampleBinding(VulkanInstanceGeneration& instance_generation,
+                                                                                    const VulkanTextureUploadSampleBindingRequest& request,
+                                                                                    AllocationCheckpoint allocation_checkpoint) noexcept;
 
     VulkanUploadDestinationAcquireResult acquireUploadDestination(VulkanInstanceGeneration&             instance_generation,
                                                                   const VulkanUploadDestinationRequest& request,

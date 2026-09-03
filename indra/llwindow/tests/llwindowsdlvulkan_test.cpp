@@ -192,6 +192,39 @@ struct FakeState
     VkBuffer       mTextureUploadSourceBuffer = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x8a000));
     VkDeviceMemory mTextureUploadSourceMemory = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x8b000));
 
+    VkSampler             mTextureUploadSampleBindingSampler = reinterpret_cast<VkSampler>(static_cast<std::uintptr_t>(0x8c000));
+    VkDescriptorSetLayout mTextureUploadSampleBindingDescriptorSetLayout =
+        reinterpret_cast<VkDescriptorSetLayout>(static_cast<std::uintptr_t>(0x8d000));
+    VkPipelineLayout mTextureUploadSampleBindingPipelineLayout = reinterpret_cast<VkPipelineLayout>(static_cast<std::uintptr_t>(0x8e000));
+    VkDescriptorPool mTextureUploadSampleBindingDescriptorPool = reinterpret_cast<VkDescriptorPool>(static_cast<std::uintptr_t>(0x8f000));
+    VkDescriptorSet  mTextureUploadSampleBindingDescriptorSet  = reinterpret_cast<VkDescriptorSet>(static_cast<std::uintptr_t>(0x90000));
+
+    VkSamplerCreateInfo             mTextureUploadSampleBindingSamplerCreateInfo{};
+    VkDescriptorSetLayoutCreateInfo mTextureUploadSampleBindingDescriptorSetLayoutCreateInfo{};
+    VkDescriptorSetLayoutBinding    mTextureUploadSampleBindingDescriptorSetLayoutBinding{};
+    VkPipelineLayoutCreateInfo      mTextureUploadSampleBindingPipelineLayoutCreateInfo{};
+    VkDescriptorSetLayout           mTextureUploadSampleBindingPipelineSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPoolCreateInfo      mTextureUploadSampleBindingDescriptorPoolCreateInfo{};
+    VkDescriptorPoolSize            mTextureUploadSampleBindingDescriptorPoolSize{};
+    VkDescriptorSetAllocateInfo     mTextureUploadSampleBindingDescriptorSetAllocateInfo{};
+    VkDescriptorSetLayout           mTextureUploadSampleBindingAllocatedSetLayout = VK_NULL_HANDLE;
+    VkWriteDescriptorSet            mTextureUploadSampleBindingWrite{};
+    VkDescriptorImageInfo           mTextureUploadSampleBindingImageInfo{};
+    std::size_t                     mCreateTextureUploadSampleBindingSamplerCalls              = 0;
+    std::size_t                     mDestroyTextureUploadSampleBindingSamplerCalls             = 0;
+    std::size_t                     mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls  = 0;
+    std::size_t                     mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls = 0;
+    std::size_t                     mCreateTextureUploadSampleBindingPipelineLayoutCalls       = 0;
+    std::size_t                     mDestroyTextureUploadSampleBindingPipelineLayoutCalls      = 0;
+    std::size_t                     mCreateTextureUploadSampleBindingDescriptorPoolCalls       = 0;
+    std::size_t                     mDestroyTextureUploadSampleBindingDescriptorPoolCalls      = 0;
+    std::size_t                     mAllocateTextureUploadSampleBindingDescriptorSetCalls      = 0;
+    std::size_t                     mUpdateTextureUploadSampleBindingDescriptorSetCalls        = 0;
+    std::size_t                     mTextureUploadSampleBindingDescriptorPoolDestroyOrder      = 0;
+    std::size_t                     mTextureUploadSampleBindingPipelineLayoutDestroyOrder      = 0;
+    std::size_t                     mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder = 0;
+    std::size_t                     mTextureUploadSampleBindingSamplerDestroyOrder             = 0;
+
     VkMemoryRequirements             mTextureMemoryRequirements{ 4096, 256, 1 };
     VkImageCreateInfo                mTextureImageCreateInfo{};
     VkImageViewCreateInfo            mTextureImageViewCreateInfo{};
@@ -837,14 +870,95 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyShaderModule(VkDevice device,
     }
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL fakeCreatePipelineLayout(VkDevice                          device,
-                                                         const VkPipelineLayoutCreateInfo* create_info,
-                                                         const VkAllocationCallbacks*,
-                                                         VkPipelineLayout*                  pipeline_layout) noexcept
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSampler(VkDevice                     device,
+                                                 const VkSamplerCreateInfo*   create_info,
+                                                 const VkAllocationCallbacks* allocator,
+                                                 VkSampler*                   sampler) noexcept
 {
-    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || !pipeline_layout ||
-        create_info->sType != VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO || create_info->setLayoutCount != 0 ||
-        create_info->pushConstantRangeCount != 0)
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || allocator || !sampler ||
+        create_info->sType != VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO || create_info->pNext || create_info->flags != 0 ||
+        create_info->magFilter != VK_FILTER_LINEAR || create_info->minFilter != VK_FILTER_LINEAR ||
+        create_info->mipmapMode != VK_SAMPLER_MIPMAP_MODE_LINEAR || create_info->addressModeU != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE ||
+        create_info->addressModeV != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE ||
+        create_info->addressModeW != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE || create_info->mipLodBias != 0.f ||
+        create_info->anisotropyEnable != VK_FALSE || create_info->maxAnisotropy != 1.f || create_info->compareEnable != VK_FALSE ||
+        create_info->compareOp != VK_COMPARE_OP_ALWAYS || create_info->minLod != 0.f || create_info->maxLod != 2.f ||
+        create_info->borderColor != VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK || create_info->unnormalizedCoordinates != VK_FALSE)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateTextureUploadSampleBindingSamplerCalls;
+    gVulkanState->mTextureUploadSampleBindingSamplerCreateInfo = *create_info;
+    *sampler                                                   = gVulkanState->mTextureUploadSampleBindingSampler;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroySampler(VkDevice device, VkSampler sampler, const VkAllocationCallbacks* allocator) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && sampler == gVulkanState->mTextureUploadSampleBindingSampler && !allocator)
+    {
+        ++gVulkanState->mDestroyTextureUploadSampleBindingSamplerCalls;
+        gVulkanState->mTextureUploadSampleBindingSamplerDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDescriptorSetLayout(VkDevice                               device,
+                                                             const VkDescriptorSetLayoutCreateInfo* create_info,
+                                                             const VkAllocationCallbacks*           allocator,
+                                                             VkDescriptorSetLayout*                 descriptor_set_layout) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || allocator || !descriptor_set_layout ||
+        create_info->sType != VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO || create_info->pNext || create_info->flags != 0 ||
+        create_info->bindingCount != 1 || !create_info->pBindings || create_info->pBindings[0].binding != 0 ||
+        create_info->pBindings[0].descriptorType != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+        create_info->pBindings[0].descriptorCount != 1 || create_info->pBindings[0].stageFlags != VK_SHADER_STAGE_FRAGMENT_BIT ||
+        create_info->pBindings[0].pImmutableSamplers)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetLayoutCreateInfo           = *create_info;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetLayoutCreateInfo.pBindings = nullptr;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetLayoutBinding              = create_info->pBindings[0];
+    *descriptor_set_layout = gVulkanState->mTextureUploadSampleBindingDescriptorSetLayout;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyDescriptorSetLayout(VkDevice                     device,
+                                                          VkDescriptorSetLayout        descriptor_set_layout,
+                                                          const VkAllocationCallbacks* allocator) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice &&
+        descriptor_set_layout == gVulkanState->mTextureUploadSampleBindingDescriptorSetLayout && !allocator)
+    {
+        ++gVulkanState->mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls;
+        gVulkanState->mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreatePipelineLayout(VkDevice                          device,
+                                                        const VkPipelineLayoutCreateInfo* create_info,
+                                                        const VkAllocationCallbacks*      allocator,
+                                                        VkPipelineLayout*                 pipeline_layout) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || allocator || !pipeline_layout ||
+        create_info->sType != VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO || create_info->pNext || create_info->flags != 0 ||
+        create_info->pushConstantRangeCount != 0 || create_info->pPushConstantRanges)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    if (create_info->setLayoutCount == 1 && create_info->pSetLayouts &&
+        create_info->pSetLayouts[0] == gVulkanState->mTextureUploadSampleBindingDescriptorSetLayout)
+    {
+        ++gVulkanState->mCreateTextureUploadSampleBindingPipelineLayoutCalls;
+        gVulkanState->mTextureUploadSampleBindingPipelineLayoutCreateInfo             = *create_info;
+        gVulkanState->mTextureUploadSampleBindingPipelineLayoutCreateInfo.pSetLayouts = nullptr;
+        gVulkanState->mTextureUploadSampleBindingPipelineSetLayout                    = create_info->pSetLayouts[0];
+        *pipeline_layout = gVulkanState->mTextureUploadSampleBindingPipelineLayout;
+        return VK_SUCCESS;
+    }
+    if (create_info->setLayoutCount != 0 || create_info->pSetLayouts)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -855,14 +969,96 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreatePipelineLayout(VkDevice                
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL fakeDestroyPipelineLayout(VkDevice device,
-                                                      VkPipelineLayout pipeline_layout,
-                                                      const VkAllocationCallbacks*) noexcept
+VKAPI_ATTR void VKAPI_CALL fakeDestroyPipelineLayout(VkDevice                     device,
+                                                     VkPipelineLayout             pipeline_layout,
+                                                     const VkAllocationCallbacks* allocator) noexcept
 {
-    if (gVulkanState && device == gVulkanState->mDevice && pipeline_layout != VK_NULL_HANDLE)
+    if (gVulkanState && device == gVulkanState->mDevice && pipeline_layout == gVulkanState->mTextureUploadSampleBindingPipelineLayout &&
+        !allocator)
+    {
+        ++gVulkanState->mDestroyTextureUploadSampleBindingPipelineLayoutCalls;
+        gVulkanState->mTextureUploadSampleBindingPipelineLayoutDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+    else if (gVulkanState && device == gVulkanState->mDevice && pipeline_layout != VK_NULL_HANDLE && !allocator)
     {
         ++gVulkanState->mDestroyPipelineLayoutCalls;
     }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDescriptorPool(VkDevice                          device,
+                                                        const VkDescriptorPoolCreateInfo* create_info,
+                                                        const VkAllocationCallbacks*      allocator,
+                                                        VkDescriptorPool*                 descriptor_pool) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || allocator || !descriptor_pool ||
+        create_info->sType != VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO || create_info->pNext || create_info->flags != 0 ||
+        create_info->maxSets != 1 || create_info->poolSizeCount != 1 || !create_info->pPoolSizes ||
+        create_info->pPoolSizes[0].type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || create_info->pPoolSizes[0].descriptorCount != 1)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateTextureUploadSampleBindingDescriptorPoolCalls;
+    gVulkanState->mTextureUploadSampleBindingDescriptorPoolCreateInfo            = *create_info;
+    gVulkanState->mTextureUploadSampleBindingDescriptorPoolCreateInfo.pPoolSizes = nullptr;
+    gVulkanState->mTextureUploadSampleBindingDescriptorPoolSize                  = create_info->pPoolSizes[0];
+    *descriptor_pool                                                             = gVulkanState->mTextureUploadSampleBindingDescriptorPool;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyDescriptorPool(VkDevice                     device,
+                                                     VkDescriptorPool             descriptor_pool,
+                                                     const VkAllocationCallbacks* allocator) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && descriptor_pool == gVulkanState->mTextureUploadSampleBindingDescriptorPool &&
+        !allocator)
+    {
+        ++gVulkanState->mDestroyTextureUploadSampleBindingDescriptorPoolCalls;
+        gVulkanState->mTextureUploadSampleBindingDescriptorPoolDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateDescriptorSets(VkDevice                           device,
+                                                          const VkDescriptorSetAllocateInfo* allocate_info,
+                                                          VkDescriptorSet*                   descriptor_set) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !allocate_info || !descriptor_set ||
+        allocate_info->sType != VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO || allocate_info->pNext ||
+        allocate_info->descriptorPool != gVulkanState->mTextureUploadSampleBindingDescriptorPool ||
+        allocate_info->descriptorSetCount != 1 || !allocate_info->pSetLayouts ||
+        allocate_info->pSetLayouts[0] != gVulkanState->mTextureUploadSampleBindingDescriptorSetLayout)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mAllocateTextureUploadSampleBindingDescriptorSetCalls;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetAllocateInfo             = *allocate_info;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetAllocateInfo.pSetLayouts = nullptr;
+    gVulkanState->mTextureUploadSampleBindingAllocatedSetLayout                    = allocate_info->pSetLayouts[0];
+    *descriptor_set                                                                = gVulkanState->mTextureUploadSampleBindingDescriptorSet;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeUpdateDescriptorSets(VkDevice                    device,
+                                                    std::uint32_t               descriptor_write_count,
+                                                    const VkWriteDescriptorSet* descriptor_writes,
+                                                    std::uint32_t               descriptor_copy_count,
+                                                    const VkCopyDescriptorSet*  descriptor_copies) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || descriptor_write_count != 1 || !descriptor_writes ||
+        descriptor_copy_count != 0 || descriptor_copies || descriptor_writes[0].sType != VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET ||
+        descriptor_writes[0].pNext || descriptor_writes[0].dstSet != gVulkanState->mTextureUploadSampleBindingDescriptorSet ||
+        descriptor_writes[0].dstBinding != 0 || descriptor_writes[0].dstArrayElement != 0 || descriptor_writes[0].descriptorCount != 1 ||
+        descriptor_writes[0].descriptorType != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || !descriptor_writes[0].pImageInfo ||
+        descriptor_writes[0].pBufferInfo || descriptor_writes[0].pTexelBufferView ||
+        descriptor_writes[0].pImageInfo[0].sampler != gVulkanState->mTextureUploadSampleBindingSampler ||
+        descriptor_writes[0].pImageInfo[0].imageView != gVulkanState->mTextureImageView ||
+        descriptor_writes[0].pImageInfo[0].imageLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    {
+        return;
+    }
+    ++gVulkanState->mUpdateTextureUploadSampleBindingDescriptorSetCalls;
+    gVulkanState->mTextureUploadSampleBindingWrite            = descriptor_writes[0];
+    gVulkanState->mTextureUploadSampleBindingWrite.pImageInfo = nullptr;
+    gVulkanState->mTextureUploadSampleBindingImageInfo        = descriptor_writes[0].pImageInfo[0];
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateGraphicsPipelines(VkDevice device,
@@ -1542,8 +1738,16 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     LL_SDL_VULKAN_DEVICE_COMMAND(DestroyFramebuffer);
     LL_SDL_VULKAN_DEVICE_COMMAND(CreateShaderModule);
     LL_SDL_VULKAN_DEVICE_COMMAND(DestroyShaderModule);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateSampler);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroySampler);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateDescriptorSetLayout);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyDescriptorSetLayout);
     LL_SDL_VULKAN_DEVICE_COMMAND(CreatePipelineLayout);
     LL_SDL_VULKAN_DEVICE_COMMAND(DestroyPipelineLayout);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateDescriptorPool);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyDescriptorPool);
+    LL_SDL_VULKAN_DEVICE_COMMAND(AllocateDescriptorSets);
+    LL_SDL_VULKAN_DEVICE_COMMAND(UpdateDescriptorSets);
     LL_SDL_VULKAN_DEVICE_COMMAND(CreateGraphicsPipelines);
     LL_SDL_VULKAN_DEVICE_COMMAND(DestroyPipeline);
     LL_SDL_VULKAN_DEVICE_COMMAND(CreateCommandPool);
@@ -4074,6 +4278,241 @@ void window_sdl_vulkan_object::test<28>()
                generation->hasSwapchainFrameSlotGeneration());
     ensure("texture transfer fixture releases its retained resources and owner",
            generation->resetTextureUploadSourceGeneration() && generation->resetTextureUploadDestinationGeneration() && owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<29>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 241, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("texture sample-binding fixture acquires the complete SDL owner chain", owner && acquireCompleteFrameSlot(*owner));
+
+    auto* generation = const_cast<VulkanInstanceGeneration*>(owner->instanceGeneration());
+    ensure("texture sample-binding fixture publishes its mutable aggregate", generation != nullptr);
+    UploadOperationContext context{ owner, generation };
+
+    const LLRenderContract::TextureUploadFixture      fixture                 = LLRenderContract::makeTextureUploadFixture();
+    const VulkanTextureUploadSourceDescription        source_description      = vulkanTextureUploadSourceDescription(fixture.mSourceRGBA8);
+    const VulkanTextureUploadDestinationDescription   destination_description = vulkanTextureUploadDestinationDescription();
+    const VulkanTextureUploadSourceRequest            source_request{ generation->nativeWindowGeneration(),
+                                                           source_description,
+                                                                      { &context, uploadInstanceOwnerIsCurrent },
+                                                                      { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadDestinationRequest       destination_request{ generation->nativeWindowGeneration(),
+                                                                     destination_description,
+                                                                           { &context, uploadInstanceOwnerIsCurrent },
+                                                                           { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadTransferRequest          transfer_request{ generation->nativeWindowGeneration(),
+                                                               source_description,
+                                                               destination_description,
+                                                                        { &context, uploadInstanceOwnerIsCurrent },
+                                                                        { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadTransferOperationRequest operation_request{ generation->nativeWindowGeneration(),
+                                                                         source_description,
+                                                                         destination_description,
+                                                                         1'000'000'000,
+                                                                         { &context, uploadInstanceOwnerIsCurrent },
+                                                                         { &context, uploadWindowGenerationIsCurrent } };
+
+    state.mMemoryProperties.memoryTypes[0].propertyFlags =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    ensure("texture sample-binding fixture acquires its exact source and destination",
+           !generation->acquireTextureUploadDestinationGeneration(destination_request) &&
+               !generation->acquireTextureUploadSourceGeneration(source_request));
+    ensure("texture sample-binding fixture acquires and completes one upload transfer",
+           !generation->acquireTextureUploadTransferGeneration(transfer_request));
+    const auto  execution   = generation->executeTextureUploadTransfer(operation_request);
+    const auto* disposition = std::get_if<VulkanTextureUploadTransferDisposition>(&execution);
+    ensure("texture sample-binding fixture publishes one exact resident destination",
+           disposition && *disposition == VulkanTextureUploadTransferDisposition::Complete &&
+               generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead);
+
+    const std::uint64_t resident_identity = generation->textureUploadDestinationResidentContentIdentity();
+    const VkImage       destination_image = generation->textureUploadDestinationImage();
+    const VkImageView   destination_view  = generation->textureUploadDestinationImageView();
+    ensure("source and transfer retire before binding while the exact resident destination remains",
+           resident_identity != 0 && destination_image == state.mTextureImage && destination_view == state.mTextureImageView &&
+               generation->resetTextureUploadTransferGeneration() && generation->resetTextureUploadSourceGeneration() &&
+               !generation->hasTextureUploadTransferGeneration() && !generation->hasTextureUploadSourceGeneration() &&
+               generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentContentIdentity() == resident_identity);
+
+    const std::size_t                                 shader_create_calls   = state.mCreateShaderModuleCalls;
+    const std::size_t                                 graphics_create_calls = state.mCreateGraphicsPipelineCalls;
+    const std::size_t                                 draw_calls            = state.mDrawCalls;
+    const std::size_t                                 submit_calls          = state.mQueueSubmitCalls;
+    const VulkanTextureUploadSampleBindingDescription binding_description   = vulkanTextureUploadSampleBindingDescription();
+    const VulkanTextureUploadSampleBindingRequest     binding_request{ generation->nativeWindowGeneration(),
+                                                                   destination_description,
+                                                                   binding_description,
+                                                                       { &context, uploadInstanceOwnerIsCurrent },
+                                                                       { &context, uploadWindowGenerationIsCurrent } };
+    ensure("the SDL aggregate acquires the canonical binding from the resident destination alone",
+           !generation->acquireTextureUploadSampleBindingGeneration(binding_request) &&
+               generation->hasTextureUploadSampleBindingGeneration());
+
+    const VkSampler             sampler               = generation->textureUploadSampleBindingSampler();
+    const VkDescriptorSetLayout descriptor_set_layout = generation->textureUploadSampleBindingDescriptorSetLayout();
+    const VkPipelineLayout      pipeline_layout       = generation->textureUploadSampleBindingPipelineLayout();
+    const VkDescriptorPool      descriptor_pool       = generation->textureUploadSampleBindingDescriptorPool();
+    const VkDescriptorSet       descriptor_set        = generation->textureUploadSampleBindingDescriptorSet();
+    ensure("the SDL aggregate publishes the exact immutable texture sample binding",
+           generation->textureUploadSampleBindingSamplerResourceHandle() == binding_description.mSampler.mHandle &&
+               generation->textureUploadSampleBindingDestinationResourceHandle() == destination_description.mHandle &&
+               generation->textureUploadSampleBindingExpectedRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadSampleBindingResidentRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadSampleBindingResidentContentIdentity() == resident_identity &&
+               generation->textureUploadSampleBindingDestinationImageView() == destination_view &&
+               generation->textureUploadSampleBindingDestinationImageLayout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+               generation->textureUploadSampleBindingDescriptorSetIndex() == 0 && generation->textureUploadSampleBindingBinding() == 0 &&
+               sampler == state.mTextureUploadSampleBindingSampler &&
+               descriptor_set_layout == state.mTextureUploadSampleBindingDescriptorSetLayout &&
+               pipeline_layout == state.mTextureUploadSampleBindingPipelineLayout &&
+               descriptor_pool == state.mTextureUploadSampleBindingDescriptorPool &&
+               descriptor_set == state.mTextureUploadSampleBindingDescriptorSet);
+
+    const VkSamplerCreateInfo& sampler_info = state.mTextureUploadSampleBindingSamplerCreateInfo;
+    ensure("the SDL fake receives the exact canonical sampler",
+           state.mCreateTextureUploadSampleBindingSamplerCalls == 1 && sampler_info.sType == VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO &&
+               sampler_info.pNext == nullptr && sampler_info.flags == 0 && sampler_info.magFilter == VK_FILTER_LINEAR &&
+               sampler_info.minFilter == VK_FILTER_LINEAR && sampler_info.mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR &&
+               sampler_info.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
+               sampler_info.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
+               sampler_info.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && sampler_info.mipLodBias == 0.f &&
+               sampler_info.anisotropyEnable == VK_FALSE && sampler_info.maxAnisotropy == 1.f && sampler_info.compareEnable == VK_FALSE &&
+               sampler_info.compareOp == VK_COMPARE_OP_ALWAYS && sampler_info.minLod == 0.f && sampler_info.maxLod == 2.f &&
+               sampler_info.borderColor == VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK && sampler_info.unnormalizedCoordinates == VK_FALSE);
+
+    const VkDescriptorSetLayoutCreateInfo& set_layout_info    = state.mTextureUploadSampleBindingDescriptorSetLayoutCreateInfo;
+    const VkDescriptorSetLayoutBinding&    set_layout_binding = state.mTextureUploadSampleBindingDescriptorSetLayoutBinding;
+    ensure("the SDL fake receives one exact fragment combined-image-sampler layout",
+           state.mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls == 1 &&
+               set_layout_info.sType == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO && set_layout_info.pNext == nullptr &&
+               set_layout_info.flags == 0 && set_layout_info.bindingCount == 1 && set_layout_binding.binding == 0 &&
+               set_layout_binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && set_layout_binding.descriptorCount == 1 &&
+               set_layout_binding.stageFlags == VK_SHADER_STAGE_FRAGMENT_BIT && set_layout_binding.pImmutableSamplers == nullptr);
+
+    const VkPipelineLayoutCreateInfo& binding_pipeline_info = state.mTextureUploadSampleBindingPipelineLayoutCreateInfo;
+    ensure("the SDL fake receives one exact set-zero pipeline layout",
+           state.mCreateTextureUploadSampleBindingPipelineLayoutCalls == 1 &&
+               binding_pipeline_info.sType == VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO && binding_pipeline_info.pNext == nullptr &&
+               binding_pipeline_info.flags == 0 && binding_pipeline_info.setLayoutCount == 1 &&
+               state.mTextureUploadSampleBindingPipelineSetLayout == descriptor_set_layout &&
+               binding_pipeline_info.pushConstantRangeCount == 0 && binding_pipeline_info.pPushConstantRanges == nullptr);
+
+    const VkDescriptorPoolCreateInfo&  pool_info     = state.mTextureUploadSampleBindingDescriptorPoolCreateInfo;
+    const VkDescriptorPoolSize&        pool_size     = state.mTextureUploadSampleBindingDescriptorPoolSize;
+    const VkDescriptorSetAllocateInfo& allocate_info = state.mTextureUploadSampleBindingDescriptorSetAllocateInfo;
+    ensure("the SDL fake receives one fixed pool and one set allocation",
+           state.mCreateTextureUploadSampleBindingDescriptorPoolCalls == 1 &&
+               pool_info.sType == VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO && pool_info.pNext == nullptr && pool_info.flags == 0 &&
+               pool_info.maxSets == 1 && pool_info.poolSizeCount == 1 && pool_size.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+               pool_size.descriptorCount == 1 && state.mAllocateTextureUploadSampleBindingDescriptorSetCalls == 1 &&
+               allocate_info.sType == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO && allocate_info.pNext == nullptr &&
+               allocate_info.descriptorPool == descriptor_pool && allocate_info.descriptorSetCount == 1 &&
+               state.mTextureUploadSampleBindingAllocatedSetLayout == descriptor_set_layout);
+
+    const VkWriteDescriptorSet&  write      = state.mTextureUploadSampleBindingWrite;
+    const VkDescriptorImageInfo& image_info = state.mTextureUploadSampleBindingImageInfo;
+    ensure("the SDL fake receives one completed descriptor write to the resident view",
+           state.mUpdateTextureUploadSampleBindingDescriptorSetCalls == 1 && write.sType == VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET &&
+               write.pNext == nullptr && write.dstSet == descriptor_set && write.dstBinding == 0 && write.dstArrayElement == 0 &&
+               write.descriptorCount == 1 && write.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+               write.pBufferInfo == nullptr && write.pTexelBufferView == nullptr && image_info.sampler == sampler &&
+               image_info.imageView == destination_view && image_info.imageLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ensure("binding acquisition creates no shader, graphics pipeline, draw, or submission work",
+           state.mCreateShaderModuleCalls == shader_create_calls && state.mCreateGraphicsPipelineCalls == graphics_create_calls &&
+               state.mDrawCalls == draw_calls && state.mQueueSubmitCalls == submit_calls);
+
+    state.mDrawableWidth        = 1600;
+    state.mDrawableHeight       = 900;
+    const auto  rebuild         = owner->rebuildSwapchainChain();
+    const auto* rebuild_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuild);
+    ensure("changed-extent rebuild preserves the exact texture sample binding without duplicate native work",
+           rebuild_outcome && *rebuild_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               generation->textureUploadSampleBindingSamplerResourceHandle() == binding_description.mSampler.mHandle &&
+               generation->textureUploadSampleBindingDestinationResourceHandle() == destination_description.mHandle &&
+               generation->textureUploadSampleBindingExpectedRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadSampleBindingResidentRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadSampleBindingResidentContentIdentity() == resident_identity &&
+               generation->textureUploadSampleBindingDestinationImageView() == destination_view &&
+               generation->textureUploadSampleBindingDestinationImageLayout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+               generation->textureUploadSampleBindingDescriptorSetIndex() == binding_description.mDescriptorSetIndex &&
+               generation->textureUploadSampleBindingBinding() == binding_description.mBinding &&
+               generation->textureUploadSampleBindingSampler() == sampler &&
+               generation->textureUploadSampleBindingDescriptorSetLayout() == descriptor_set_layout &&
+               generation->textureUploadSampleBindingPipelineLayout() == pipeline_layout &&
+               generation->textureUploadSampleBindingDescriptorPool() == descriptor_pool &&
+               generation->textureUploadSampleBindingDescriptorSet() == descriptor_set &&
+               state.mCreateTextureUploadSampleBindingSamplerCalls == 1 &&
+               state.mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls == 1 &&
+               state.mCreateTextureUploadSampleBindingPipelineLayoutCalls == 1 &&
+               state.mCreateTextureUploadSampleBindingDescriptorPoolCalls == 1 &&
+               state.mAllocateTextureUploadSampleBindingDescriptorSetCalls == 1 &&
+               state.mUpdateTextureUploadSampleBindingDescriptorSetCalls == 1);
+
+    ensure("direct binding reset clears publication and preserves its resident destination and frame slot",
+           generation->resetTextureUploadSampleBindingGeneration() && !generation->hasTextureUploadSampleBindingGeneration() &&
+               generation->textureUploadSampleBindingSamplerResourceHandle() == LLRenderContract::SamplerHandle{} &&
+               generation->textureUploadSampleBindingDestinationResourceHandle() == LLRenderContract::ImageHandle{} &&
+               generation->textureUploadSampleBindingExpectedRevision() == 0 &&
+               generation->textureUploadSampleBindingResidentRevision() == 0 &&
+               generation->textureUploadSampleBindingResidentContentIdentity() == 0 &&
+               generation->textureUploadSampleBindingDestinationImageView() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingDestinationImageLayout() == VK_IMAGE_LAYOUT_MAX_ENUM &&
+               generation->textureUploadSampleBindingDescriptorSetIndex() == std::numeric_limits<std::uint32_t>::max() &&
+               generation->textureUploadSampleBindingBinding() == std::numeric_limits<std::uint32_t>::max() &&
+               generation->textureUploadSampleBindingSampler() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingDescriptorSetLayout() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingPipelineLayout() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingDescriptorPool() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingDescriptorSet() == VK_NULL_HANDLE &&
+               generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationImage() == destination_image &&
+               generation->textureUploadDestinationIsResident() && generation->hasSwapchainFrameSlotGeneration() &&
+               state.mDestroyTextureUploadSampleBindingDescriptorPoolCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingPipelineLayoutCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingSamplerCalls == 1 &&
+               state.mTextureUploadSampleBindingDescriptorPoolDestroyOrder < state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder &&
+               state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder <
+                   state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder &&
+               state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder < state.mTextureUploadSampleBindingSamplerDestroyOrder);
+    ensure("an absent binding accepts an idempotent second reset", generation->resetTextureUploadSampleBindingGeneration());
+    ensure("the idempotent second reset destroys no additional sampled object",
+           state.mDestroyTextureUploadSampleBindingDescriptorPoolCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingPipelineLayoutCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingSamplerCalls == 1);
+
+    ensure("the retained resident destination reacquires an independent binding",
+           !generation->acquireTextureUploadSampleBindingGeneration(binding_request) &&
+               generation->hasTextureUploadSampleBindingGeneration() && state.mCreateTextureUploadSampleBindingSamplerCalls == 2 &&
+               state.mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls == 2 &&
+               state.mCreateTextureUploadSampleBindingPipelineLayoutCalls == 2 &&
+               state.mCreateTextureUploadSampleBindingDescriptorPoolCalls == 2 &&
+               state.mAllocateTextureUploadSampleBindingDescriptorSetCalls == 2 &&
+               state.mUpdateTextureUploadSampleBindingDescriptorSetCalls == 2);
+    ensure("full SDL owner reset retires the binding before its destination and device",
+           owner->reset() && state.mDestroyTextureUploadSampleBindingDescriptorPoolCalls == 2 &&
+               state.mDestroyTextureUploadSampleBindingPipelineLayoutCalls == 2 &&
+               state.mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls == 2 &&
+               state.mDestroyTextureUploadSampleBindingSamplerCalls == 2 && state.mDestroyTextureImageViewCalls == 1 &&
+               state.mDestroyTextureImageCalls == 1 && state.mFreeTextureMemoryCalls == 1 &&
+               state.mTextureUploadSampleBindingDescriptorPoolDestroyOrder < state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder &&
+               state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder <
+                   state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder &&
+               state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder < state.mTextureUploadSampleBindingSamplerDestroyOrder &&
+               state.mTextureUploadSampleBindingSamplerDestroyOrder < state.mTextureViewDestroyOrder &&
+               state.mTextureViewDestroyOrder < state.mTextureImageDestroyOrder &&
+               state.mTextureImageDestroyOrder < state.mTextureMemoryFreeOrder &&
+               state.mTextureMemoryFreeOrder < state.mDeviceDestroyOrder);
 }
 
 } // namespace tut
