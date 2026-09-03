@@ -30,6 +30,22 @@
 #include <variant>
 #include <vector>
 
+namespace LLRenderVulkan
+{
+
+struct VulkanTextureUploadDestinationGenerationTestAccess
+{
+    static bool markResident(VulkanTextureUploadDestinationGeneration& generation,
+                             std::uint64_t                             expected_revision,
+                             std::uint64_t                             content_identity,
+                             LLRenderContract::ImageState              state) noexcept
+    {
+        return generation.markResident(expected_revision, content_identity, state);
+    }
+};
+
+} // namespace LLRenderVulkan
+
 namespace
 {
 using namespace LLRenderVulkan;
@@ -214,9 +230,10 @@ struct FakeState
     const VulkanPhysicalDeviceGeneration*                   mReentryPhysical     = nullptr;
     const VulkanLogicalDeviceGeneration*                    mReentryLogical      = nullptr;
     std::optional<VulkanTextureUploadDestinationGeneration> mReenteredGeneration;
-    VulkanTextureUploadDestinationGeneration*               mResetToReenter        = nullptr;
-    TeardownPoint                                           mReenterResetAt        = TeardownPoint::None;
-    bool                                                    mResetReentryAttempted = false;
+    VulkanTextureUploadDestinationGeneration*               mResetToReenter            = nullptr;
+    TeardownPoint                                           mReenterResetAt            = TeardownPoint::None;
+    bool                                                    mResetReentryAttempted     = false;
+    bool                                                    mResetReentryObservedInert = false;
 
     FakeState()
     {
@@ -550,6 +567,12 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyImage(VkDevice device, VkImage image, cons
         {
             gFakeState->mResetReentryAttempted = true;
             gFakeState->mResetToReenter->reset();
+            gFakeState->mResetReentryObservedInert =
+                !gFakeState->mResetToReenter->isResident() && gFakeState->mResetToReenter->residentRevision() == 0 &&
+                gFakeState->mResetToReenter->residentContentIdentity() == 0 &&
+                gFakeState->mResetToReenter->currentState() == LLRenderContract::ImageState::Undefined &&
+                gFakeState->mResetToReenter->image() == VK_NULL_HANDLE && gFakeState->mResetToReenter->memory() == VK_NULL_HANDLE &&
+                gFakeState->mResetToReenter->imageView() == VK_NULL_HANDLE;
         }
     }
 }
@@ -610,6 +633,12 @@ VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice                     device,
         {
             gFakeState->mResetReentryAttempted = true;
             gFakeState->mResetToReenter->reset();
+            gFakeState->mResetReentryObservedInert =
+                !gFakeState->mResetToReenter->isResident() && gFakeState->mResetToReenter->residentRevision() == 0 &&
+                gFakeState->mResetToReenter->residentContentIdentity() == 0 &&
+                gFakeState->mResetToReenter->currentState() == LLRenderContract::ImageState::Undefined &&
+                gFakeState->mResetToReenter->image() == VK_NULL_HANDLE && gFakeState->mResetToReenter->memory() == VK_NULL_HANDLE &&
+                gFakeState->mResetToReenter->imageView() == VK_NULL_HANDLE;
         }
     }
 }
@@ -660,6 +689,12 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyImageView(VkDevice                     dev
         {
             gFakeState->mResetReentryAttempted = true;
             gFakeState->mResetToReenter->reset();
+            gFakeState->mResetReentryObservedInert =
+                !gFakeState->mResetToReenter->isResident() && gFakeState->mResetToReenter->residentRevision() == 0 &&
+                gFakeState->mResetToReenter->residentContentIdentity() == 0 &&
+                gFakeState->mResetToReenter->currentState() == LLRenderContract::ImageState::Undefined &&
+                gFakeState->mResetToReenter->image() == VK_NULL_HANDLE && gFakeState->mResetToReenter->memory() == VK_NULL_HANDLE &&
+                gFakeState->mResetToReenter->imageView() == VK_NULL_HANDLE;
         }
     }
 }
@@ -1528,7 +1563,8 @@ void render_vulkan_texture_upload_destination_object::test<7>()
 
         generation.reset();
         ensure("reset is inert before any teardown callback can re-enter it",
-               state.mResetReentryAttempted && state.mDestroyedViews == std::vector<VkImageView>{ state.mViewOutput } &&
+               state.mResetReentryAttempted && state.mResetReentryObservedInert &&
+                   state.mDestroyedViews == std::vector<VkImageView>{ state.mViewOutput } &&
                    state.mDestroyedImages == std::vector<VkImage>{ state.mImageOutput } &&
                    state.mFreedMemories == std::vector<VkDeviceMemory>{ state.mMemoryOutput } &&
                    state.mTeardownOrder == std::vector<std::string>{ "destroy-view", "destroy-image", "free-memory" });
@@ -1761,6 +1797,78 @@ void render_vulkan_texture_upload_destination_object::test<9>()
                state.mDestroyedImages == std::vector<VkImage>{ state.mImageOutput } &&
                state.mFreedMemories == std::vector<VkDeviceMemory>{ state.mMemoryOutput } &&
                state.mTeardownOrder == std::vector<std::string>{ "destroy-view", "destroy-image", "free-memory" });
+}
+
+template<>
+template<>
+void render_vulkan_texture_upload_destination_object::test<10>()
+{
+    static_assert(noexcept(std::declval<const VulkanTextureUploadDestinationGeneration&>().isResident()));
+    static_assert(noexcept(std::declval<const VulkanTextureUploadDestinationGeneration&>().residentRevision()));
+    static_assert(noexcept(std::declval<const VulkanTextureUploadDestinationGeneration&>().residentContentIdentity()));
+    static_assert(noexcept(std::declval<const VulkanTextureUploadDestinationGeneration&>().currentState()));
+
+    constexpr std::uint64_t CONTENT_IDENTITY = 0x91c8d75e42ULL;
+    FakeState               state;
+    ScopedFakeState         scope(state);
+    auto                    parents     = makeParents(state);
+    auto                    generation  = takeGeneration(resolve(parents));
+    const auto              description = vulkanTextureUploadDestinationDescription();
+
+    const auto unpublished = [](const VulkanTextureUploadDestinationGeneration& candidate) noexcept
+    {
+        return !candidate.isResident() && candidate.residentRevision() == 0 && candidate.residentContentIdentity() == 0 &&
+               candidate.currentState() == LLRenderContract::ImageState::Undefined;
+    };
+    ensure("a newly owned image has no published residency", unpublished(generation));
+
+    const auto mark =
+        [&](std::uint64_t expected_revision, std::uint64_t content_identity, LLRenderContract::ImageState image_state) noexcept
+    {
+        return VulkanTextureUploadDestinationGenerationTestAccess::markResident(generation, expected_revision, content_identity,
+                                                                                image_state);
+    };
+
+    ensure("zero revision cannot publish residency",
+           !mark(0, CONTENT_IDENTITY, LLRenderContract::ImageState::ShaderRead) && unpublished(generation));
+    ensure("a different revision cannot publish residency",
+           !mark(description.mExpectedRevision + 1, CONTENT_IDENTITY, LLRenderContract::ImageState::ShaderRead) && unpublished(generation));
+    ensure("zero content identity cannot publish residency",
+           !mark(description.mExpectedRevision, 0, LLRenderContract::ImageState::ShaderRead) && unpublished(generation));
+    constexpr std::array NON_RESIDENT_STATES{ LLRenderContract::ImageState::Undefined, LLRenderContract::ImageState::TransferDestination,
+                                              LLRenderContract::ImageState::ColorAttachment,
+                                              LLRenderContract::ImageState::DepthAttachment };
+    for (LLRenderContract::ImageState image_state : NON_RESIDENT_STATES)
+    {
+        ensure("only ShaderRead can publish residency",
+               !mark(description.mExpectedRevision, CONTENT_IDENTITY, image_state) && unpublished(generation));
+    }
+
+    ensure("the exact completed upload publishes revision, identity, and state together",
+           mark(description.mExpectedRevision, CONTENT_IDENTITY, LLRenderContract::ImageState::ShaderRead) && generation.isResident() &&
+               generation.residentRevision() == description.mExpectedRevision && generation.residentContentIdentity() == CONTENT_IDENTITY &&
+               generation.currentState() == LLRenderContract::ImageState::ShaderRead);
+    ensure("published residency is one-shot and an invalid repeat changes no field",
+           !mark(description.mExpectedRevision, CONTENT_IDENTITY, LLRenderContract::ImageState::ShaderRead) && generation.isResident() &&
+               generation.residentRevision() == description.mExpectedRevision && generation.residentContentIdentity() == CONTENT_IDENTITY &&
+               generation.currentState() == LLRenderContract::ImageState::ShaderRead);
+
+    auto moved = std::move(generation);
+    ensure("move transfers the exact published residency and clears the source",
+           unpublished(generation) && generation.image() == VK_NULL_HANDLE && moved.isResident() &&
+               moved.residentRevision() == description.mExpectedRevision && moved.residentContentIdentity() == CONTENT_IDENTITY &&
+               moved.currentState() == LLRenderContract::ImageState::ShaderRead && moved.image() == state.mImageOutput &&
+               moved.memory() == state.mMemoryOutput && moved.imageView() == state.mViewOutput);
+
+    state.mResetToReenter = &moved;
+    state.mReenterResetAt = TeardownPoint::DestroyImageView;
+    moved.reset();
+    ensure("reset clears residency before leaving an inert owner",
+           state.mResetReentryAttempted && state.mResetReentryObservedInert && unpublished(moved) && moved.image() == VK_NULL_HANDLE &&
+               moved.memory() == VK_NULL_HANDLE && moved.imageView() == VK_NULL_HANDLE &&
+               !VulkanTextureUploadDestinationGenerationTestAccess::markResident(moved, description.mExpectedRevision, CONTENT_IDENTITY,
+                                                                                 LLRenderContract::ImageState::ShaderRead) &&
+               unpublished(moved));
 }
 
 } // namespace tut

@@ -59,6 +59,12 @@ namespace
         RetryCompletion
     };
 
+    enum class TextureUploadTransferParentOperation : std::uint8_t
+    {
+        Execute,
+        RetryCompletion
+    };
+
     using SwapchainFrameSlotParentResult = std::variant<VulkanSwapchainFrameSlotParentOperationError, VulkanSwapchainFrameSlotDisposition,
                                                         VulkanSwapchainFrameSlotPresentationSuccess>;
 
@@ -136,6 +142,20 @@ namespace
         std::optional<VulkanTextureUploadSourceResolutionError> resolution_error = std::nullopt) noexcept
     {
         return { code, resolution_error };
+    }
+
+    VulkanTextureUploadTransferAcquireError textureUploadTransferFailure(
+        VulkanTextureUploadTransferAcquireCode                    code,
+        std::optional<VulkanTextureUploadTransferResolutionError> resolution_error = std::nullopt) noexcept
+    {
+        return { code, resolution_error };
+    }
+
+    VulkanTextureUploadTransferParentOperationError textureUploadTransferOperationFailure(
+        VulkanTextureUploadTransferParentOperationCode           code,
+        std::optional<VulkanTextureUploadTransferOperationError> operation_error = std::nullopt) noexcept
+    {
+        return { code, operation_error };
     }
 
     VulkanUploadDestinationAcquireError uploadDestinationFailure(
@@ -428,6 +448,68 @@ namespace
         if (!window_current)
         {
             return textureUploadSourceFailure(VulkanTextureUploadSourceAcquireCode::StaleWindowGeneration);
+        }
+        return std::nullopt;
+    }
+
+    VulkanTextureUploadTransferAcquireResult textureUploadTransferFreshness(const VulkanTextureUploadTransferRequest& request,
+                                                                            const VulkanInstanceGeneration&           generation,
+                                                                            const std::uint64_t*                      epoch,
+                                                                            std::uint64_t expected_epoch) noexcept
+    {
+        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::StaleInstanceOwner);
+        }
+        if (generation.hasTextureUploadTransferGeneration())
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadTransferAlreadyOwned);
+        }
+        if (!epoch || *epoch != expected_epoch)
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadDestinationNotLive);
+        }
+        if (!generation.hasTextureUploadSourceGeneration())
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadSourceNotLive);
+        }
+        if (!generation.hasTextureUploadDestinationGeneration())
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadDestinationNotLive);
+        }
+        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::StaleWindowGeneration);
+        }
+        if (generation.hasTextureUploadTransferGeneration())
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadTransferAlreadyOwned);
+        }
+        if (*epoch != expected_epoch)
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadDestinationNotLive);
+        }
+        if (!generation.hasTextureUploadSourceGeneration())
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadSourceNotLive);
+        }
+        if (!generation.hasTextureUploadDestinationGeneration())
+        {
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadDestinationNotLive);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<VulkanTextureUploadTransferParentOperationError> textureUploadTransferOperationFreshness(
+        const VulkanTextureUploadTransferOperationRequest& request, const VulkanInstanceGeneration& generation) noexcept
+    {
+        if (!request.mInstanceOwnerCheck.mIsCurrent(request.mInstanceOwnerCheck.mUserdata, generation))
+        {
+            return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::StaleInstanceOwner);
+        }
+        if (!current(request.mWindowGenerationCheck, request.mNativeWindowGeneration))
+        {
+            return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::StaleWindowGeneration);
         }
         return std::nullopt;
     }
@@ -1050,6 +1132,14 @@ struct VulkanInstanceGenerationFactory
         const VulkanTextureUploadSourceRequest&    request,
         VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
 
+    static VulkanTextureUploadTransferAcquireResult acquireTextureUploadTransfer(
+        VulkanInstanceGeneration& instance_generation, const VulkanTextureUploadTransferRequest& request,
+        VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    static VulkanTextureUploadTransferParentOperationResult operateTextureUploadTransfer(
+        VulkanInstanceGeneration& instance_generation, const VulkanTextureUploadTransferOperationRequest& request,
+        TextureUploadTransferParentOperation operation) noexcept;
+
     static VulkanUploadDestinationAcquireResult acquireUploadDestination(
         VulkanInstanceGeneration&                  instance_generation,
         const VulkanUploadDestinationRequest&      request,
@@ -1203,6 +1293,52 @@ private:
     VulkanInstanceGeneration& mGeneration;
 };
 
+class VulkanInstanceGeneration::TextureUploadDestinationTeardownGuard
+{
+public:
+    explicit TextureUploadDestinationTeardownGuard(VulkanInstanceGeneration& generation) noexcept : mGeneration(generation)
+    {
+        ++mGeneration.mNativeAcquisitionDepth;
+        ++mGeneration.mTextureUploadDestinationTeardownDepth;
+    }
+
+    ~TextureUploadDestinationTeardownGuard() noexcept
+    {
+        --mGeneration.mTextureUploadDestinationTeardownDepth;
+        --mGeneration.mNativeAcquisitionDepth;
+    }
+
+    TextureUploadDestinationTeardownGuard(const TextureUploadDestinationTeardownGuard&)            = delete;
+    TextureUploadDestinationTeardownGuard& operator=(const TextureUploadDestinationTeardownGuard&) = delete;
+    TextureUploadDestinationTeardownGuard(TextureUploadDestinationTeardownGuard&&)                 = delete;
+    TextureUploadDestinationTeardownGuard& operator=(TextureUploadDestinationTeardownGuard&&)      = delete;
+
+private:
+    VulkanInstanceGeneration& mGeneration;
+};
+
+class VulkanInstanceGeneration::TextureUploadTransferTeardownGuard
+{
+public:
+    explicit TextureUploadTransferTeardownGuard(VulkanInstanceGeneration& generation) noexcept : mGeneration(generation)
+    {
+        ++mGeneration.mNativeAcquisitionDepth;
+        ++mGeneration.mTextureUploadTransferTeardownDepth;
+    }
+    ~TextureUploadTransferTeardownGuard() noexcept
+    {
+        --mGeneration.mTextureUploadTransferTeardownDepth;
+        --mGeneration.mNativeAcquisitionDepth;
+    }
+    TextureUploadTransferTeardownGuard(const TextureUploadTransferTeardownGuard&)            = delete;
+    TextureUploadTransferTeardownGuard& operator=(const TextureUploadTransferTeardownGuard&) = delete;
+    TextureUploadTransferTeardownGuard(TextureUploadTransferTeardownGuard&&)                 = delete;
+    TextureUploadTransferTeardownGuard& operator=(TextureUploadTransferTeardownGuard&&)      = delete;
+
+private:
+    VulkanInstanceGeneration& mGeneration;
+};
+
 VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
                                                    std::unique_ptr<ValidationState>&&  validation_state,
                                                    std::vector<std::string>&&          enabled_extensions,
@@ -1260,6 +1396,7 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& ot
     mLogicalDeviceGeneration          = std::move(other.mLogicalDeviceGeneration);
     mTextureUploadDestinationGeneration      = std::move(other.mTextureUploadDestinationGeneration);
     mTextureUploadSourceGeneration           = std::move(other.mTextureUploadSourceGeneration);
+    mTextureUploadTransferGeneration         = std::move(other.mTextureUploadTransferGeneration);
     mUploadSourceGeneration                  = std::move(other.mUploadSourceGeneration);
     mUploadDestinationGeneration             = std::move(other.mUploadDestinationGeneration);
     mUploadTransferGeneration                = std::move(other.mUploadTransferGeneration);
@@ -1272,6 +1409,7 @@ VulkanInstanceGeneration::VulkanInstanceGeneration(VulkanInstanceGeneration&& ot
     mSwapchainFrameSlotGeneration            = std::move(other.mSwapchainFrameSlotGeneration);
     mTextureUploadDestinationEpoch           = std::exchange(other.mTextureUploadDestinationEpoch, 0);
     mTextureUploadSourceEpoch                = std::exchange(other.mTextureUploadSourceEpoch, 0);
+    mTextureUploadTransferEpoch              = std::exchange(other.mTextureUploadTransferEpoch, 0);
     mUploadSourceEpoch                       = std::exchange(other.mUploadSourceEpoch, 0);
     mUploadDestinationEpoch                  = std::exchange(other.mUploadDestinationEpoch, 0);
     mUploadTransferEpoch                     = std::exchange(other.mUploadTransferEpoch, 0);
@@ -1643,6 +1781,24 @@ VkImageSubresourceRange VulkanInstanceGeneration::textureUploadDestinationViewRa
     return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->viewRange() : VkImageSubresourceRange{};
 }
 
+bool VulkanInstanceGeneration::textureUploadDestinationIsResident() const noexcept
+{
+    return mTextureUploadDestinationGeneration && mTextureUploadDestinationGeneration->isResident();
+}
+std::uint64_t VulkanInstanceGeneration::textureUploadDestinationResidentRevision() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->residentRevision() : 0;
+}
+std::uint64_t VulkanInstanceGeneration::textureUploadDestinationResidentContentIdentity() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->residentContentIdentity() : 0;
+}
+LLRenderContract::ImageState VulkanInstanceGeneration::textureUploadDestinationCurrentState() const noexcept
+{
+    return mTextureUploadDestinationGeneration ? mTextureUploadDestinationGeneration->currentState()
+                                               : LLRenderContract::ImageState::Undefined;
+}
+
 bool VulkanInstanceGeneration::hasTextureUploadSourceGeneration() const noexcept
 {
     return mTextureUploadSourceGeneration != nullptr;
@@ -1731,6 +1887,67 @@ VkMemoryPropertyFlags VulkanInstanceGeneration::textureUploadSourceMemoryPropert
 bool VulkanInstanceGeneration::textureUploadSourceIsCoherent() const noexcept
 {
     return mTextureUploadSourceGeneration && mTextureUploadSourceGeneration->isCoherent();
+}
+
+bool VulkanInstanceGeneration::hasTextureUploadTransferGeneration() const noexcept
+{
+    return mTextureUploadTransferGeneration != nullptr;
+}
+LLRenderContract::ImageHandle VulkanInstanceGeneration::textureUploadTransferResourceHandle() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->resourceHandle() : LLRenderContract::ImageHandle{};
+}
+std::uint64_t VulkanInstanceGeneration::textureUploadTransferExpectedRevision() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->expectedRevision() : 0;
+}
+std::uint64_t VulkanInstanceGeneration::textureUploadTransferContentIdentity() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->contentIdentity() : 0;
+}
+VkBuffer VulkanInstanceGeneration::textureUploadTransferSourceBuffer() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->sourceBuffer() : VK_NULL_HANDLE;
+}
+VkImage VulkanInstanceGeneration::textureUploadTransferDestinationImage() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->destinationImage() : VK_NULL_HANDLE;
+}
+VkQueue VulkanInstanceGeneration::textureUploadTransferQueue() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->queue() : VK_NULL_HANDLE;
+}
+std::uint32_t VulkanInstanceGeneration::textureUploadTransferQueueFamilyIndex() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->queueFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
+}
+std::uint32_t VulkanInstanceGeneration::textureUploadTransferQueueIndex() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->queueIndex() : std::numeric_limits<std::uint32_t>::max();
+}
+VkCommandPool VulkanInstanceGeneration::textureUploadTransferCommandPool() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->commandPool() : VK_NULL_HANDLE;
+}
+VkCommandBuffer VulkanInstanceGeneration::textureUploadTransferCommandBuffer() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->commandBuffer() : VK_NULL_HANDLE;
+}
+VkFence VulkanInstanceGeneration::textureUploadTransferFence() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->fence() : VK_NULL_HANDLE;
+}
+std::uint32_t VulkanInstanceGeneration::textureUploadTransferSubmissionCount() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->submissionAttemptCount() : 0;
+}
+std::uint32_t VulkanInstanceGeneration::textureUploadTransferCompletionWaitCount() const noexcept
+{
+    return mTextureUploadTransferGeneration ? mTextureUploadTransferGeneration->completionWaitCount() : 0;
+}
+std::optional<VulkanTextureUploadTransferDisposition> VulkanInstanceGeneration::textureUploadTransferDisposition() const noexcept
+{
+    return mTextureUploadTransferGeneration ? std::optional{ mTextureUploadTransferGeneration->disposition() } : std::nullopt;
 }
 
 bool VulkanInstanceGeneration::hasUploadDestinationGeneration() const noexcept
@@ -2156,6 +2373,25 @@ VulkanTextureUploadSourceAcquireResult VulkanInstanceGeneration::acquireTextureU
     return VulkanInstanceDetail::acquireTextureUploadSource(*this, request, nullptr);
 }
 
+VulkanTextureUploadTransferAcquireResult VulkanInstanceGeneration::acquireTextureUploadTransferGeneration(
+    const VulkanTextureUploadTransferRequest& request) noexcept
+{
+    return VulkanInstanceDetail::acquireTextureUploadTransfer(*this, request, nullptr);
+}
+
+VulkanTextureUploadTransferParentOperationResult VulkanInstanceGeneration::executeTextureUploadTransfer(
+    const VulkanTextureUploadTransferOperationRequest& request) noexcept
+{
+    return VulkanInstanceGenerationFactory::operateTextureUploadTransfer(*this, request, TextureUploadTransferParentOperation::Execute);
+}
+
+VulkanTextureUploadTransferParentOperationResult VulkanInstanceGeneration::retryTextureUploadTransferCompletion(
+    const VulkanTextureUploadTransferOperationRequest& request) noexcept
+{
+    return VulkanInstanceGenerationFactory::operateTextureUploadTransfer(*this, request,
+                                                                         TextureUploadTransferParentOperation::RetryCompletion);
+}
+
 VulkanUploadDestinationAcquireResult VulkanInstanceGeneration::acquireUploadDestinationGeneration(
     const VulkanUploadDestinationRequest& request) noexcept
 {
@@ -2504,14 +2740,16 @@ bool VulkanInstanceGeneration::resetTextureUploadDestinationGeneration() noexcep
     {
         return false;
     }
-    if (!resetTextureUploadSourceGeneration())
+    if (!resetTextureUploadTransferGeneration() || !resetTextureUploadSourceGeneration())
     {
         return false;
     }
     if (mTextureUploadDestinationGeneration)
     {
-        mTextureUploadDestinationGeneration.reset();
+        auto retiring = std::move(mTextureUploadDestinationGeneration);
         noteTextureUploadDestinationTransition();
+        TextureUploadDestinationTeardownGuard teardown_guard(*this);
+        retiring.reset();
     }
     return true;
 }
@@ -2519,6 +2757,10 @@ bool VulkanInstanceGeneration::resetTextureUploadDestinationGeneration() noexcep
 bool VulkanInstanceGeneration::resetTextureUploadSourceGeneration() noexcept
 {
     if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
+    if (!resetTextureUploadTransferGeneration())
     {
         return false;
     }
@@ -2532,6 +2774,27 @@ bool VulkanInstanceGeneration::resetTextureUploadSourceGeneration() noexcept
     return true;
 }
 
+bool VulkanInstanceGeneration::resetTextureUploadTransferGeneration() noexcept
+{
+    if (mNativeAcquisitionDepth != 0)
+    {
+        return false;
+    }
+    if (mTextureUploadTransferGeneration &&
+        mTextureUploadTransferGeneration->disposition() == VulkanTextureUploadTransferDisposition::Pending)
+    {
+        return false;
+    }
+    if (mTextureUploadTransferGeneration)
+    {
+        auto retiring = std::move(mTextureUploadTransferGeneration);
+        noteTextureUploadTransferTransition();
+        TextureUploadTransferTeardownGuard teardown_guard(*this);
+        retiring->reset();
+    }
+    return true;
+}
+
 bool VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
 {
     if (mNativeAcquisitionDepth != 0)
@@ -2540,7 +2803,9 @@ bool VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
     }
     // Preflight the device-scoped pending obligation before touching the
     // independent swapchain chain.
-    if (mUploadTransferGeneration && mUploadTransferGeneration->disposition() == VulkanUploadTransferDisposition::Pending)
+    if ((mUploadTransferGeneration && mUploadTransferGeneration->disposition() == VulkanUploadTransferDisposition::Pending) ||
+        (mTextureUploadTransferGeneration &&
+         mTextureUploadTransferGeneration->disposition() == VulkanTextureUploadTransferDisposition::Pending))
     {
         return false;
     }
@@ -2548,7 +2813,7 @@ bool VulkanInstanceGeneration::resetLogicalDeviceGeneration() noexcept
     {
         return false;
     }
-    if (!resetTextureUploadSourceGeneration())
+    if (!resetTextureUploadTransferGeneration() || !resetTextureUploadSourceGeneration())
     {
         return false;
     }
@@ -3139,6 +3404,10 @@ VulkanTextureUploadDestinationAcquireResult VulkanInstanceGenerationFactory::acq
     if (request.mNativeWindowGeneration == 0)
     {
         return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::InvalidNativeWindowGeneration);
+    }
+    if (instance_generation.mTextureUploadDestinationTeardownDepth != 0)
+    {
+        return textureUploadDestinationFailure(VulkanTextureUploadDestinationAcquireCode::NativeTeardownInProgress);
     }
     if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance || !instance_generation.mGlobalDispatch ||
         !instance_generation.mGlobalDispatch->getInstanceProcAddr() || instance_generation.mNativeWindowGeneration == 0)
@@ -3763,6 +4032,216 @@ VulkanUploadDestinationAcquireResult VulkanInstanceGenerationFactory::acquireUpl
     }
 }
 
+VulkanTextureUploadTransferAcquireResult VulkanInstanceGenerationFactory::acquireTextureUploadTransfer(
+    VulkanInstanceGeneration& instance_generation, const VulkanTextureUploadTransferRequest& request,
+    VulkanInstanceDetail::AllocationCheckpoint allocation_checkpoint) noexcept
+{
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::InvalidInstanceOwnerCheck);
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::InvalidWindowGenerationCheck);
+    if (request.mNativeWindowGeneration == 0)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::InvalidNativeWindowGeneration);
+    if (instance_generation.mTextureUploadTransferTeardownDepth != 0)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::NativeTeardownInProgress);
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mGlobalDispatch)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::InstanceNotLive);
+    if (!instance_generation.mSurfaceGeneration)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::SurfaceNotLive);
+    if (!instance_generation.mPresentationDeviceGeneration)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::PresentationDeviceNotLive);
+    if (!instance_generation.mLogicalDeviceGeneration)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::LogicalDeviceNotLive);
+    if (!instance_generation.mTextureUploadSourceGeneration)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadSourceNotLive);
+    if (!instance_generation.mTextureUploadDestinationGeneration)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadDestinationNotLive);
+    if (instance_generation.mTextureUploadTransferGeneration)
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadTransferAlreadyOwned);
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+        request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::NativeWindowGenerationMismatch);
+
+    const VulkanTextureUploadSourceDescription      source_description      = request.mSourceDescription;
+    const VulkanTextureUploadDestinationDescription destination_description = request.mDestinationDescription;
+    const auto*                                     global_dispatch         = &*instance_generation.mGlobalDispatch;
+    const VkInstance                                instance                = instance_generation.mInstance;
+    const auto*                                     surface_generation      = instance_generation.mSurfaceGeneration.get();
+    const VkSurfaceKHR                              surface                 = instance_generation.surface();
+    const auto*                                     selection               = instance_generation.mPresentationDeviceGeneration.get();
+    const auto*                                     logical                 = instance_generation.mLogicalDeviceGeneration.get();
+    const auto*                                     source                  = instance_generation.mTextureUploadSourceGeneration.get();
+    auto*                                           destination             = instance_generation.mTextureUploadDestinationGeneration.get();
+    const auto                                      source_epoch            = instance_generation.mTextureUploadSourceEpoch;
+    const auto                                      destination_epoch       = instance_generation.mTextureUploadDestinationEpoch;
+    const auto                                      transfer_epoch          = instance_generation.mTextureUploadTransferEpoch;
+    const auto                                      ownership_epoch         = instance_generation.mOwnershipTransitionEpoch;
+    const VkBuffer                                  source_buffer           = source->buffer();
+    const VkImage                                   destination_image       = destination->image();
+    const std::uint64_t                             content_identity        = source->contentIdentity();
+    const VkPhysicalDevice                          physical_device         = selection->physicalDevice();
+    const VkDevice                                  device                  = logical->device();
+    const VkQueue                                   queue                   = logical->queue();
+    const auto                                      exact_chain             = [&]() noexcept
+    {
+        return instance_generation.mTextureUploadSourceEpoch == source_epoch &&
+               instance_generation.mTextureUploadDestinationEpoch == destination_epoch &&
+               instance_generation.mTextureUploadTransferEpoch == transfer_epoch && instance_generation.mGlobalDispatch &&
+               &*instance_generation.mGlobalDispatch == global_dispatch && instance_generation.mInstance == instance &&
+               instance_generation.mSurfaceGeneration.get() == surface_generation && instance_generation.surface() == surface &&
+               selection->physicalDevice() == physical_device && logical->device() == device && logical->queue() == queue &&
+               selection->selectedFor(instance, surface) && logical->createdFor(*selection) &&
+               instance_generation.mPresentationDeviceGeneration.get() == selection &&
+               instance_generation.mLogicalDeviceGeneration.get() == logical &&
+               instance_generation.mTextureUploadSourceGeneration.get() == source &&
+               instance_generation.mTextureUploadDestinationGeneration.get() == destination &&
+               !instance_generation.mTextureUploadTransferGeneration && source && destination && source->buffer() == source_buffer &&
+               source_buffer != VK_NULL_HANDLE && source->contentIdentity() == content_identity && content_identity != 0 &&
+               source->matchesDescription(source_description) && destination->image() == destination_image &&
+               destination_image != VK_NULL_HANDLE && !destination->isResident() &&
+               destination->matchesDescription(destination_description) && source->resourceHandle() == destination->resourceHandle() &&
+               source->expectedRevision() == destination->expectedRevision() && source->createdFor(*selection, *logical) &&
+               destination->createdFor(*selection, *logical) && request.mSourceDescription == source_description &&
+               request.mDestinationDescription == destination_description;
+    };
+    const auto freshness = [&]() noexcept -> VulkanTextureUploadTransferAcquireResult
+    {
+        if (auto result = textureUploadTransferFreshness(request, instance_generation, &instance_generation.mOwnershipTransitionEpoch,
+                                                         ownership_epoch))
+            return result;
+        if (!exact_chain())
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadDestinationNotLive);
+        return std::nullopt;
+    };
+    if (auto result = freshness())
+        return result;
+    VulkanInstanceGeneration::NativeAcquisitionGuard guard(instance_generation);
+    auto resolved = resolveVulkanTextureUploadTransferGeneration(*selection, *logical, source_description, destination_description, *source,
+                                                                 *destination);
+    if (const auto* error = std::get_if<VulkanTextureUploadTransferResolutionError>(&resolved))
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::ResolutionFailure, *error);
+    try
+    {
+        if (allocation_checkpoint)
+        {
+            allocation_checkpoint();
+            if (!exact_chain())
+                return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadDestinationNotLive);
+        }
+        auto pending =
+            std::make_unique<VulkanTextureUploadTransferGeneration>(std::move(std::get<VulkanTextureUploadTransferGeneration>(resolved)));
+        if (auto result = freshness())
+            return result;
+        if (!exact_chain() || !pending->createdFor(*selection, *logical) || !pending->matchesSourceDescription(source_description) ||
+            !pending->matchesDestinationDescription(destination_description) ||
+            !pending->retainsTextureUploadResources(*source, *destination))
+            return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::TextureUploadDestinationNotLive);
+        instance_generation.mTextureUploadTransferGeneration = std::move(pending);
+        instance_generation.noteTextureUploadTransferTransition();
+        return std::nullopt;
+    }
+    catch (const std::bad_alloc&)
+    {
+        return textureUploadTransferFailure(VulkanTextureUploadTransferAcquireCode::AllocationFailure);
+    }
+}
+
+VulkanTextureUploadTransferParentOperationResult VulkanInstanceGenerationFactory::operateTextureUploadTransfer(
+    VulkanInstanceGeneration& instance_generation, const VulkanTextureUploadTransferOperationRequest& request,
+    TextureUploadTransferParentOperation operation) noexcept
+{
+    if (!request.mInstanceOwnerCheck.mIsCurrent)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::InvalidInstanceOwnerCheck);
+    if (!request.mWindowGenerationCheck.mIsCurrent)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::InvalidWindowGenerationCheck);
+    if (request.mNativeWindowGeneration == 0)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::InvalidNativeWindowGeneration);
+    if (instance_generation.mNativeAcquisitionDepth != 0)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::NativeOperationInProgress);
+    VulkanInstanceGeneration::NativeAcquisitionGuard guard(instance_generation);
+    if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mGlobalDispatch)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::InstanceNotLive);
+    if (!instance_generation.mSurfaceGeneration)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::SurfaceNotLive);
+    if (!instance_generation.mPresentationDeviceGeneration)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::PresentationDeviceNotLive);
+    if (!instance_generation.mLogicalDeviceGeneration)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::LogicalDeviceNotLive);
+    if (!instance_generation.mTextureUploadSourceGeneration)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::TextureUploadSourceNotLive);
+    if (!instance_generation.mTextureUploadDestinationGeneration)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::TextureUploadDestinationNotLive);
+    if (!instance_generation.mTextureUploadTransferGeneration)
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::TextureUploadTransferNotLive);
+    if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
+        request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::NativeWindowGenerationMismatch);
+    if (auto error = textureUploadTransferOperationFreshness(request, instance_generation))
+        return *error;
+
+    const VulkanTextureUploadSourceDescription      source_description      = request.mSourceDescription;
+    const VulkanTextureUploadDestinationDescription destination_description = request.mDestinationDescription;
+    const auto*                                     selection               = instance_generation.mPresentationDeviceGeneration.get();
+    const auto*                                     logical                 = instance_generation.mLogicalDeviceGeneration.get();
+    const auto*                                     source                  = instance_generation.mTextureUploadSourceGeneration.get();
+    auto*                                           destination             = instance_generation.mTextureUploadDestinationGeneration.get();
+    auto*                                           transfer                = instance_generation.mTextureUploadTransferGeneration.get();
+    const auto*                                     global_dispatch         = &*instance_generation.mGlobalDispatch;
+    const VkInstance                                instance                = instance_generation.mInstance;
+    const auto*                                     surface_generation      = instance_generation.mSurfaceGeneration.get();
+    const VkSurfaceKHR                              surface                 = instance_generation.surface();
+    const auto                                      source_epoch            = instance_generation.mTextureUploadSourceEpoch;
+    const auto                                      destination_epoch       = instance_generation.mTextureUploadDestinationEpoch;
+    const auto                                      transfer_epoch          = instance_generation.mTextureUploadTransferEpoch;
+    const VkPhysicalDevice                          physical_device         = selection->physicalDevice();
+    const VkDevice                                  device                  = logical->device();
+    const VkQueue                                   queue                   = logical->queue();
+    const VkBuffer                                  source_buffer           = source->buffer();
+    const VkImage                                   destination_image       = destination->image();
+    const VkCommandPool                             command_pool            = transfer->commandPool();
+    const VkCommandBuffer                           command_buffer          = transfer->commandBuffer();
+    const VkFence                                   fence                   = transfer->fence();
+    const auto                                      exact                   = [&]() noexcept
+    {
+        const auto disposition = transfer->disposition();
+        return instance_generation.mTextureUploadSourceEpoch == source_epoch &&
+               instance_generation.mTextureUploadDestinationEpoch == destination_epoch &&
+               instance_generation.mTextureUploadTransferEpoch == transfer_epoch && instance_generation.mGlobalDispatch &&
+               &*instance_generation.mGlobalDispatch == global_dispatch && instance_generation.mInstance == instance &&
+               instance_generation.mSurfaceGeneration.get() == surface_generation && instance_generation.surface() == surface &&
+               selection->physicalDevice() == physical_device && logical->device() == device && logical->queue() == queue &&
+               selection->selectedFor(instance, surface) && logical->createdFor(*selection) &&
+               instance_generation.mPresentationDeviceGeneration.get() == selection &&
+               instance_generation.mLogicalDeviceGeneration.get() == logical &&
+               instance_generation.mTextureUploadSourceGeneration.get() == source &&
+               instance_generation.mTextureUploadDestinationGeneration.get() == destination &&
+               instance_generation.mTextureUploadTransferGeneration.get() == transfer && source->matchesDescription(source_description) &&
+               destination->matchesDescription(destination_description) && transfer->matchesSourceDescription(source_description) &&
+               transfer->matchesDestinationDescription(destination_description) && transfer->createdFor(*selection, *logical) &&
+               source->buffer() == source_buffer && transfer->sourceBuffer() == source_buffer &&
+               destination->image() == destination_image && transfer->destinationImage() == destination_image &&
+               transfer->queue() == queue && transfer->commandPool() == command_pool && command_pool != VK_NULL_HANDLE &&
+               transfer->commandBuffer() == command_buffer && command_buffer != VK_NULL_HANDLE && transfer->fence() == fence &&
+               fence != VK_NULL_HANDLE &&
+               transfer->retainsTextureUploadResources(*source, *destination) ==
+                   (disposition == VulkanTextureUploadTransferDisposition::Ready ||
+                    disposition == VulkanTextureUploadTransferDisposition::Pending) &&
+               (disposition == VulkanTextureUploadTransferDisposition::Complete
+                    ? destination->isResident() && destination->residentRevision() == source->expectedRevision() &&
+                          destination->residentContentIdentity() == source->contentIdentity() &&
+                          destination->currentState() == LLRenderContract::ImageState::ShaderRead
+                    : !destination->isResident()) &&
+               request.mSourceDescription == source_description && request.mDestinationDescription == destination_description;
+    };
+    if (!exact())
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::TextureUploadTransferNotLive);
+    auto result = operation == TextureUploadTransferParentOperation::Execute ? transfer->execute(request.mTimeoutNs)
+                                                                             : transfer->retryCompletion(request.mTimeoutNs);
+    if (const auto* error = std::get_if<VulkanTextureUploadTransferOperationError>(&result))
+        return textureUploadTransferOperationFailure(VulkanTextureUploadTransferParentOperationCode::OperationFailure, *error);
+    return std::get<VulkanTextureUploadTransferDisposition>(result);
+}
+
 VulkanUploadTransferAcquireResult VulkanInstanceGenerationFactory::acquireUploadTransfer(
     VulkanInstanceGeneration&                  instance_generation,
     const VulkanUploadTransferRequest&         request,
@@ -3971,6 +4450,10 @@ VulkanUploadTransferParentOperationResult VulkanInstanceGenerationFactory::opera
     {
         return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::InvalidNativeWindowGeneration);
     }
+    if (instance_generation.mNativeAcquisitionDepth != 0)
+    {
+        return uploadTransferOperationFailure(VulkanUploadTransferParentOperationCode::NativeOperationInProgress);
+    }
     if (instance_generation.mInstance == VK_NULL_HANDLE || !instance_generation.mDestroyInstance || !instance_generation.mGlobalDispatch ||
         !instance_generation.mGlobalDispatch->getInstanceProcAddr() || instance_generation.mNativeWindowGeneration == 0)
     {
@@ -4163,7 +4646,8 @@ VulkanSwapchainConfigurationAcquireResult VulkanInstanceGenerationFactory::acqui
     {
         return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::InvalidDrawableExtent);
     }
-    if (instance_generation.mTextureUploadSourceTeardownDepth != 0)
+    if (instance_generation.mTextureUploadDestinationTeardownDepth != 0 || instance_generation.mTextureUploadSourceTeardownDepth != 0 ||
+        instance_generation.mTextureUploadTransferTeardownDepth != 0)
     {
         return swapchainConfigurationFailure(VulkanSwapchainConfigurationAcquireCode::NativeTeardownInProgress);
     }
@@ -7116,6 +7600,13 @@ namespace VulkanInstanceDetail
                                                                       AllocationCheckpoint allocation_checkpoint) noexcept
     {
         return VulkanInstanceGenerationFactory::acquireTextureUploadSource(instance_generation, request, allocation_checkpoint);
+    }
+
+    VulkanTextureUploadTransferAcquireResult acquireTextureUploadTransfer(VulkanInstanceGeneration&                 instance_generation,
+                                                                          const VulkanTextureUploadTransferRequest& request,
+                                                                          AllocationCheckpoint allocation_checkpoint) noexcept
+    {
+        return VulkanInstanceGenerationFactory::acquireTextureUploadTransfer(instance_generation, request, allocation_checkpoint);
     }
 
     VulkanUploadDestinationAcquireResult acquireUploadDestination(VulkanInstanceGeneration&             instance_generation,

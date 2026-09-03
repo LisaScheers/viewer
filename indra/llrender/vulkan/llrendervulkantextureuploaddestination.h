@@ -28,6 +28,9 @@
 namespace LLRenderVulkan
 {
 
+class VulkanTextureUploadTransferGeneration;
+struct VulkanTextureUploadDestinationGenerationTestAccess;
+
 struct VulkanTextureUploadDestinationDescription
 {
     LLRenderContract::ImageHandle mHandle;
@@ -130,7 +133,8 @@ struct VulkanTextureUploadDestinationResolutionError
 
 // This generation owns one optimal-tiled image, one formally dedicated
 // device-local allocation, and one view over its declared color mips. It owns
-// no pixel contents and publishes no current-layout or residency state. The
+// no transfer command or pixel source. A retaining transfer may publish one
+// completed revision, content identity, and ShaderRead state exactly once. The
 // exact physical and logical device generations must outlive it. Reset is
 // externally synchronized.
 class VulkanTextureUploadDestinationGeneration
@@ -184,7 +188,11 @@ public:
     {
         return mImageView != VK_NULL_HANDLE ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_MAX_ENUM;
     }
-    VkImageSubresourceRange viewRange() const noexcept;
+    VkImageSubresourceRange      viewRange() const noexcept;
+    bool                         isResident() const noexcept;
+    std::uint64_t                residentRevision() const noexcept { return mResidentRevision; }
+    std::uint64_t                residentContentIdentity() const noexcept { return mResidentContentIdentity; }
+    LLRenderContract::ImageState currentState() const noexcept { return mCurrentState; }
 
     bool createdFor(const VulkanPhysicalDeviceGeneration& physical_device_generation,
                     const VulkanLogicalDeviceGeneration&  logical_device_generation) const noexcept;
@@ -194,6 +202,8 @@ public:
 
 private:
     friend struct VulkanTextureUploadDestinationGenerationFactory;
+    friend struct VulkanTextureUploadDestinationGenerationTestAccess;
+    friend class VulkanTextureUploadTransferGeneration;
 
     VulkanTextureUploadDestinationGeneration(const VulkanPhysicalDeviceGeneration&            physical_device_generation,
                                              const VulkanLogicalDeviceGeneration&             logical_device_generation,
@@ -212,6 +222,8 @@ private:
                                              PFN_vkDestroyImage                               destroy_image,
                                              PFN_vkFreeMemory                                 free_memory) noexcept;
 
+    bool markResident(std::uint64_t expected_revision, std::uint64_t content_identity, LLRenderContract::ImageState state) noexcept;
+
     const VulkanPhysicalDeviceGeneration*     mPhysicalDeviceGeneration = nullptr;
     const VulkanLogicalDeviceGeneration*      mLogicalDeviceGeneration  = nullptr;
     PFN_vkGetInstanceProcAddr                 mGetInstanceProcAddr      = nullptr;
@@ -224,7 +236,10 @@ private:
     std::uint32_t                             mQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
     std::uint32_t                             mQueueIndex               = 0;
     VulkanTextureUploadDestinationDescription mDescription;
-    VkFormatFeatureFlags                      mFormatFeatures = 0;
+    std::uint64_t                             mResidentRevision        = 0;
+    std::uint64_t                             mResidentContentIdentity = 0;
+    LLRenderContract::ImageState              mCurrentState            = LLRenderContract::ImageState::Undefined;
+    VkFormatFeatureFlags                      mFormatFeatures          = 0;
     VkImageFormatProperties                   mImageFormatProperties{};
     VkImage                                   mImage  = VK_NULL_HANDLE;
     VkDeviceMemory                            mMemory = VK_NULL_HANDLE;

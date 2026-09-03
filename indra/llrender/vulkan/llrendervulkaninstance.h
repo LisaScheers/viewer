@@ -21,6 +21,7 @@
 #include "llrendervulkanphysicaldevice.h"
 #include "llrendervulkantextureuploaddestination.h"
 #include "llrendervulkantextureuploadsource.h"
+#include "llrendervulkantextureuploadtransfer.h"
 #include "llrendervulkanuploaddestination.h"
 #include "llrendervulkanuploadsource.h"
 #include "llrendervulkanuploadtransfer.h"
@@ -325,6 +326,7 @@ enum class VulkanTextureUploadDestinationAcquireCode : std::uint8_t
     InvalidInstanceOwnerCheck,
     InvalidWindowGenerationCheck,
     InvalidNativeWindowGeneration,
+    NativeTeardownInProgress,
     InstanceNotLive,
     SurfaceNotLive,
     PresentationDeviceNotLive,
@@ -387,6 +389,83 @@ struct VulkanTextureUploadSourceAcquireError
 };
 
 using VulkanTextureUploadSourceAcquireResult = std::optional<VulkanTextureUploadSourceAcquireError>;
+
+struct VulkanTextureUploadTransferRequest
+{
+    std::uint64_t                             mNativeWindowGeneration = 0;
+    VulkanTextureUploadSourceDescription      mSourceDescription;
+    VulkanTextureUploadDestinationDescription mDestinationDescription;
+    VulkanInstanceOwnerCheck                  mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck               mWindowGenerationCheck;
+};
+
+enum class VulkanTextureUploadTransferAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    NativeTeardownInProgress,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    TextureUploadSourceNotLive,
+    TextureUploadDestinationNotLive,
+    TextureUploadTransferAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanTextureUploadTransferAcquireError
+{
+    VulkanTextureUploadTransferAcquireCode                    mCode = VulkanTextureUploadTransferAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanTextureUploadTransferResolutionError> mResolutionError;
+    friend constexpr bool                                     operator==(const VulkanTextureUploadTransferAcquireError&,
+                                     const VulkanTextureUploadTransferAcquireError&) = default;
+};
+using VulkanTextureUploadTransferAcquireResult = std::optional<VulkanTextureUploadTransferAcquireError>;
+
+struct VulkanTextureUploadTransferOperationRequest
+{
+    std::uint64_t                             mNativeWindowGeneration = 0;
+    VulkanTextureUploadSourceDescription      mSourceDescription;
+    VulkanTextureUploadDestinationDescription mDestinationDescription;
+    std::uint64_t                             mTimeoutNs = 0;
+    VulkanInstanceOwnerCheck                  mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck               mWindowGenerationCheck;
+};
+
+enum class VulkanTextureUploadTransferParentOperationCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    NativeOperationInProgress,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    TextureUploadSourceNotLive,
+    TextureUploadDestinationNotLive,
+    TextureUploadTransferNotLive,
+    NativeWindowGenerationMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    OperationFailure
+};
+
+struct VulkanTextureUploadTransferParentOperationError
+{
+    VulkanTextureUploadTransferParentOperationCode mCode = VulkanTextureUploadTransferParentOperationCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanTextureUploadTransferOperationError> mOperationError;
+    friend constexpr bool                                    operator==(const VulkanTextureUploadTransferParentOperationError&,
+                                     const VulkanTextureUploadTransferParentOperationError&) = default;
+};
+using VulkanTextureUploadTransferParentOperationResult =
+    std::variant<VulkanTextureUploadTransferParentOperationError, VulkanTextureUploadTransferDisposition>;
 
 struct VulkanUploadDestinationRequest
 {
@@ -490,7 +569,8 @@ enum class VulkanUploadTransferParentOperationCode : std::uint8_t
     NativeWindowGenerationMismatch,
     StaleInstanceOwner,
     StaleWindowGeneration,
-    OperationFailure
+    OperationFailure,
+    NativeOperationInProgress
 };
 
 struct VulkanUploadTransferParentOperationError
@@ -1025,6 +1105,10 @@ public:
     VkImageView                       textureUploadDestinationImageView() const noexcept;
     VkImageViewType                   textureUploadDestinationImageViewType() const noexcept;
     VkImageSubresourceRange           textureUploadDestinationViewRange() const noexcept;
+    bool                                                  textureUploadDestinationIsResident() const noexcept;
+    std::uint64_t                                         textureUploadDestinationResidentRevision() const noexcept;
+    std::uint64_t                                         textureUploadDestinationResidentContentIdentity() const noexcept;
+    LLRenderContract::ImageState                          textureUploadDestinationCurrentState() const noexcept;
     bool                                           hasTextureUploadSourceGeneration() const noexcept;
     LLRenderContract::ImageHandle                  textureUploadSourceResourceHandle() const noexcept;
     std::uint64_t                                  textureUploadSourceExpectedRevision() const noexcept;
@@ -1043,6 +1127,21 @@ public:
     std::uint32_t                                  textureUploadSourceMemoryTypeIndex() const noexcept;
     VkMemoryPropertyFlags                          textureUploadSourceMemoryPropertyFlags() const noexcept;
     bool                                           textureUploadSourceIsCoherent() const noexcept;
+    bool                                                  hasTextureUploadTransferGeneration() const noexcept;
+    LLRenderContract::ImageHandle                         textureUploadTransferResourceHandle() const noexcept;
+    std::uint64_t                                         textureUploadTransferExpectedRevision() const noexcept;
+    std::uint64_t                                         textureUploadTransferContentIdentity() const noexcept;
+    VkBuffer                                              textureUploadTransferSourceBuffer() const noexcept;
+    VkImage                                               textureUploadTransferDestinationImage() const noexcept;
+    VkQueue                                               textureUploadTransferQueue() const noexcept;
+    std::uint32_t                                         textureUploadTransferQueueFamilyIndex() const noexcept;
+    std::uint32_t                                         textureUploadTransferQueueIndex() const noexcept;
+    VkCommandPool                                         textureUploadTransferCommandPool() const noexcept;
+    VkCommandBuffer                                       textureUploadTransferCommandBuffer() const noexcept;
+    VkFence                                               textureUploadTransferFence() const noexcept;
+    std::uint32_t                                         textureUploadTransferSubmissionCount() const noexcept;
+    std::uint32_t                                         textureUploadTransferCompletionWaitCount() const noexcept;
+    std::optional<VulkanTextureUploadTransferDisposition> textureUploadTransferDisposition() const noexcept;
     bool                                           hasUploadDestinationGeneration() const noexcept;
     LLRenderContract::BufferHandle                 uploadDestinationResourceHandle() const noexcept;
     std::uint64_t                                  uploadDestinationExpectedContentIdentity() const noexcept;
@@ -1129,6 +1228,12 @@ public:
     VulkanTextureUploadDestinationAcquireResult acquireTextureUploadDestinationGeneration(
         const VulkanTextureUploadDestinationRequest& request) noexcept;
     VulkanTextureUploadSourceAcquireResult acquireTextureUploadSourceGeneration(const VulkanTextureUploadSourceRequest& request) noexcept;
+    VulkanTextureUploadTransferAcquireResult acquireTextureUploadTransferGeneration(
+        const VulkanTextureUploadTransferRequest& request) noexcept;
+    VulkanTextureUploadTransferParentOperationResult executeTextureUploadTransfer(
+        const VulkanTextureUploadTransferOperationRequest& request) noexcept;
+    VulkanTextureUploadTransferParentOperationResult retryTextureUploadTransferCompletion(
+        const VulkanTextureUploadTransferOperationRequest& request) noexcept;
     VulkanUploadDestinationAcquireResult      acquireUploadDestinationGeneration(const VulkanUploadDestinationRequest& request) noexcept;
     VulkanUploadTransferAcquireResult         acquireUploadTransferGeneration(const VulkanUploadTransferRequest& request) noexcept;
     VulkanUploadTransferParentOperationResult executeUploadTransfer(const VulkanUploadTransferOperationRequest& request) noexcept;
@@ -1196,6 +1301,7 @@ public:
     bool resetUploadDestinationGeneration() noexcept;
     bool resetUploadSourceGeneration() noexcept;
     bool resetTextureUploadSourceGeneration() noexcept;
+    bool resetTextureUploadTransferGeneration() noexcept;
     bool resetTextureUploadDestinationGeneration() noexcept;
     bool resetLogicalDeviceGeneration() noexcept;
     bool resetPresentationDeviceGeneration() noexcept;
@@ -1208,7 +1314,9 @@ private:
     friend struct VulkanInstanceGenerationTestAccess;
 
     class NativeAcquisitionGuard;
+    class TextureUploadDestinationTeardownGuard;
     class TextureUploadSourceTeardownGuard;
+    class TextureUploadTransferTeardownGuard;
     class VulkanSurfaceGeneration;
 
     VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
@@ -1236,6 +1344,11 @@ private:
     void noteTextureUploadSourceTransition() noexcept
     {
         ++mTextureUploadSourceEpoch;
+        noteOwnershipTransition();
+    }
+    void noteTextureUploadTransferTransition() noexcept
+    {
+        ++mTextureUploadTransferEpoch;
         noteOwnershipTransition();
     }
     void noteUploadDestinationTransition() noexcept
@@ -1284,6 +1397,7 @@ private:
     std::unique_ptr<VulkanLogicalDeviceGeneration>          mLogicalDeviceGeneration;
     std::unique_ptr<VulkanTextureUploadDestinationGeneration>     mTextureUploadDestinationGeneration;
     std::unique_ptr<VulkanTextureUploadSourceGeneration>           mTextureUploadSourceGeneration;
+    std::unique_ptr<VulkanTextureUploadTransferGeneration>         mTextureUploadTransferGeneration;
     std::unique_ptr<VulkanUploadSourceGeneration>                  mUploadSourceGeneration;
     std::unique_ptr<VulkanUploadDestinationGeneration>             mUploadDestinationGeneration;
     std::unique_ptr<VulkanUploadTransferGeneration>                mUploadTransferGeneration;
@@ -1296,6 +1410,7 @@ private:
     std::unique_ptr<VulkanSwapchainFrameSlotGeneration>            mSwapchainFrameSlotGeneration;
     std::uint64_t                                                  mTextureUploadDestinationEpoch       = 0;
     std::uint64_t                                                  mTextureUploadSourceEpoch            = 0;
+    std::uint64_t                                                  mTextureUploadTransferEpoch            = 0;
     std::uint64_t                                                  mUploadSourceEpoch                  = 0;
     std::uint64_t                                                  mUploadDestinationEpoch             = 0;
     std::uint64_t                                                  mUploadTransferEpoch                = 0;
@@ -1305,7 +1420,9 @@ private:
     std::uint64_t                                                  mSwapchainFrameSlotEpoch            = 0;
     std::uint64_t                                                  mOwnershipTransitionEpoch           = 0;
     std::size_t                                                    mNativeAcquisitionDepth             = 0;
+    std::size_t                                                    mTextureUploadDestinationTeardownDepth = 0;
     std::size_t                                                    mTextureUploadSourceTeardownDepth    = 0;
+    std::size_t                                                    mTextureUploadTransferTeardownDepth    = 0;
 };
 
 using VulkanInstanceAcquireResult = std::variant<VulkanInstanceAcquireError, VulkanInstanceGeneration>;
@@ -1345,6 +1462,9 @@ namespace VulkanInstanceDetail
     VulkanTextureUploadSourceAcquireResult acquireTextureUploadSource(VulkanInstanceGeneration&               instance_generation,
                                                                       const VulkanTextureUploadSourceRequest& request,
                                                                       AllocationCheckpoint allocation_checkpoint) noexcept;
+    VulkanTextureUploadTransferAcquireResult acquireTextureUploadTransfer(VulkanInstanceGeneration&                 instance_generation,
+                                                                          const VulkanTextureUploadTransferRequest& request,
+                                                                          AllocationCheckpoint allocation_checkpoint) noexcept;
 
     VulkanUploadDestinationAcquireResult acquireUploadDestination(VulkanInstanceGeneration&             instance_generation,
                                                                   const VulkanUploadDestinationRequest& request,

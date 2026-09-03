@@ -247,6 +247,36 @@ struct TextureUploadSourceTeardownObservation
     bool                                                    mFullResetSucceeded               = false;
 };
 
+struct TextureUploadDestinationTeardownObservation
+{
+    bool                                                      mDestinationDetached       = false;
+    bool                                                      mMoveProducedEmpty         = false;
+    bool                                                      mDestinationResetSucceeded = false;
+    bool                                                      mLogicalResetSucceeded     = false;
+    bool                                                      mFullResetSucceeded        = false;
+    std::optional<VulkanTextureUploadDestinationAcquireError> mDestinationAcquireError;
+    std::optional<VulkanSwapchainConfigurationAcquireError>   mConfigurationAcquireError;
+    std::optional<VulkanSwapchainChainRebuildError>           mRebuildError;
+    std::optional<VulkanUploadTransferParentOperationError>   mLegacyOperationError;
+    bool                                                      mLegacyOperationUnchanged = false;
+};
+
+struct TextureUploadTransferTeardownObservation
+{
+    bool                                                           mTransferDetached          = false;
+    bool                                                           mMoveProducedEmpty         = false;
+    bool                                                           mTransferResetSucceeded    = false;
+    bool                                                           mSourceResetSucceeded      = false;
+    bool                                                           mDestinationResetSucceeded = false;
+    bool                                                           mLogicalResetSucceeded     = false;
+    bool                                                           mFullResetSucceeded        = false;
+    bool                                                           mNoAuthOrNativeWork        = false;
+    std::optional<VulkanTextureUploadTransferAcquireError>         mAcquireError;
+    std::optional<VulkanSwapchainConfigurationAcquireError>        mConfigurationAcquireError;
+    std::optional<VulkanTextureUploadTransferParentOperationError> mOperationError;
+    std::optional<VulkanSwapchainChainRebuildError>                mRebuildError;
+};
+
 template<typename Handle>
 Handle fakeHandle(std::uintptr_t value) noexcept
 {
@@ -751,6 +781,15 @@ struct FakeState
     VulkanInstanceGeneration*                           mTextureUploadSourceTeardownReentryOwner  = nullptr;
     bool                                                mTextureUploadSourceTeardownReentryActive = false;
     std::vector<TextureUploadSourceTeardownObservation> mTextureUploadSourceTeardownObservations;
+    VulkanInstanceGeneration*                                      mTextureUploadTransferOperationReentryOwner   = nullptr;
+    bool                                                           mTextureUploadTransferOperationReentryInvoked = false;
+    std::optional<VulkanTextureUploadTransferParentOperationError> mTextureUploadTransferOperationReentryError;
+    VulkanInstanceGeneration*                                      mTextureUploadTransferTeardownOwner  = nullptr;
+    bool                                                           mTextureUploadTransferTeardownActive = false;
+    std::vector<TextureUploadTransferTeardownObservation>          mTextureUploadTransferTeardownObservations;
+    VulkanInstanceGeneration*                                      mTextureUploadDestinationTeardownOwner  = nullptr;
+    bool                                                           mTextureUploadDestinationTeardownActive = false;
+    std::vector<TextureUploadDestinationTeardownObservation>       mTextureUploadDestinationTeardownObservations;
 
     bool        mGenerationCurrent   = true;
     std::size_t mGenerationChecks    = 0;
@@ -828,6 +867,9 @@ struct FakeState
 FakeState* gFakeState = nullptr;
 
 void attemptTextureUploadSourceTeardownReentry(FakeState& state) noexcept;
+void attemptTextureUploadTransferOperationReentry(FakeState& state) noexcept;
+void attemptTextureUploadDestinationTeardownReentry(FakeState& state) noexcept;
+void attemptTextureUploadTransferTeardownReentry(FakeState& state) noexcept;
 
 class ScopedFakeState
 {
@@ -1477,6 +1519,7 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyImage(VkDevice device, VkImage image, cons
         return;
     }
     ++gFakeState->mDestroyTextureImageCalls;
+    attemptTextureUploadDestinationTeardownReentry(*gFakeState);
     gFakeState->mDestroyedTextureImages.push_back(image);
     gFakeState->mDestroyTextureImageAllocationCallbacks.push_back(allocation_callbacks);
     gFakeState->mEvents.push_back(Event::DestroyTextureImage);
@@ -1544,6 +1587,7 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyImageView(VkDevice                     dev
         gFakeState->mCreatedTextureImageViews.end())
     {
         ++gFakeState->mDestroyTextureImageViewCalls;
+        attemptTextureUploadDestinationTeardownReentry(*gFakeState);
         gFakeState->mDestroyedTextureImageViews.push_back(image_view);
         gFakeState->mDestroyTextureImageViewAllocationCallbacks.push_back(allocation_callbacks);
         gFakeState->mEvents.push_back(Event::DestroyTextureImageView);
@@ -1824,6 +1868,10 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyCommandPool(VkDevice                     d
     gFakeState->mEvents.push_back(Event::DestroyCommandPool);
     if (command_pool == gFakeState->mUploadTransferCommandPool)
     {
+        if (gFakeState->mTextureUploadTransferTeardownOwner)
+        {
+            attemptTextureUploadTransferTeardownReentry(*gFakeState);
+        }
         gFakeState->mEvents.push_back(Event::DestroyUploadTransferCommandPool);
     }
 }
@@ -1942,6 +1990,10 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyFence(VkDevice device, VkFence fence, cons
     gFakeState->mEvents.push_back(Event::DestroyFence);
     if (fence == gFakeState->mUploadTransferFence)
     {
+        if (gFakeState->mTextureUploadTransferTeardownOwner)
+        {
+            attemptTextureUploadTransferTeardownReentry(*gFakeState);
+        }
         gFakeState->mEvents.push_back(Event::DestroyUploadTransferFence);
     }
 }
@@ -2060,6 +2112,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeQueueSubmit(VkQueue             queue,
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gFakeState->mQueueSubmitCalls;
+    attemptTextureUploadTransferOperationReentry(*gFakeState);
     gFakeState->mSubmittedQueue         = queue;
     gFakeState->mOperationFence         = fence;
     gFakeState->mOperationCommandBuffer = submits[0].commandBufferCount == 1 ? submits[0].pCommandBuffers[0] : VK_NULL_HANDLE;
@@ -2133,6 +2186,40 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdCopyBuffer(VkCommandBuffer     command_buffer,
     gFakeState->mCopyDestinationBuffer = destination_buffer;
     gFakeState->mBufferCopyRegion      = regions[0];
     gFakeState->mEvents.push_back(Event::CopyBuffer);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdCopyBufferToImage(VkCommandBuffer          command_buffer,
+                                                    VkBuffer                 source_buffer,
+                                                    VkImage                  destination_image,
+                                                    VkImageLayout            destination_layout,
+                                                    std::uint32_t            region_count,
+                                                    const VkBufferImageCopy* regions) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mUploadTransferCommandBuffer ||
+        source_buffer != gFakeState->mTextureUploadSourceBuffer || destination_image != gFakeState->mTextureUploadDestinationImage ||
+        destination_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL || region_count != 1 || !regions)
+    {
+        return;
+    }
+    ++gFakeState->mCopyBufferCalls;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBlitImage(VkCommandBuffer    command_buffer,
+                                            VkImage            source_image,
+                                            VkImageLayout      source_layout,
+                                            VkImage            destination_image,
+                                            VkImageLayout      destination_layout,
+                                            std::uint32_t      region_count,
+                                            const VkImageBlit* regions,
+                                            VkFilter           filter) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mUploadTransferCommandBuffer ||
+        source_image != gFakeState->mTextureUploadDestinationImage || destination_image != source_image ||
+        source_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL || destination_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
+        region_count != 1 || !regions || filter != VK_FILTER_LINEAR)
+    {
+        return;
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer               command_buffer,
@@ -2526,6 +2613,7 @@ VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice                     device,
             gFakeState->mAllocatedTextureMemories.end())
         {
             ++gFakeState->mFreeTextureMemoryCalls;
+            attemptTextureUploadDestinationTeardownReentry(*gFakeState);
             gFakeState->mFreedTextureMemories.push_back(memory);
             gFakeState->mFreeTextureMemoryAllocationCallbacks.push_back(allocation_callbacks);
             gFakeState->mEvents.push_back(Event::FreeTextureMemory);
@@ -2815,6 +2903,14 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     if (std::strcmp(name, "vkCmdPipelineBarrier") == 0)
     {
         return gFakeState->mMissing == MissingCommand::CmdPipelineBarrier ? nullptr : eraseFunctionType(fakeCmdPipelineBarrier);
+    }
+    if (std::strcmp(name, "vkCmdCopyBufferToImage") == 0)
+    {
+        return eraseFunctionType(fakeCmdCopyBufferToImage);
+    }
+    if (std::strcmp(name, "vkCmdBlitImage") == 0)
+    {
+        return eraseFunctionType(fakeCmdBlitImage);
     }
     if (std::strcmp(name, "vkCmdClearColorImage") == 0)
     {
@@ -3188,6 +3284,39 @@ VulkanTextureUploadSourceRequest makeTextureUploadSourceRequest(
     return { 42, description, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
 }
 
+VulkanTextureUploadTransferRequest makeTextureUploadTransferRequest(FakeState& state, VulkanInstanceGeneration& owner) noexcept
+{
+    state.mExpectedInstanceOwner = &owner;
+    return { 42,
+             makeTextureUploadSourceDescription(),
+             vulkanTextureUploadDestinationDescription(),
+             { &state, instanceOwnerIsCurrent },
+             { &state, surfaceWindowIsCurrent } };
+}
+
+VulkanTextureUploadTransferOperationRequest makeTextureUploadTransferOperationRequest(FakeState& state, VulkanInstanceGeneration& owner,
+                                                                                      std::uint64_t timeout_ns = 1'000'000) noexcept
+{
+    state.mExpectedInstanceOwner = &owner;
+    return { 42,         makeTextureUploadSourceDescription(), vulkanTextureUploadDestinationDescription(),
+             timeout_ns, { &state, instanceOwnerIsCurrent },   { &state, surfaceWindowIsCurrent } };
+}
+
+void attemptTextureUploadTransferOperationReentry(FakeState& state) noexcept
+{
+    if (!state.mTextureUploadTransferOperationReentryOwner || state.mTextureUploadTransferOperationReentryInvoked)
+    {
+        return;
+    }
+    state.mTextureUploadTransferOperationReentryInvoked = true;
+    const auto result                                   = state.mTextureUploadTransferOperationReentryOwner->executeTextureUploadTransfer(
+        makeTextureUploadTransferOperationRequest(state, *state.mTextureUploadTransferOperationReentryOwner));
+    if (const auto* error = std::get_if<VulkanTextureUploadTransferParentOperationError>(&result))
+    {
+        state.mTextureUploadTransferOperationReentryError = *error;
+    }
+}
+
 VulkanUploadDestinationRequest makeUploadDestinationRequest(
     FakeState&                    state,
     VulkanInstanceGeneration&     owner,
@@ -3287,6 +3416,87 @@ VulkanSwapchainChainRebuildRequest makeSwapchainChainRebuildRequest(
 {
     state.mExpectedInstanceOwner = &owner;
     return { 42, drawable_extent, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
+}
+
+void attemptTextureUploadTransferTeardownReentry(FakeState& state) noexcept
+{
+    auto* owner = state.mTextureUploadTransferTeardownOwner;
+    if (!owner || state.mTextureUploadTransferTeardownActive)
+    {
+        return;
+    }
+    state.mTextureUploadTransferTeardownActive = true;
+    TextureUploadTransferTeardownObservation observation;
+    observation.mTransferDetached = !owner->hasTextureUploadTransferGeneration() && !owner->textureUploadTransferDisposition() &&
+                                    owner->textureUploadTransferCommandPool() == VK_NULL_HANDLE &&
+                                    owner->textureUploadTransferFence() == VK_NULL_HANDLE;
+    const auto owner_checks   = state.mInstanceOwnerChecks;
+    const auto window_checks  = state.mSurfaceWindowChecks;
+    const auto pool_creates   = state.mCreateCommandPoolCalls;
+    const auto submits        = state.mQueueSubmitCalls;
+    const auto waits          = state.mWaitForFencesCalls;
+    observation.mAcquireError = owner->acquireTextureUploadTransferGeneration(makeTextureUploadTransferRequest(state, *owner));
+    observation.mConfigurationAcquireError =
+        owner->acquireSwapchainConfigurationGeneration(makeSwapchainConfigurationRequest(state, *owner));
+    const auto operation = owner->executeTextureUploadTransfer(makeTextureUploadTransferOperationRequest(state, *owner));
+    if (const auto* error = std::get_if<VulkanTextureUploadTransferParentOperationError>(&operation))
+    {
+        observation.mOperationError = *error;
+    }
+    const auto rebuild = owner->rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, *owner, VkExtent2D{ 1440, 810 }));
+    if (const auto* error = std::get_if<VulkanSwapchainChainRebuildError>(&rebuild))
+    {
+        observation.mRebuildError = *error;
+    }
+    VulkanInstanceGeneration moved(std::move(*owner));
+    observation.mMoveProducedEmpty         = moved.instance() == VK_NULL_HANDLE && owner->instance() != VK_NULL_HANDLE;
+    observation.mTransferResetSucceeded    = owner->resetTextureUploadTransferGeneration();
+    observation.mSourceResetSucceeded      = owner->resetTextureUploadSourceGeneration();
+    observation.mDestinationResetSucceeded = owner->resetTextureUploadDestinationGeneration();
+    observation.mLogicalResetSucceeded     = owner->resetLogicalDeviceGeneration();
+    observation.mFullResetSucceeded        = owner->reset();
+    observation.mNoAuthOrNativeWork        = state.mInstanceOwnerChecks == owner_checks && state.mSurfaceWindowChecks == window_checks &&
+                                      state.mCreateCommandPoolCalls == pool_creates && state.mQueueSubmitCalls == submits &&
+                                      state.mWaitForFencesCalls == waits;
+    state.mTextureUploadTransferTeardownObservations.push_back(std::move(observation));
+    state.mTextureUploadTransferTeardownActive = false;
+}
+
+void attemptTextureUploadDestinationTeardownReentry(FakeState& state) noexcept
+{
+    auto* owner = state.mTextureUploadDestinationTeardownOwner;
+    if (!owner || state.mTextureUploadDestinationTeardownActive)
+    {
+        return;
+    }
+    state.mTextureUploadDestinationTeardownActive = true;
+    TextureUploadDestinationTeardownObservation observation;
+    observation.mDestinationDetached = !owner->hasTextureUploadDestinationGeneration();
+    observation.mDestinationAcquireError =
+        owner->acquireTextureUploadDestinationGeneration(makeTextureUploadDestinationRequest(state, *owner));
+    observation.mConfigurationAcquireError =
+        owner->acquireSwapchainConfigurationGeneration(makeSwapchainConfigurationRequest(state, *owner));
+    const auto rebuild = owner->rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, *owner, VkExtent2D{ 1440, 810 }));
+    if (const auto* error = std::get_if<VulkanSwapchainChainRebuildError>(&rebuild))
+    {
+        observation.mRebuildError = *error;
+    }
+    VulkanInstanceGeneration moved(std::move(*owner));
+    observation.mMoveProducedEmpty = moved.instance() == VK_NULL_HANDLE && owner->instance() != VK_NULL_HANDLE;
+    const auto legacy_disposition  = owner->uploadTransferDisposition();
+    const auto submit_calls        = state.mQueueSubmitCalls;
+    const auto legacy_operation    = owner->executeUploadTransfer(makeUploadTransferOperationRequest(state, *owner));
+    if (const auto* error = std::get_if<VulkanUploadTransferParentOperationError>(&legacy_operation))
+    {
+        observation.mLegacyOperationError = *error;
+    }
+    observation.mLegacyOperationUnchanged =
+        owner->uploadTransferDisposition() == legacy_disposition && state.mQueueSubmitCalls == submit_calls;
+    observation.mDestinationResetSucceeded = owner->resetTextureUploadDestinationGeneration();
+    observation.mLogicalResetSucceeded     = owner->resetLogicalDeviceGeneration();
+    observation.mFullResetSucceeded        = owner->reset();
+    state.mTextureUploadDestinationTeardownObservations.push_back(std::move(observation));
+    state.mTextureUploadDestinationTeardownActive = false;
 }
 
 void attemptTextureUploadSourceTeardownReentry(FakeState& state) noexcept
@@ -4601,6 +4811,13 @@ void acquireTextureUploadSourceChain(FakeState& state, VulkanInstanceGeneration&
                 !owner.acquireTextureUploadSourceGeneration(makeTextureUploadSourceRequest(state, owner)));
 }
 
+void acquireTextureUploadTransferChain(FakeState& state, VulkanInstanceGeneration& owner)
+{
+    acquireTextureUploadSourceChain(state, owner);
+    tut::ensure("the texture-upload-transfer fixture succeeds",
+                !owner.acquireTextureUploadTransferGeneration(makeTextureUploadTransferRequest(state, owner)));
+}
+
 bool textureUploadDestinationMatches(const FakeState&                                 state,
                                      const VulkanInstanceGeneration&                  owner,
                                      const VulkanTextureUploadDestinationDescription& description) noexcept
@@ -5690,7 +5907,7 @@ struct render_vulkan_instance_test
 {
 };
 
-using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 136>;
+using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 142>;
 using render_vulkan_instance_test_object = render_vulkan_instance_test_group::object;
 render_vulkan_instance_test_group render_vulkan_instance_tests("render Vulkan instance");
 
@@ -13431,6 +13648,265 @@ void render_vulkan_instance_test_object::test<136>()
     state.mTextureUploadSourceTeardownReentryOwner = nullptr;
     state.mDeviceDestroyOwner                      = nullptr;
     ensure("remaining instance parents reset after guarded logical-device teardown", owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<137>()
+{
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().acquireTextureUploadTransferGeneration(
+        std::declval<const VulkanTextureUploadTransferRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().executeTextureUploadTransfer(
+        std::declval<const VulkanTextureUploadTransferOperationRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().retryTextureUploadTransferCompletion(
+        std::declval<const VulkanTextureUploadTransferOperationRequest&>())));
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().resetTextureUploadTransferGeneration()));
+
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    ensure("an inert aggregate exposes no texture-transfer or destination residency state",
+           !owner.hasTextureUploadTransferGeneration() && !owner.textureUploadTransferResourceHandle() &&
+               owner.textureUploadTransferExpectedRevision() == 0 && owner.textureUploadTransferContentIdentity() == 0 &&
+               owner.textureUploadTransferSourceBuffer() == VK_NULL_HANDLE &&
+               owner.textureUploadTransferDestinationImage() == VK_NULL_HANDLE && owner.textureUploadTransferQueue() == VK_NULL_HANDLE &&
+               owner.textureUploadTransferQueueFamilyIndex() == VK_QUEUE_FAMILY_IGNORED &&
+               owner.textureUploadTransferQueueIndex() == std::numeric_limits<std::uint32_t>::max() &&
+               owner.textureUploadTransferCommandPool() == VK_NULL_HANDLE && owner.textureUploadTransferCommandBuffer() == VK_NULL_HANDLE &&
+               owner.textureUploadTransferFence() == VK_NULL_HANDLE && owner.textureUploadTransferSubmissionCount() == 0 &&
+               owner.textureUploadTransferCompletionWaitCount() == 0 && !owner.textureUploadTransferDisposition() &&
+               !owner.textureUploadDestinationIsResident() && owner.textureUploadDestinationResidentRevision() == 0 &&
+               owner.textureUploadDestinationResidentContentIdentity() == 0 &&
+               owner.textureUploadDestinationCurrentState() == LLRenderContract::ImageState::Undefined);
+
+    const VulkanTextureUploadTransferAcquireResult missing =
+        owner.acquireTextureUploadTransferGeneration(makeTextureUploadTransferRequest(state, owner));
+    ensure("texture transfer acquisition requires the texture source and destination chain without native work",
+           missing && missing->mCode == VulkanTextureUploadTransferAcquireCode::SurfaceNotLive &&
+               !owner.hasTextureUploadTransferGeneration());
+    const VulkanTextureUploadTransferParentOperationResult operation =
+        owner.executeTextureUploadTransfer(makeTextureUploadTransferOperationRequest(state, owner));
+    const auto* operation_error = std::get_if<VulkanTextureUploadTransferParentOperationError>(&operation);
+    ensure("texture transfer execution requires the same live parent chain without native work",
+           operation_error && operation_error->mCode == VulkanTextureUploadTransferParentOperationCode::SurfaceNotLive &&
+               !operation_error->mOperationError && owner.resetTextureUploadTransferGeneration() && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<138>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireTextureUploadTransferChain(state, owner);
+    ensure("texture transfer publication retains the exact source and destination",
+           owner.hasTextureUploadTransferGeneration() &&
+               owner.textureUploadTransferResourceHandle() == owner.textureUploadSourceResourceHandle() &&
+               owner.textureUploadTransferExpectedRevision() == owner.textureUploadSourceExpectedRevision() &&
+               owner.textureUploadTransferContentIdentity() == owner.textureUploadSourceContentIdentity() &&
+               owner.textureUploadTransferSourceBuffer() == owner.textureUploadSourceBuffer() &&
+               owner.textureUploadTransferDestinationImage() == owner.textureUploadDestinationImage() &&
+               owner.textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Ready &&
+               !owner.textureUploadDestinationIsResident());
+
+    state.mTextureUploadTransferOperationReentryOwner = &owner;
+    const auto  result      = owner.executeTextureUploadTransfer(makeTextureUploadTransferOperationRequest(state, owner));
+    const auto* disposition = std::get_if<VulkanTextureUploadTransferDisposition>(&result);
+    ensure("one submission completes and publishes shader-readable destination residency",
+           disposition && *disposition == VulkanTextureUploadTransferDisposition::Complete &&
+               owner.textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Complete &&
+               owner.textureUploadTransferSubmissionCount() == 1 && owner.textureUploadTransferCompletionWaitCount() == 1 &&
+               state.mQueueSubmitCalls == 1 && state.mWaitForFencesCalls == 1 && owner.textureUploadDestinationIsResident() &&
+               owner.textureUploadDestinationResidentRevision() == owner.textureUploadSourceExpectedRevision() &&
+               owner.textureUploadDestinationResidentContentIdentity() == owner.textureUploadSourceContentIdentity() &&
+               owner.textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead);
+    ensure("recursive aggregate execution is rejected before recording or submitting twice",
+           state.mTextureUploadTransferOperationReentryInvoked && state.mTextureUploadTransferOperationReentryError &&
+               state.mTextureUploadTransferOperationReentryError->mCode ==
+                   VulkanTextureUploadTransferParentOperationCode::NativeOperationInProgress &&
+               !state.mTextureUploadTransferOperationReentryError->mOperationError && state.mQueueSubmitCalls == 1);
+
+    state.mTextureUploadTransferOperationReentryOwner = nullptr;
+    state.mTextureUploadTransferTeardownOwner         = &owner;
+    ensure("direct completed-transfer reset preserves source, destination, and published residency",
+           owner.resetTextureUploadTransferGeneration() && !owner.hasTextureUploadTransferGeneration() &&
+               owner.hasTextureUploadSourceGeneration() && owner.hasTextureUploadDestinationGeneration() &&
+               owner.textureUploadDestinationIsResident() && state.mTextureUploadTransferTeardownObservations.size() == 2);
+    for (const auto& observation : state.mTextureUploadTransferTeardownObservations)
+    {
+        ensure("both transfer callbacks reject publication and operations before authentication or native work",
+               observation.mTransferDetached && observation.mMoveProducedEmpty && observation.mNoAuthOrNativeWork &&
+                   observation.mAcquireError &&
+                   observation.mAcquireError->mCode == VulkanTextureUploadTransferAcquireCode::NativeTeardownInProgress &&
+                   !observation.mAcquireError->mResolutionError && observation.mConfigurationAcquireError &&
+                   observation.mConfigurationAcquireError->mCode == VulkanSwapchainConfigurationAcquireCode::NativeTeardownInProgress &&
+                   !observation.mConfigurationAcquireError->mResolutionError && observation.mOperationError &&
+                   observation.mOperationError->mCode == VulkanTextureUploadTransferParentOperationCode::NativeOperationInProgress &&
+                   !observation.mOperationError->mOperationError && observation.mRebuildError &&
+                   observation.mRebuildError->mCode == VulkanSwapchainChainRebuildCode::NativeAcquisitionInProgress &&
+                   observation.mRebuildError->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+                   !observation.mTransferResetSucceeded && !observation.mSourceResetSucceeded && !observation.mDestinationResetSucceeded &&
+                   !observation.mLogicalResetSucceeded && !observation.mFullResetSucceeded);
+    }
+    state.mTextureUploadTransferTeardownOwner = nullptr;
+    ensure("remaining texture upload owners reset after direct transfer retirement", owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<139>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireTextureUploadTransferChain(state, owner);
+    acquireCompleteSwapchainChildren(state, owner);
+    state.mWaitForFencesResults = { VK_TIMEOUT, VK_SUCCESS };
+
+    const auto  execute = owner.executeTextureUploadTransfer(makeTextureUploadTransferOperationRequest(state, owner, 37));
+    const auto* timeout = std::get_if<VulkanTextureUploadTransferParentOperationError>(&execute);
+    ensure("a bounded timeout retains pending ownership without publishing residency",
+           timeout && timeout->mCode == VulkanTextureUploadTransferParentOperationCode::OperationFailure && timeout->mOperationError &&
+               timeout->mOperationError->mCommand == VulkanTextureUploadTransferCommand::WaitForFences &&
+               timeout->mOperationError->mResult == VK_TIMEOUT &&
+               timeout->mOperationError->mDisposition == VulkanTextureUploadTransferDisposition::Pending &&
+               owner.textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Pending &&
+               owner.textureUploadTransferSubmissionCount() == 1 && owner.textureUploadTransferCompletionWaitCount() == 1 &&
+               state.mWaitTimeout == 37 && state.mQueueSubmitCalls == 1 && !owner.textureUploadDestinationIsResident());
+    ensure("pending transfer blocks every direct and transitive reset before any teardown",
+           !owner.resetTextureUploadTransferGeneration() && !owner.resetTextureUploadSourceGeneration() &&
+               !owner.resetTextureUploadDestinationGeneration() && !owner.resetLogicalDeviceGeneration() && !owner.reset() &&
+               owner.hasTextureUploadTransferGeneration() && owner.hasTextureUploadSourceGeneration() &&
+               owner.hasTextureUploadDestinationGeneration() && state.mDestroyFenceCalls == 0 && state.mDestroyCommandPoolCalls == 0);
+
+    const VkCommandPool transfer_pool = owner.textureUploadTransferCommandPool();
+    ensureSwapchainChainRebuildOutcome(owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1280, 720 })),
+                                       VulkanSwapchainChainRebuildOutcome::Ready);
+    ensure("changed-extent rebuild preserves the independent pending texture-transfer chain",
+           owner.textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Pending &&
+               owner.textureUploadTransferCommandPool() == transfer_pool && owner.hasTextureUploadSourceGeneration() &&
+               owner.hasTextureUploadDestinationGeneration() && !owner.textureUploadDestinationIsResident());
+
+    const auto  retry    = owner.retryTextureUploadTransferCompletion(makeTextureUploadTransferOperationRequest(state, owner, 73));
+    const auto* complete = std::get_if<VulkanTextureUploadTransferDisposition>(&retry);
+    ensure("completion retry waits only and never records or submits again",
+           complete && *complete == VulkanTextureUploadTransferDisposition::Complete && state.mQueueSubmitCalls == 1 &&
+               state.mWaitForFencesCalls == 2 && state.mWaitTimeout == 73 && owner.textureUploadTransferSubmissionCount() == 1 &&
+               owner.textureUploadTransferCompletionWaitCount() == 2 && owner.textureUploadDestinationIsResident() && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<140>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireTextureUploadTransferChain(state, owner);
+    acquireCompleteSwapchainChildren(state, owner);
+    const VkCommandPool pool     = owner.textureUploadTransferCommandPool();
+    const VkFence       fence    = owner.textureUploadTransferFence();
+    state.mSwapchainCreateResult = VK_ERROR_OUT_OF_HOST_MEMORY;
+    const auto  failed_result    = owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, VkExtent2D{ 1280, 720 }));
+    const auto& failed           = requireSwapchainChainRebuildError(failed_result);
+    ensure("failed changed-extent rebuild preserves the ready texture-transfer chain exactly",
+           failed.mCode == VulkanSwapchainChainRebuildCode::ChildFailure && failed.mPhase == VulkanSwapchainChainRebuildPhase::Swapchain &&
+               owner.hasTextureUploadTransferGeneration() && owner.textureUploadTransferCommandPool() == pool &&
+               owner.textureUploadTransferFence() == fence &&
+               owner.textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Ready &&
+               owner.hasTextureUploadSourceGeneration() && owner.hasTextureUploadDestinationGeneration() && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<141>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireTextureUploadTransferChain(state, owner);
+    state.mTextureUploadDestinationTeardownOwner = &owner;
+
+    ensure("destination reset retires transfer and source before the guarded image owner",
+           owner.resetTextureUploadDestinationGeneration() && !owner.hasTextureUploadTransferGeneration() &&
+               !owner.hasTextureUploadSourceGeneration() && !owner.hasTextureUploadDestinationGeneration() &&
+               state.mDestroyTextureImageViewCalls == 1 && state.mDestroyTextureImageCalls == 1 && state.mFreeTextureMemoryCalls == 1 &&
+               state.mTextureUploadDestinationTeardownObservations.size() == 3);
+    for (const auto& observation : state.mTextureUploadDestinationTeardownObservations)
+    {
+        ensure("each destination callback observes detached aggregate accessors and teardown-specific publication rejection",
+               observation.mDestinationDetached && observation.mMoveProducedEmpty && !observation.mDestinationResetSucceeded &&
+                   !observation.mLogicalResetSucceeded && !observation.mFullResetSucceeded && observation.mDestinationAcquireError &&
+                   observation.mDestinationAcquireError->mCode == VulkanTextureUploadDestinationAcquireCode::NativeTeardownInProgress &&
+                   !observation.mDestinationAcquireError->mResolutionError && observation.mConfigurationAcquireError &&
+                   observation.mConfigurationAcquireError->mCode == VulkanSwapchainConfigurationAcquireCode::NativeTeardownInProgress &&
+                   !observation.mConfigurationAcquireError->mResolutionError && observation.mRebuildError &&
+                   observation.mRebuildError->mCode == VulkanSwapchainChainRebuildCode::NativeAcquisitionInProgress &&
+                   observation.mRebuildError->mPhase == VulkanSwapchainChainRebuildPhase::Preflight);
+    }
+    const auto view   = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyTextureImageView);
+    const auto image  = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyTextureImage);
+    const auto memory = std::find(state.mEvents.begin(), state.mEvents.end(), Event::FreeTextureMemory);
+    ensure("destination native teardown occurs exactly once in view-image-memory order",
+           view != state.mEvents.end() && image != state.mEvents.end() && memory != state.mEvents.end() && view < image && image < memory);
+
+    state.mTextureUploadDestinationTeardownOwner = nullptr;
+    ensure("logical parents remain resettable after guarded destination retirement", owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<142>()
+{
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireTextureUploadDestinationChain(state, owner);
+    ensure("the transitive fixture acquires a legacy upload source on the shared logical device",
+           !owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner)));
+    state.mMemoryProperties.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    ensure("the transitive fixture acquires a legacy upload destination and ready transfer",
+           !owner.acquireUploadDestinationGeneration(makeUploadDestinationRequest(state, owner)) &&
+               !owner.acquireUploadTransferGeneration(makeUploadTransferRequest(state, owner)) &&
+               owner.uploadTransferDisposition() == VulkanUploadTransferDisposition::Ready);
+    acquireCompleteSwapchainChildren(state, owner);
+    state.mTextureUploadDestinationTeardownOwner = &owner;
+    state.mDeviceDestroyOwner                    = &owner;
+
+    ensure("logical-device reset transitively retires swapchain children before the guarded texture destination",
+           owner.resetLogicalDeviceGeneration() && !owner.hasLogicalDeviceGeneration() && !owner.hasTextureUploadDestinationGeneration() &&
+               !owner.hasSwapchainConfigurationGeneration() && !owner.hasSwapchainGeneration() && !owner.hasSwapchainImagesGeneration() &&
+               !owner.hasSwapchainFrameSlotGeneration() && state.mTextureUploadDestinationTeardownObservations.size() == 3);
+    for (const auto& observation : state.mTextureUploadDestinationTeardownObservations)
+    {
+        ensure("every transitive destination callback rejects destination and swapchain-root republication with typed teardown errors",
+               observation.mDestinationDetached && observation.mMoveProducedEmpty && !observation.mDestinationResetSucceeded &&
+                   !observation.mLogicalResetSucceeded && !observation.mFullResetSucceeded && observation.mDestinationAcquireError &&
+                   observation.mDestinationAcquireError->mCode == VulkanTextureUploadDestinationAcquireCode::NativeTeardownInProgress &&
+                   !observation.mDestinationAcquireError->mResolutionError && observation.mConfigurationAcquireError &&
+                   observation.mConfigurationAcquireError->mCode == VulkanSwapchainConfigurationAcquireCode::NativeTeardownInProgress &&
+                   !observation.mConfigurationAcquireError->mResolutionError && observation.mRebuildError &&
+                   observation.mRebuildError->mCode == VulkanSwapchainChainRebuildCode::NativeAcquisitionInProgress &&
+                   observation.mRebuildError->mPhase == VulkanSwapchainChainRebuildPhase::Preflight && observation.mLegacyOperationError &&
+                   observation.mLegacyOperationError->mCode == VulkanUploadTransferParentOperationCode::NativeOperationInProgress &&
+                   !observation.mLegacyOperationError->mOperationError && observation.mLegacyOperationUnchanged);
+    }
+    const auto view   = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyTextureImageView);
+    const auto image  = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyTextureImage);
+    const auto memory = std::find(state.mEvents.begin(), state.mEvents.end(), Event::FreeTextureMemory);
+    const auto device = std::find(state.mEvents.begin(), state.mEvents.end(), Event::DestroyDevice);
+    ensure("destination retires exactly once in view-image-memory order before a child-free device destruction",
+           state.mDestroyTextureImageViewCalls == 1 && state.mDestroyTextureImageCalls == 1 && state.mFreeTextureMemoryCalls == 1 &&
+               view != state.mEvents.end() && image != state.mEvents.end() && memory != state.mEvents.end() &&
+               device != state.mEvents.end() && view < image && image < memory && memory < device && state.mDestroyDeviceCalls == 1 &&
+               state.mDeviceDestroyObservationMade && !state.mObservedTextureUploadDestinationAtDeviceDestroy &&
+               !state.mObservedConfigurationAtDeviceDestroy && !state.mObservedSwapchainAtDeviceDestroy &&
+               !state.mObservedSwapchainImagesAtDeviceDestroy && !state.mObservedFrameSlotAtDeviceDestroy);
+
+    state.mTextureUploadDestinationTeardownOwner = nullptr;
+    state.mDeviceDestroyOwner                    = nullptr;
+    ensure("remaining instance parents reset after transitive destination teardown", owner.reset());
 }
 
 } // namespace tut

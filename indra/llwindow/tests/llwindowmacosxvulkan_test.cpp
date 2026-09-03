@@ -277,6 +277,9 @@ struct FakeState
     std::size_t                                                                  mTextureUploadSourceFreeCount       = 0;
     std::size_t                                                                  mTextureUploadSourceDestroyOrder    = 0;
     std::size_t                                                                  mTextureUploadSourceMemoryFreeOrder = 0;
+    std::size_t                                                                  mTextureUploadCopyCalls             = 0;
+    std::size_t                                                                  mTextureUploadBlitCalls             = 0;
+    std::size_t                                                                  mTextureUploadImageBarrierCount     = 0;
     std::size_t                                                                  mLogicalDeviceDestroyOrder          = 0;
     std::size_t                                                               mUploadDestinationDestroyCount = 0;
     std::size_t                                                               mUploadDestinationFreeCount    = 0;
@@ -1207,8 +1210,8 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice       device,
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_buffer,
-                                                  VkPipelineStageFlags,
-                                                  VkPipelineStageFlags,
+                                                  VkPipelineStageFlags source_stage,
+                                                  VkPipelineStageFlags destination_stage,
                                                   VkDependencyFlags,
                                                   std::uint32_t,
                                                   const VkMemoryBarrier*,
@@ -1217,9 +1220,52 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_b
                                                   std::uint32_t               image_barrier_count,
                                                   const VkImageMemoryBarrier* image_barriers) noexcept
 {
-    if (gState && command_buffer == gState->mCommandBuffer && image_barrier_count == 1 && image_barriers)
+    if (gState && command_buffer == gState->mCommandBuffer && source_stage != 0 && destination_stage != 0 && image_barrier_count != 0 &&
+        image_barriers)
     {
-        ++gState->mPipelineBarrierCount;
+        if (image_barrier_count == 1)
+        {
+            ++gState->mPipelineBarrierCount;
+        }
+        for (std::uint32_t index = 0; index < image_barrier_count; ++index)
+        {
+            if (image_barriers[index].image == gState->mTextureUploadDestinationImage)
+            {
+                ++gState->mTextureUploadImageBarrierCount;
+            }
+        }
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdCopyBufferToImage(VkCommandBuffer          command_buffer,
+                                                    VkBuffer                 source,
+                                                    VkImage                  destination,
+                                                    VkImageLayout            layout,
+                                                    std::uint32_t            region_count,
+                                                    const VkBufferImageCopy* regions) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer && source == gState->mTextureUploadSourceBuffer &&
+        destination == gState->mTextureUploadDestinationImage && layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && region_count == 4 &&
+        regions)
+    {
+        ++gState->mTextureUploadCopyCalls;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBlitImage(VkCommandBuffer    command_buffer,
+                                            VkImage            source,
+                                            VkImageLayout      source_layout,
+                                            VkImage            destination,
+                                            VkImageLayout      destination_layout,
+                                            std::uint32_t      region_count,
+                                            const VkImageBlit* regions,
+                                            VkFilter           filter) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer && source == gState->mTextureUploadDestinationImage &&
+        destination == gState->mTextureUploadDestinationImage && source_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
+        destination_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && region_count == 1 && regions && filter == VK_FILTER_LINEAR)
+    {
+        ++gState->mTextureUploadBlitCalls;
     }
 }
 
@@ -1654,6 +1700,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeAcquireNextImage);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdPipelineBarrier);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdCopyBuffer);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdCopyBufferToImage);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdBlitImage);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdClearColorImage);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdBeginRenderPass);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdEndRenderPass);
@@ -4352,6 +4400,105 @@ void window_macosx_vulkan_object::test<24>()
                state.mTextureUploadDestinationViewDestroyOrder < state.mTextureUploadDestinationImageDestroyOrder &&
                state.mTextureUploadDestinationImageDestroyOrder < state.mTextureUploadDestinationMemoryFreeOrder &&
                state.mTextureUploadDestinationMemoryFreeOrder < state.mLogicalDeviceDestroyOrder);
+}
+
+template<>
+template<>
+void window_macosx_vulkan_object::test<25>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState   state;
+    ScopedState active(state);
+    auto        result = acquireLLWindowMacOSXVulkan(createInfo(), 225, fakeOperations(state));
+    auto*       owner  = acquiredWindow(result);
+    ensure("texture transfer fixture acquires the complete Cocoa owner chain", owner && acquireCompleteSwapchainChain(*owner));
+
+    auto* generation = const_cast<VulkanInstanceGeneration*>(owner->instanceGeneration());
+    ensure("texture transfer fixture publishes its mutable aggregate", generation != nullptr);
+    UploadOperationContext context{ owner, generation };
+
+    const LLRenderContract::TextureUploadFixture      fixture                 = LLRenderContract::makeTextureUploadFixture();
+    const VulkanTextureUploadSourceDescription        source_description      = vulkanTextureUploadSourceDescription(fixture.mSourceRGBA8);
+    const VulkanTextureUploadDestinationDescription   destination_description = vulkanTextureUploadDestinationDescription();
+    const VulkanTextureUploadSourceRequest            source_request{ generation->nativeWindowGeneration(),
+                                                           source_description,
+                                                                      { &context, uploadInstanceOwnerIsCurrent },
+                                                                      { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadDestinationRequest       destination_request{ generation->nativeWindowGeneration(),
+                                                                     destination_description,
+                                                                           { &context, uploadInstanceOwnerIsCurrent },
+                                                                           { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadTransferRequest          transfer_request{ generation->nativeWindowGeneration(),
+                                                               source_description,
+                                                               destination_description,
+                                                                        { &context, uploadInstanceOwnerIsCurrent },
+                                                                        { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadTransferOperationRequest operation_request{ generation->nativeWindowGeneration(),
+                                                                         source_description,
+                                                                         destination_description,
+                                                                         1'000'000'000,
+                                                                         { &context, uploadInstanceOwnerIsCurrent },
+                                                                         { &context, uploadWindowGenerationIsCurrent } };
+
+    state.mMemoryProperties.memoryTypes[0].propertyFlags =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    ensure("texture transfer fixture acquires its exact source and unpublished destination",
+           !generation->acquireTextureUploadDestinationGeneration(destination_request) &&
+               !generation->acquireTextureUploadSourceGeneration(source_request) && !generation->textureUploadDestinationIsResident());
+    const VkBuffer      source_buffer     = generation->textureUploadSourceBuffer();
+    const VkImage       destination_image = generation->textureUploadDestinationImage();
+    const std::uint64_t content_identity  = generation->textureUploadSourceContentIdentity();
+
+    ensure("the Cocoa aggregate acquires one texture upload transfer over those exact resources",
+           !generation->acquireTextureUploadTransferGeneration(transfer_request) && generation->hasTextureUploadTransferGeneration() &&
+               generation->textureUploadTransferResourceHandle() == destination_description.mHandle &&
+               generation->textureUploadTransferExpectedRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadTransferContentIdentity() == content_identity &&
+               generation->textureUploadTransferSourceBuffer() == source_buffer &&
+               generation->textureUploadTransferDestinationImage() == destination_image &&
+               generation->textureUploadTransferQueue() == generation->presentationQueue() &&
+               generation->textureUploadTransferQueueFamilyIndex() == generation->presentationQueueFamilyIndex() &&
+               generation->textureUploadTransferQueueIndex() == generation->logicalDeviceQueueIndex() &&
+               generation->textureUploadTransferCommandPool() != VK_NULL_HANDLE &&
+               generation->textureUploadTransferCommandBuffer() != VK_NULL_HANDLE &&
+               generation->textureUploadTransferFence() != VK_NULL_HANDLE &&
+               generation->textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Ready);
+
+    const auto  execution   = generation->executeTextureUploadTransfer(operation_request);
+    const auto* disposition = std::get_if<VulkanTextureUploadTransferDisposition>(&execution);
+    ensure("one completed texture transfer publishes exact shader-readable residency",
+           disposition && *disposition == VulkanTextureUploadTransferDisposition::Complete &&
+               generation->textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Complete &&
+               generation->textureUploadTransferSubmissionCount() == 1 && generation->textureUploadTransferCompletionWaitCount() == 1 &&
+               state.mTextureUploadCopyCalls == 1 && state.mTextureUploadBlitCalls == 2 && state.mTextureUploadImageBarrierCount == 5 &&
+               generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadDestinationResidentContentIdentity() == content_identity &&
+               generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead);
+
+    state.mRefreshWidth         = 1600;
+    state.mRefreshHeight        = 900;
+    const auto  rebuild         = owner->rebuildSwapchainChain();
+    const auto* rebuild_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuild);
+    ensure("changed-extent rebuild preserves the completed texture transfer, Cocoa geometry, and published destination",
+           rebuild_outcome && *rebuild_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               generation->hasTextureUploadTransferGeneration() && generation->textureUploadTransferSourceBuffer() == source_buffer &&
+               generation->textureUploadTransferDestinationImage() == destination_image &&
+               generation->textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Complete &&
+               generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentContentIdentity() == content_identity && owner->hasNativeWindow() &&
+               owner->backingScale() == 2.0 && owner->drawableWidth() == 1600 && owner->drawableHeight() == 900);
+
+    ensure("direct transfer reset preserves its resident destination, source, and rebuilt presentation chain",
+           generation->resetTextureUploadTransferGeneration() && !generation->hasTextureUploadTransferGeneration() &&
+               generation->hasTextureUploadSourceGeneration() && generation->textureUploadSourceBuffer() == source_buffer &&
+               generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationImage() == destination_image &&
+               generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentContentIdentity() == content_identity &&
+               generation->hasSwapchainFrameSlotGeneration());
+    ensure("texture transfer fixture releases its retained resources and Cocoa owner",
+           generation->resetTextureUploadSourceGeneration() && generation->resetTextureUploadDestinationGeneration() && owner->reset());
 }
 
 } // namespace tut

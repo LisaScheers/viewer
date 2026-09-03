@@ -393,6 +393,7 @@ VulkanTextureUploadDestinationGeneration::VulkanTextureUploadDestinationGenerati
     mQueueFamilyIndex(logical_device_generation.queueFamilyIndex()),
     mQueueIndex(logical_device_generation.queueIndex()),
     mDescription(description),
+    mCurrentState(description.mInitialState),
     mFormatFeatures(format_features),
     mImageFormatProperties(image_format_properties),
     mImage(image),
@@ -428,6 +429,9 @@ VulkanTextureUploadDestinationGeneration::VulkanTextureUploadDestinationGenerati
     mQueueFamilyIndex(std::exchange(other.mQueueFamilyIndex, VK_QUEUE_FAMILY_IGNORED)),
     mQueueIndex(std::exchange(other.mQueueIndex, 0)),
     mDescription(std::exchange(other.mDescription, {})),
+    mResidentRevision(std::exchange(other.mResidentRevision, 0)),
+    mResidentContentIdentity(std::exchange(other.mResidentContentIdentity, 0)),
+    mCurrentState(std::exchange(other.mCurrentState, LLRenderContract::ImageState::Undefined)),
     mFormatFeatures(std::exchange(other.mFormatFeatures, 0)),
     mImageFormatProperties(std::exchange(other.mImageFormatProperties, {})),
     mImage(std::exchange(other.mImage, VK_NULL_HANDLE)),
@@ -453,6 +457,13 @@ VkExtent3D VulkanTextureUploadDestinationGeneration::residentExtent() const noex
 bool VulkanTextureUploadDestinationGeneration::isDeviceLocal() const noexcept
 {
     return (mMemoryPropertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+}
+
+bool VulkanTextureUploadDestinationGeneration::isResident() const noexcept
+{
+    return mImage != VK_NULL_HANDLE && mMemory != VK_NULL_HANDLE && mImageView != VK_NULL_HANDLE && mResidentRevision != 0 &&
+           mResidentRevision == mDescription.mExpectedRevision && mResidentContentIdentity != 0 &&
+           mCurrentState == LLRenderContract::ImageState::ShaderRead;
 }
 
 VkImageSubresourceRange VulkanTextureUploadDestinationGeneration::viewRange() const noexcept
@@ -485,6 +496,23 @@ bool VulkanTextureUploadDestinationGeneration::createdFor(const VulkanPhysicalDe
            isDeviceLocal() && mDestroyImageView && mDestroyImage && mFreeMemory;
 }
 
+bool VulkanTextureUploadDestinationGeneration::markResident(std::uint64_t                expected_revision,
+                                                            std::uint64_t                content_identity,
+                                                            LLRenderContract::ImageState state) noexcept
+{
+    if (mImage == VK_NULL_HANDLE || mMemory == VK_NULL_HANDLE || mImageView == VK_NULL_HANDLE || expected_revision == 0 ||
+        expected_revision != mDescription.mExpectedRevision || content_identity == 0 || state != LLRenderContract::ImageState::ShaderRead ||
+        mResidentRevision != 0 || mResidentContentIdentity != 0 || mCurrentState != LLRenderContract::ImageState::Undefined)
+    {
+        return false;
+    }
+
+    mResidentRevision        = expected_revision;
+    mResidentContentIdentity = content_identity;
+    mCurrentState            = state;
+    return true;
+}
+
 void VulkanTextureUploadDestinationGeneration::reset() noexcept
 {
     const VkDevice               device             = std::exchange(mDevice, VK_NULL_HANDLE);
@@ -506,6 +534,9 @@ void VulkanTextureUploadDestinationGeneration::reset() noexcept
     mQueueFamilyIndex            = VK_QUEUE_FAMILY_IGNORED;
     mQueueIndex                  = 0;
     mDescription                 = {};
+    mResidentRevision            = 0;
+    mResidentContentIdentity     = 0;
+    mCurrentState                = LLRenderContract::ImageState::Undefined;
     mFormatFeatures              = 0;
     mImageFormatProperties       = {};
     mMemoryRequirements          = {};

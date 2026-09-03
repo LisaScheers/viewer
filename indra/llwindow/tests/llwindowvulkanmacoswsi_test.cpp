@@ -531,6 +531,78 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->textureUploadSourceIsCoherent() == retained_texture_source_coherent;
     };
 
+    LLRenderVulkan::VulkanTextureUploadTransferRequest texture_transfer_request;
+    texture_transfer_request.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
+    texture_transfer_request.mSourceDescription      = texture_source_description;
+    texture_transfer_request.mDestinationDescription = texture_destination_request.mDescription;
+    texture_transfer_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    texture_transfer_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+    LLRenderVulkan::VulkanTextureUploadTransferOperationRequest texture_transfer_operation;
+    texture_transfer_operation.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
+    texture_transfer_operation.mSourceDescription      = texture_source_description;
+    texture_transfer_operation.mDestinationDescription = texture_destination_request.mDescription;
+    texture_transfer_operation.mTimeoutNs              = 1'000'000'000;
+    texture_transfer_operation.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    texture_transfer_operation.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+
+    ensure("the native destination remains unpublished before its texture upload transfer",
+           !instance_generation->textureUploadDestinationIsResident());
+    const auto texture_transfer_error = mutable_instance_generation->acquireTextureUploadTransferGeneration(texture_transfer_request);
+    ensure("the native aggregate acquires one texture transfer over the exact source and destination",
+           !texture_transfer_error.has_value() && instance_generation->hasTextureUploadTransferGeneration() &&
+               instance_generation->textureUploadTransferResourceHandle() == retained_texture_handle &&
+               instance_generation->textureUploadTransferExpectedRevision() == retained_texture_revision &&
+               instance_generation->textureUploadTransferContentIdentity() == retained_texture_source_identity &&
+               instance_generation->textureUploadTransferSourceBuffer() == retained_texture_source_buffer &&
+               instance_generation->textureUploadTransferDestinationImage() == retained_texture_image &&
+               instance_generation->textureUploadTransferQueue() == instance_generation->presentationQueue() &&
+               instance_generation->textureUploadTransferCommandPool() != VK_NULL_HANDLE &&
+               instance_generation->textureUploadTransferCommandBuffer() != VK_NULL_HANDLE &&
+               instance_generation->textureUploadTransferFence() != VK_NULL_HANDLE &&
+               instance_generation->textureUploadTransferDisposition() == LLRenderVulkan::VulkanTextureUploadTransferDisposition::Ready);
+    auto texture_transfer_execution = mutable_instance_generation->executeTextureUploadTransfer(texture_transfer_operation);
+    while (instance_generation->textureUploadTransferDisposition() == LLRenderVulkan::VulkanTextureUploadTransferDisposition::Pending)
+    {
+        texture_transfer_execution = mutable_instance_generation->retryTextureUploadTransferCompletion(texture_transfer_operation);
+    }
+    const auto* texture_transfer_disposition =
+        std::get_if<LLRenderVulkan::VulkanTextureUploadTransferDisposition>(&texture_transfer_execution);
+    ensure(
+        "one native texture transfer completes and publishes exact shader-readable residency",
+        texture_transfer_disposition && *texture_transfer_disposition == LLRenderVulkan::VulkanTextureUploadTransferDisposition::Complete &&
+            instance_generation->textureUploadTransferDisposition() == LLRenderVulkan::VulkanTextureUploadTransferDisposition::Complete &&
+            instance_generation->textureUploadTransferSubmissionCount() == 1 &&
+            instance_generation->textureUploadTransferCompletionWaitCount() >= 1 &&
+            instance_generation->textureUploadDestinationIsResident() &&
+            instance_generation->textureUploadDestinationResidentRevision() == retained_texture_revision &&
+            instance_generation->textureUploadDestinationResidentContentIdentity() == retained_texture_source_identity &&
+            instance_generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead);
+    ensure_equals("native texture-transfer execution emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("texture-transfer execution preserves the Cocoa owner, backing geometry, and OpenGL isolation",
+           owner->hasNativeWindow() && owner->backingScale() == texture_source_backing_scale && owner->drawableWidth() == BACKING_WIDTH &&
+               owner->drawableHeight() == BACKING_HEIGHT && LLWindow::instanceCount() == initial_window_count &&
+               CGLGetCurrentContext() == initial_cgl_context && gGLManager.mInited == initial_gl_manager);
+
+    const VkCommandPool   retained_texture_transfer_pool   = instance_generation->textureUploadTransferCommandPool();
+    const VkCommandBuffer retained_texture_transfer_buffer = instance_generation->textureUploadTransferCommandBuffer();
+    const VkFence         retained_texture_transfer_fence  = instance_generation->textureUploadTransferFence();
+    const auto            texture_transfer_retained        = [&]() noexcept
+    {
+        return texture_source_retained() && instance_generation->hasTextureUploadTransferGeneration() &&
+               instance_generation->textureUploadTransferSourceBuffer() == retained_texture_source_buffer &&
+               instance_generation->textureUploadTransferDestinationImage() == retained_texture_image &&
+               instance_generation->textureUploadTransferCommandPool() == retained_texture_transfer_pool &&
+               instance_generation->textureUploadTransferCommandBuffer() == retained_texture_transfer_buffer &&
+               instance_generation->textureUploadTransferFence() == retained_texture_transfer_fence &&
+               instance_generation->textureUploadTransferDisposition() ==
+                   LLRenderVulkan::VulkanTextureUploadTransferDisposition::Complete &&
+               instance_generation->textureUploadDestinationIsResident() &&
+               instance_generation->textureUploadDestinationResidentRevision() == retained_texture_revision &&
+               instance_generation->textureUploadDestinationResidentContentIdentity() == retained_texture_source_identity &&
+               instance_generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead;
+    };
+
     static_assert(sizeof(upload_fixture.mScreenTriangle) == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT);
     LLRenderVulkan::VulkanUploadSourceDescription upload_source_description;
     upload_source_description.mHandle = LLRenderContract::StreamingUploadHandles{}.mScreenTriangle;
@@ -1047,8 +1119,17 @@ void window_vulkan_macos_wsi_object::test<1>()
                                 initial_readback_extent));
     ensure_equals("changed-extent rebuild emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
-    ensure("same-surface rebuild preserves the exact native texture source and destination independently of swapchain children",
-           texture_source_retained() && texture_destination_retained());
+    ensure("same-surface rebuild preserves the completed texture transfer and published destination independently of swapchain children",
+           texture_transfer_retained());
+    ensure("the native smoke directly resets the completed texture transfer before its retained source and destination",
+           mutable_instance_generation->resetTextureUploadTransferGeneration() &&
+               !instance_generation->hasTextureUploadTransferGeneration() && texture_source_retained() &&
+               instance_generation->textureUploadDestinationIsResident() &&
+               instance_generation->textureUploadDestinationResidentRevision() == retained_texture_revision &&
+               instance_generation->textureUploadDestinationResidentContentIdentity() == retained_texture_source_identity &&
+               instance_generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead);
+    ensure_equals("texture-transfer rebuild retention and direct reset emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
     ensure("the native smoke directly resets the texture source before its image destination",
            mutable_instance_generation->resetTextureUploadSourceGeneration() && !instance_generation->hasTextureUploadSourceGeneration() &&
                instance_generation->textureUploadSourceResourceHandle() == LLRenderContract::ImageHandle{} &&
