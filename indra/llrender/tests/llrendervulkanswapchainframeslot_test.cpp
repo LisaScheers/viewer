@@ -18,6 +18,8 @@
 #include "llrendervulkanswapchainframeslot.h"
 #include "llrendervulkanswapchainpresentationpipeline.h"
 #include "llrendervulkanswapchainpresentationtarget.h"
+#include "llrendervulkanuploadtransfer.h"
+#include "lltextureuploadcontract.h"
 #include "lltut.h"
 
 #include <algorithm>
@@ -30,6 +32,20 @@
 #include <utility>
 #include <variant>
 #include <vector>
+
+namespace LLRenderVulkan
+{
+
+struct VulkanUploadDestinationGenerationTestAccess
+{
+    static void forceContentIdentity(VulkanUploadDestinationGeneration& destination, std::uint64_t content_identity) noexcept
+    {
+        destination.mExpectedContentIdentity = content_identity;
+        destination.mResidentContentIdentity = content_identity;
+    }
+};
+
+} // namespace LLRenderVulkan
 
 namespace
 {
@@ -73,6 +89,7 @@ enum class MissingCommand : std::uint8_t
     QueuePresent,
     ReleaseSwapchainImages,
     CmdBindPipeline,
+    CmdBindVertexBuffers,
     CmdSetViewport,
     CmdSetScissor,
     CmdDraw,
@@ -180,6 +197,15 @@ struct BindPipelineRecord
     VkPipeline          mPipeline      = VK_NULL_HANDLE;
 };
 
+struct BindVertexBuffersRecord
+{
+    VkCommandBuffer mCommandBuffer = VK_NULL_HANDLE;
+    std::uint32_t   mFirstBinding  = 0;
+    std::uint32_t   mBindingCount  = 0;
+    VkBuffer        mBuffer        = VK_NULL_HANDLE;
+    VkDeviceSize    mOffset        = 0;
+};
+
 struct ViewportRecord
 {
     VkCommandBuffer mCommandBuffer = VK_NULL_HANDLE;
@@ -271,6 +297,12 @@ struct FakeState
     VkBuffer         mReadbackBufferOutput = fakeHandle<VkBuffer>(0xd000);
     VkDeviceMemory   mReadbackMemoryOutput = fakeHandle<VkDeviceMemory>(0xd100);
     VkDeviceSize     mReadbackBufferSize   = 0;
+    VkBuffer                                                  mUploadSourceBufferOutput      = fakeHandle<VkBuffer>(0xd200);
+    VkDeviceMemory                                            mUploadSourceMemoryOutput      = fakeHandle<VkDeviceMemory>(0xd300);
+    VkBuffer                                                  mUploadDestinationBufferOutput = fakeHandle<VkBuffer>(0xd400);
+    VkDeviceMemory                                            mUploadDestinationMemoryOutput = fakeHandle<VkDeviceMemory>(0xd500);
+    VkBuffer                                                  mPendingAllocationBuffer       = VK_NULL_HANDLE;
+    std::array<std::uint8_t, VULKAN_UPLOAD_SOURCE_BYTE_COUNT> mUploadSourceBytes{};
     std::size_t      mNextShaderModule     = 0;
 
     VkSemaphore presentationReadySemaphore() const noexcept { return fakeHandle<VkSemaphore>(0x9201); }
@@ -297,9 +329,12 @@ struct FakeState
     VulkanSwapchainPresentationPipelineGeneration* mResetPresentationPipelineOnDrawLookup = nullptr;
     VulkanSwapchainFrameClearColor*                mClearColorToMutateOnAcquire           = nullptr;
     VulkanSwapchainReadbackGeneration*             mResetReadbackOnAcquire                = nullptr;
+    VulkanUploadDestinationGeneration*             mResetUploadDestinationOnAcquire       = nullptr;
+    VulkanUploadDestinationGeneration*             mResetUploadDestinationOnBindLookup    = nullptr;
     VulkanSwapchainFrameSlotGeneration*            mResetFrameSlotOnPriorWait             = nullptr;
     VulkanSwapchainFrameSlotGeneration*            mExpectedRetentionSlot                 = nullptr;
     VulkanSwapchainReadbackGeneration*             mExpectedRetainedReadback              = nullptr;
+    const VulkanUploadDestinationGeneration*       mExpectedRetainedUploadDestination     = nullptr;
     std::size_t                                    mRetentionChecks                       = 0;
     std::size_t                                    mRetentionFailures                     = 0;
     std::vector<std::uint8_t>                      mReadbackBytes;
@@ -331,6 +366,7 @@ struct FakeState
     std::vector<RenderPassBeginRecord>       mRenderPassBegins;
     std::vector<VkCommandBuffer>             mEndedRenderPassBuffers;
     std::vector<BindPipelineRecord>          mPipelineBinds;
+    std::vector<BindVertexBuffersRecord>     mVertexBufferBinds;
     std::vector<ViewportRecord>              mViewports;
     std::vector<ScissorRecord>               mScissors;
     std::vector<DrawRecord>                  mDraws;
@@ -375,6 +411,7 @@ struct FakeState
         mRenderPassBegins.clear();
         mEndedRenderPassBuffers.clear();
         mPipelineBinds.clear();
+        mVertexBufferBinds.clear();
         mViewports.clear();
         mScissors.clear();
         mDraws.clear();
@@ -391,9 +428,12 @@ struct FakeState
         mResetPresentationPipelineOnDrawLookup = nullptr;
         mClearColorToMutateOnAcquire           = nullptr;
         mResetReadbackOnAcquire                = nullptr;
+        mResetUploadDestinationOnAcquire       = nullptr;
+        mResetUploadDestinationOnBindLookup    = nullptr;
         mResetFrameSlotOnPriorWait             = nullptr;
         mExpectedRetentionSlot                 = nullptr;
         mExpectedRetainedReadback              = nullptr;
+        mExpectedRetainedUploadDestination     = nullptr;
         mRetentionChecks                       = 0;
         mRetentionFailures                     = 0;
         mFinalFenceBytes.clear();
@@ -793,7 +833,8 @@ VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceMemoryProperties(VkPhysicalDevic
     }
     *properties                              = {};
     properties->memoryTypeCount              = 1;
-    properties->memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    properties->memoryTypes[0].propertyFlags =
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     properties->memoryTypes[0].heapIndex     = 0;
     properties->memoryHeapCount              = 1;
     properties->memoryHeaps[0].size          = VkDeviceSize{ 1 } << 30;
@@ -809,8 +850,23 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice                  device
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    gFakeState->mReadbackBufferSize = create_info->size;
-    *buffer                         = gFakeState->mReadbackBufferOutput;
+    if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+    {
+        *buffer = gFakeState->mUploadSourceBufferOutput;
+    }
+    else if (create_info->usage == (VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+    {
+        *buffer = gFakeState->mUploadDestinationBufferOutput;
+    }
+    else if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+    {
+        gFakeState->mReadbackBufferSize = create_info->size;
+        *buffer                         = gFakeState->mReadbackBufferOutput;
+    }
+    else
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     return VK_SUCCESS;
 }
 
@@ -820,11 +876,17 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice, VkBuffer, const VkAllocat
 
 VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer, VkMemoryRequirements* requirements) noexcept
 {
-    if (!gFakeState || device != gFakeState->mDevice || buffer != gFakeState->mReadbackBufferOutput || !requirements)
+    if (!gFakeState || device != gFakeState->mDevice || !requirements)
     {
         return;
     }
-    requirements->size           = gFakeState->mReadbackBufferSize;
+    const bool upload_buffer = buffer == gFakeState->mUploadSourceBufferOutput || buffer == gFakeState->mUploadDestinationBufferOutput;
+    if (!upload_buffer && buffer != gFakeState->mReadbackBufferOutput)
+    {
+        return;
+    }
+    gFakeState->mPendingAllocationBuffer = buffer;
+    requirements->size                   = upload_buffer ? VULKAN_UPLOAD_SOURCE_BYTE_COUNT : gFakeState->mReadbackBufferSize;
     requirements->alignment      = 4;
     requirements->memoryTypeBits = 1;
 }
@@ -834,13 +896,30 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice                    de
                                                   const VkAllocationCallbacks*,
                                                   VkDeviceMemory* memory) noexcept
 {
-    if (!gFakeState || device != gFakeState->mDevice || !allocate_info || !memory ||
-        allocate_info->allocationSize != gFakeState->mReadbackBufferSize)
+    if (!gFakeState || device != gFakeState->mDevice || !allocate_info || !memory)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    gFakeState->mReadbackBytes.assign(static_cast<std::size_t>(allocate_info->allocationSize), 0xa5);
-    *memory = gFakeState->mReadbackMemoryOutput;
+    if (gFakeState->mPendingAllocationBuffer == gFakeState->mUploadSourceBufferOutput &&
+        allocate_info->allocationSize == VULKAN_UPLOAD_SOURCE_BYTE_COUNT)
+    {
+        *memory = gFakeState->mUploadSourceMemoryOutput;
+    }
+    else if (gFakeState->mPendingAllocationBuffer == gFakeState->mUploadDestinationBufferOutput &&
+             allocate_info->allocationSize == VULKAN_UPLOAD_SOURCE_BYTE_COUNT)
+    {
+        *memory = gFakeState->mUploadDestinationMemoryOutput;
+    }
+    else if (gFakeState->mPendingAllocationBuffer == gFakeState->mReadbackBufferOutput &&
+             allocate_info->allocationSize == gFakeState->mReadbackBufferSize)
+    {
+        gFakeState->mReadbackBytes.assign(static_cast<std::size_t>(allocate_info->allocationSize), 0xa5);
+        *memory = gFakeState->mReadbackMemoryOutput;
+    }
+    else
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     return VK_SUCCESS;
 }
 
@@ -850,8 +929,15 @@ VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice, VkDeviceMemory, const VkAllo
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset) noexcept
 {
-    return gFakeState && device == gFakeState->mDevice && buffer == gFakeState->mReadbackBufferOutput &&
-                   memory == gFakeState->mReadbackMemoryOutput && offset == 0
+    if (!gFakeState)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    const bool exact_readback = buffer == gFakeState->mReadbackBufferOutput && memory == gFakeState->mReadbackMemoryOutput;
+    const bool exact_source   = buffer == gFakeState->mUploadSourceBufferOutput && memory == gFakeState->mUploadSourceMemoryOutput;
+    const bool exact_destination =
+        buffer == gFakeState->mUploadDestinationBufferOutput && memory == gFakeState->mUploadDestinationMemoryOutput;
+    return device == gFakeState->mDevice && offset == 0 && (exact_readback || exact_source || exact_destination)
                ? VK_SUCCESS
                : VK_ERROR_INITIALIZATION_FAILED;
 }
@@ -859,17 +945,32 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice device, VkBuffer bu
 VKAPI_ATTR VkResult VKAPI_CALL
     fakeMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize, VkMemoryMapFlags flags, void** data) noexcept
 {
-    if (!gFakeState || device != gFakeState->mDevice || memory != gFakeState->mReadbackMemoryOutput || offset != 0 || flags != 0 || !data ||
-        gFakeState->mReadbackBytes.empty())
+    if (!gFakeState || device != gFakeState->mDevice || offset != 0 || flags != 0 || !data)
     {
         return VK_ERROR_MEMORY_MAP_FAILED;
     }
-    *data = gFakeState->mReadbackBytes.data();
+    if (memory == gFakeState->mReadbackMemoryOutput && !gFakeState->mReadbackBytes.empty())
+    {
+        *data = gFakeState->mReadbackBytes.data();
+    }
+    else if (memory == gFakeState->mUploadSourceMemoryOutput)
+    {
+        *data = gFakeState->mUploadSourceBytes.data();
+    }
+    else
+    {
+        return VK_ERROR_MEMORY_MAP_FAILED;
+    }
     return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice, VkDeviceMemory) noexcept
 {
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeFlushMappedMemoryRanges(VkDevice, std::uint32_t, const VkMappedMemoryRange*) noexcept
+{
+    return VK_SUCCESS;
 }
 
 const std::vector<std::string>& expectedDeviceLookups()
@@ -916,36 +1017,23 @@ const std::vector<std::string>& expectedRenderPassPresentationLookups()
 
 const std::vector<std::string>& expectedRenderPassDrawPresentationLookups()
 {
-    static const std::vector<std::string> names{ "vkWaitForFences",       "vkResetCommandBuffer",
-                                                 "vkBeginCommandBuffer",  "vkEndCommandBuffer",
-                                                 "vkResetFences",         "vkQueueSubmit",
-                                                 "vkAcquireNextImageKHR", "vkCmdPipelineBarrier",
-                                                 "vkCmdBeginRenderPass",  "vkCmdEndRenderPass",
-                                                 "vkCmdBindPipeline",     "vkCmdSetViewport",
-                                                 "vkCmdSetScissor",       "vkCmdDraw",
-                                                 "vkQueuePresentKHR",     "vkReleaseSwapchainImagesKHR" };
+    static const std::vector<std::string> names{
+        "vkWaitForFences",   "vkResetCommandBuffer",       "vkBeginCommandBuffer", "vkEndCommandBuffer",   "vkResetFences",
+        "vkQueueSubmit",     "vkAcquireNextImageKHR",      "vkCmdPipelineBarrier", "vkCmdBeginRenderPass", "vkCmdEndRenderPass",
+        "vkCmdBindPipeline", "vkCmdBindVertexBuffers",     "vkCmdSetViewport",     "vkCmdSetScissor",      "vkCmdDraw",
+        "vkQueuePresentKHR", "vkReleaseSwapchainImagesKHR"
+    };
     return names;
 }
 
 const std::vector<std::string>& expectedRenderPassDrawReadbackPresentationLookups()
 {
-    static const std::vector<std::string> names{ "vkWaitForFences",
-                                                 "vkResetCommandBuffer",
-                                                 "vkBeginCommandBuffer",
-                                                 "vkEndCommandBuffer",
-                                                 "vkResetFences",
-                                                 "vkQueueSubmit",
-                                                 "vkAcquireNextImageKHR",
-                                                 "vkCmdPipelineBarrier",
-                                                 "vkCmdBeginRenderPass",
-                                                 "vkCmdEndRenderPass",
-                                                 "vkCmdBindPipeline",
-                                                 "vkCmdSetViewport",
-                                                 "vkCmdSetScissor",
-                                                 "vkCmdDraw",
-                                                 "vkCmdCopyImageToBuffer",
-                                                 "vkQueuePresentKHR",
-                                                 "vkReleaseSwapchainImagesKHR" };
+    static const std::vector<std::string> names{ "vkWaitForFences",        "vkResetCommandBuffer", "vkBeginCommandBuffer",
+                                                 "vkEndCommandBuffer",     "vkResetFences",        "vkQueueSubmit",
+                                                 "vkAcquireNextImageKHR",  "vkCmdPipelineBarrier", "vkCmdBeginRenderPass",
+                                                 "vkCmdEndRenderPass",     "vkCmdBindPipeline",    "vkCmdBindVertexBuffers",
+                                                 "vkCmdSetViewport",       "vkCmdSetScissor",      "vkCmdDraw",
+                                                 "vkCmdCopyImageToBuffer", "vkQueuePresentKHR",    "vkReleaseSwapchainImagesKHR" };
     return names;
 }
 
@@ -1071,6 +1159,14 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeWaitForFences(VkDevice device, std::uint32_t 
     {
         ++gFakeState->mRetentionChecks;
         if (!gFakeState->mExpectedRetentionSlot->retainsReadbackGeneration(*gFakeState->mExpectedRetainedReadback))
+        {
+            ++gFakeState->mRetentionFailures;
+        }
+    }
+    if (gFakeState->mExpectedRetentionSlot && gFakeState->mExpectedRetainedUploadDestination)
+    {
+        ++gFakeState->mRetentionChecks;
+        if (!gFakeState->mExpectedRetentionSlot->retainsUploadDestinationGeneration(*gFakeState->mExpectedRetainedUploadDestination))
         {
             ++gFakeState->mRetentionFailures;
         }
@@ -1210,6 +1306,11 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice device, VkSwapchain
         gFakeState->mResetReadbackOnAcquire->reset();
         gFakeState->mResetReadbackOnAcquire = nullptr;
     }
+    if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && gFakeState->mResetUploadDestinationOnAcquire)
+    {
+        gFakeState->mResetUploadDestinationOnAcquire->reset();
+        gFakeState->mResetUploadDestinationOnAcquire = nullptr;
+    }
     return result;
 }
 
@@ -1262,6 +1363,21 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdCopyImageToBuffer(VkCommandBuffer          com
         record.mRegion = regions[0];
     }
     gFakeState->mCopies.push_back(record);
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdCopyBuffer(VkCommandBuffer     command_buffer,
+                                             VkBuffer            source,
+                                             VkBuffer            destination,
+                                             std::uint32_t       region_count,
+                                             const VkBufferCopy* regions) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mCommandBufferOutput || source != gFakeState->mUploadSourceBufferOutput ||
+        destination != gFakeState->mUploadDestinationBufferOutput || region_count != 1 || !regions || regions[0].srcOffset != 0 ||
+        regions[0].dstOffset != 0 || regions[0].size != VULKAN_UPLOAD_SOURCE_BYTE_COUNT)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("copy buffer");
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer                command_buffer,
@@ -1324,6 +1440,20 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer command_buffer, V
     }
     gFakeState->mEvents.emplace_back("bind pipeline");
     gFakeState->mPipelineBinds.push_back({ command_buffer, bind_point, pipeline });
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindVertexBuffers(VkCommandBuffer     command_buffer,
+                                                    std::uint32_t       first_binding,
+                                                    std::uint32_t       binding_count,
+                                                    const VkBuffer*     buffers,
+                                                    const VkDeviceSize* offsets) noexcept
+{
+    if (!gFakeState || binding_count == 0 || !buffers || !offsets)
+    {
+        return;
+    }
+    gFakeState->mEvents.emplace_back("bind vertex buffer");
+    gFakeState->mVertexBufferBinds.push_back({ command_buffer, first_binding, binding_count, buffers[0], offsets[0] });
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeCmdSetViewport(VkCommandBuffer   command_buffer,
@@ -1414,6 +1544,14 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device,
             ++gFakeState->mRetentionFailures;
         }
     }
+    if (gFakeState->mExpectedRetentionSlot && gFakeState->mExpectedRetainedUploadDestination)
+    {
+        ++gFakeState->mRetentionChecks;
+        if (!gFakeState->mExpectedRetentionSlot->retainsUploadDestinationGeneration(*gFakeState->mExpectedRetainedUploadDestination))
+        {
+            ++gFakeState->mRetentionFailures;
+        }
+    }
     gFakeState->mReleases.push_back({ device, *release_info, release_info->pImageIndices[0] });
     const std::size_t call = gFakeState->mNextReleaseResult++;
     return call < gFakeState->mReleaseResults.size() ? gFakeState->mReleaseResults[call] : VK_SUCCESS;
@@ -1471,6 +1609,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return eraseFunctionType(fakeMapMemory);
     if (std::strcmp(name, "vkUnmapMemory") == 0)
         return eraseFunctionType(fakeUnmapMemory);
+    if (std::strcmp(name, "vkFlushMappedMemoryRanges") == 0)
+        return eraseFunctionType(fakeFlushMappedMemoryRanges);
 
     gFakeState->mDeviceLookups.emplace_back(name);
     if (std::strcmp(name, "vkCreateCommandPool") == 0)
@@ -1504,6 +1644,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return gFakeState->mMissingCommand == MissingCommand::AcquireNextImage ? nullptr : eraseFunctionType(fakeAcquireNextImage);
     if (std::strcmp(name, "vkCmdPipelineBarrier") == 0)
         return gFakeState->mMissingCommand == MissingCommand::CmdPipelineBarrier ? nullptr : eraseFunctionType(fakeCmdPipelineBarrier);
+    if (std::strcmp(name, "vkCmdCopyBuffer") == 0)
+        return eraseFunctionType(fakeCmdCopyBuffer);
     if (std::strcmp(name, "vkCmdClearColorImage") == 0)
         return gFakeState->mMissingCommand == MissingCommand::CmdClearColorImage ? nullptr : eraseFunctionType(fakeCmdClearColorImage);
     if (std::strcmp(name, "vkCmdBeginRenderPass") == 0)
@@ -1512,6 +1654,16 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
         return gFakeState->mMissingCommand == MissingCommand::CmdEndRenderPass ? nullptr : eraseFunctionType(fakeCmdEndRenderPass);
     if (std::strcmp(name, "vkCmdBindPipeline") == 0)
         return gFakeState->mMissingCommand == MissingCommand::CmdBindPipeline ? nullptr : eraseFunctionType(fakeCmdBindPipeline);
+    if (std::strcmp(name, "vkCmdBindVertexBuffers") == 0)
+    {
+        const bool missing = gFakeState->mMissingCommand == MissingCommand::CmdBindVertexBuffers;
+        if (!missing && gFakeState->mResetUploadDestinationOnBindLookup)
+        {
+            gFakeState->mResetUploadDestinationOnBindLookup->reset();
+            gFakeState->mResetUploadDestinationOnBindLookup = nullptr;
+        }
+        return missing ? nullptr : eraseFunctionType(fakeCmdBindVertexBuffers);
+    }
     if (std::strcmp(name, "vkCmdSetViewport") == 0)
         return gFakeState->mMissingCommand == MissingCommand::CmdSetViewport ? nullptr : eraseFunctionType(fakeCmdSetViewport);
     if (std::strcmp(name, "vkCmdSetScissor") == 0)
@@ -1671,6 +1823,63 @@ VulkanSwapchainReadbackGeneration makeReadback(Parents& parents, FakeState& stat
     return readback;
 }
 
+VulkanUploadSourceDescription screenTriangleDescription(
+    LLRenderContract::BufferHandle handle = LLRenderContract::StreamingUploadHandles{}.mScreenTriangle)
+{
+    VulkanUploadSourceDescription description = vulkanScreenTriangleUploadSourceDescription();
+    description.mHandle                       = handle;
+    return description;
+}
+
+VulkanUploadDestinationGeneration makeResidentUploadDestination(Parents&                             parents,
+                                                                FakeState&                           state,
+                                                                const VulkanUploadSourceDescription& description)
+{
+    auto source_result = resolveVulkanUploadSourceGeneration(parents.mPhysical, parents.mLogical, description);
+    tut::ensure("the upload-source fixture resolves", std::holds_alternative<VulkanUploadSourceGeneration>(source_result));
+    auto source = std::get<VulkanUploadSourceGeneration>(std::move(source_result));
+
+    auto destination_result = resolveVulkanUploadDestinationGeneration(parents.mPhysical, parents.mLogical, source, description);
+    tut::ensure("the upload-destination fixture resolves", std::holds_alternative<VulkanUploadDestinationGeneration>(destination_result));
+    auto destination = std::get<VulkanUploadDestinationGeneration>(std::move(destination_result));
+
+    auto transfer_result = resolveVulkanUploadTransferGeneration(parents.mPhysical, parents.mLogical, description, source, destination);
+    tut::ensure("the upload-transfer fixture resolves", std::holds_alternative<VulkanUploadTransferGeneration>(transfer_result));
+    auto        transfer    = std::get<VulkanUploadTransferGeneration>(std::move(transfer_result));
+    const auto  completion  = transfer.execute();
+    const auto* disposition = std::get_if<VulkanUploadTransferDisposition>(&completion);
+    tut::ensure("the upload-transfer fixture publishes residency",
+                disposition && *disposition == VulkanUploadTransferDisposition::Complete && destination.isResident());
+    tut::ensure("the terminal upload transfer resets", transfer.reset());
+    source.reset();
+    state.clearFrameRecords();
+    return destination;
+}
+
+VulkanUploadDestinationGeneration makeResidentUploadDestination(
+    Parents&                       parents,
+    FakeState&                     state,
+    LLRenderContract::BufferHandle handle = LLRenderContract::StreamingUploadHandles{}.mScreenTriangle)
+{
+    return makeResidentUploadDestination(parents, state, screenTriangleDescription(handle));
+}
+
+VulkanUploadDestinationGeneration makeNonresidentUploadDestination(Parents& parents, FakeState& state)
+{
+    const VulkanUploadSourceDescription description = screenTriangleDescription();
+    auto source_result                              = resolveVulkanUploadSourceGeneration(parents.mPhysical, parents.mLogical, description);
+    tut::ensure("the nonresident upload-source fixture resolves", std::holds_alternative<VulkanUploadSourceGeneration>(source_result));
+    auto source = std::get<VulkanUploadSourceGeneration>(std::move(source_result));
+
+    auto destination_result = resolveVulkanUploadDestinationGeneration(parents.mPhysical, parents.mLogical, source, description);
+    tut::ensure("the nonresident upload-destination fixture resolves",
+                std::holds_alternative<VulkanUploadDestinationGeneration>(destination_result));
+    auto destination = std::get<VulkanUploadDestinationGeneration>(std::move(destination_result));
+    source.reset();
+    state.clearFrameRecords();
+    return destination;
+}
+
 void ensureOnlyExactDevice(const FakeState& state)
 {
     tut::ensure("every frame-slot mutation uses the exact logical device",
@@ -1730,10 +1939,12 @@ VulkanSwapchainFrameSlotOperationResult resolveRenderPassDrawPresentation(
     VulkanSwapchainFrameSlotGeneration&                  generation,
     Parents&                                             parents,
     const VulkanSwapchainPresentationTargetGeneration&   presentation_target,
-    const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline)
+    const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline,
+    const VulkanUploadDestinationGeneration&             upload_destination)
 {
-    return generation.resolveRenderPassDrawPresentationDispatch(parents.mLogical, parents.mConfiguration, parents.mSwapchain,
-                                                                parents.mImages, presentation_target, presentation_pipeline);
+    return generation.resolveRenderPassDrawPresentationDispatch(parents.mPhysical, parents.mLogical, parents.mConfiguration,
+                                                                parents.mSwapchain, parents.mImages, presentation_target,
+                                                                presentation_pipeline, upload_destination);
 }
 
 VulkanSwapchainFrameSlotOperationResult resolveRenderPassDrawReadbackPresentation(
@@ -1741,11 +1952,12 @@ VulkanSwapchainFrameSlotOperationResult resolveRenderPassDrawReadbackPresentatio
     Parents&                                             parents,
     const VulkanSwapchainPresentationTargetGeneration&   presentation_target,
     const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline,
+    const VulkanUploadDestinationGeneration&             upload_destination,
     const VulkanSwapchainReadbackGeneration&             readback)
 {
     return generation.resolveRenderPassDrawReadbackPresentationDispatch(parents.mPhysical, parents.mLogical, parents.mConfiguration,
                                                                         parents.mSwapchain, parents.mImages, presentation_target,
-                                                                        presentation_pipeline, readback);
+                                                                        presentation_pipeline, upload_destination, readback);
 }
 
 const VulkanSwapchainFrameSlotPresentationSuccess& requirePresentationSuccess(const VulkanSwapchainFrameSlotPresentationResult& result)
@@ -1769,6 +1981,7 @@ struct DrawReadbackFixture
     Parents                                       mParents;
     VulkanSwapchainPresentationTargetGeneration   mTarget;
     VulkanSwapchainPresentationPipelineGeneration mPipeline;
+    VulkanUploadDestinationGeneration             mUploadDestination;
     VulkanSwapchainReadbackGeneration             mReadback;
     VulkanSwapchainFrameSlotGeneration            mSlot;
 
@@ -1777,6 +1990,7 @@ struct DrawReadbackFixture
         mParents(makeParents(mState)),
         mTarget(makePresentationTarget(mParents)),
         mPipeline(makePresentationPipeline(mParents, mTarget)),
+        mUploadDestination(makeResidentUploadDestination(mParents, mState)),
         mReadback(makeReadback(mParents, mState)),
         mSlot(takeGeneration(resolveSlot(mParents)))
     {
@@ -1785,7 +1999,7 @@ struct DrawReadbackFixture
 
     VulkanSwapchainFrameSlotOperationResult resolve()
     {
-        return resolveRenderPassDrawReadbackPresentation(mSlot, mParents, mTarget, mPipeline, mReadback);
+        return resolveRenderPassDrawReadbackPresentation(mSlot, mParents, mTarget, mPipeline, mUploadDestination, mReadback);
     }
 
     void configureFinalGreen()
@@ -1824,7 +2038,7 @@ struct render_vulkan_swapchain_frame_slot_test
 {
 };
 
-using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test, 52>;
+using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test, 56>;
 using render_vulkan_swapchain_frame_slot_object = render_vulkan_swapchain_frame_slot_group::object;
 render_vulkan_swapchain_frame_slot_group render_vulkan_swapchain_frame_slot_tests("render Vulkan swapchain frame slot");
 
@@ -1851,17 +2065,19 @@ void render_vulkan_swapchain_frame_slot_object::test<1>()
         std::declval<const VulkanSwapchainGeneration&>(), std::declval<const VulkanSwapchainImagesGeneration&>(),
         std::declval<const VulkanSwapchainPresentationTargetGeneration&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().resolveRenderPassDrawPresentationDispatch(
-        std::declval<const VulkanLogicalDeviceGeneration&>(), std::declval<const VulkanSwapchainConfigurationGeneration&>(),
-        std::declval<const VulkanSwapchainGeneration&>(), std::declval<const VulkanSwapchainImagesGeneration&>(),
-        std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
-        std::declval<const VulkanSwapchainPresentationPipelineGeneration&>())));
+        std::declval<const VulkanPhysicalDeviceGeneration&>(), std::declval<const VulkanLogicalDeviceGeneration&>(),
+        std::declval<const VulkanSwapchainConfigurationGeneration&>(), std::declval<const VulkanSwapchainGeneration&>(),
+        std::declval<const VulkanSwapchainImagesGeneration&>(), std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
+        std::declval<const VulkanSwapchainPresentationPipelineGeneration&>(), std::declval<const VulkanUploadDestinationGeneration&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeEmptySubmission()));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeAcquireRenderPassClearToPresent(
         std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
         std::declval<const VulkanSwapchainFrameClearColor&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeAcquireRenderPassDrawToPresent(
+        std::declval<const VulkanPhysicalDeviceGeneration&>(),
         std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
         std::declval<const VulkanSwapchainPresentationPipelineGeneration&>(),
+        std::declval<const VulkanUploadDestinationGeneration&>(),
         std::declval<const VulkanSwapchainFrameClearColor&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().retryEmptySubmissionCompletion()));
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::ReleaseSwapchainImages) == 17);
@@ -1872,11 +2088,13 @@ void render_vulkan_swapchain_frame_slot_object::test<1>()
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdSetViewport) == 22);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdSetScissor) == 23);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdDraw) == 24);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdBindVertexBuffers) == 26);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::CommandFailure) == 8);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor) == 9);
     static_assert(static_cast<std::uint8_t>(
                       VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration) == 10);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration) == 11);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration) == 13);
 
     const VulkanSwapchainFrameSlotResolutionError value{ VulkanSwapchainFrameSlotResolutionCode::SubmissionFenceCreationFailure,
                                                          VulkanSwapchainFrameSlotCommand::CreateFence, VK_ERROR_OUT_OF_DEVICE_MEMORY };
@@ -3751,6 +3969,7 @@ void render_vulkan_swapchain_frame_slot_object::test<36>()
         std::pair{ MissingCommand::CmdBeginRenderPass, VulkanSwapchainFrameSlotCommand::CmdBeginRenderPass },
         std::pair{ MissingCommand::CmdEndRenderPass, VulkanSwapchainFrameSlotCommand::CmdEndRenderPass },
         std::pair{ MissingCommand::CmdBindPipeline, VulkanSwapchainFrameSlotCommand::CmdBindPipeline },
+        std::pair{ MissingCommand::CmdBindVertexBuffers, VulkanSwapchainFrameSlotCommand::CmdBindVertexBuffers },
         std::pair{ MissingCommand::CmdSetViewport, VulkanSwapchainFrameSlotCommand::CmdSetViewport },
         std::pair{ MissingCommand::CmdSetScissor, VulkanSwapchainFrameSlotCommand::CmdSetScissor },
         std::pair{ MissingCommand::CmdDraw, VulkanSwapchainFrameSlotCommand::CmdDraw },
@@ -3766,18 +3985,20 @@ void render_vulkan_swapchain_frame_slot_object::test<36>()
         auto            parents               = makeParents(state);
         auto            presentation_target   = makePresentationTarget(parents);
         auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            upload_destination    = makeResidentUploadDestination(parents, state);
         auto            generation            = takeGeneration(resolveSlot(parents));
         state.clearFrameRecords();
         state.mMissingCommand = cases[index].first;
 
-        ensureOperationError(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
-                             VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, VulkanSwapchainFrameSlotDisposition::Reusable,
-                             cases[index].second);
+        ensureOperationError(
+            resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline, upload_destination),
+            VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, VulkanSwapchainFrameSlotDisposition::Reusable,
+            cases[index].second);
         ensure("missing draw dispatch stops at the exact lookup and does no frame work",
                state.mInstanceLookups == std::vector<std::string>{ "vkGetDeviceProcAddr" } &&
                    state.mDeviceLookups == std::vector<std::string>(expected.begin(), expected.begin() + index) && state.mEvents.empty() &&
                    state.mAcquires.empty() && state.mRenderPassBegins.empty() && state.mPipelineBinds.empty() && state.mViewports.empty() &&
-                   state.mScissors.empty() && state.mDraws.empty());
+                   state.mVertexBufferBinds.empty() && state.mScissors.empty() && state.mDraws.empty());
 
         const auto  unpublished = generation.executeAcquireToPresent();
         const auto& error       = requirePresentationError(unpublished);
@@ -3792,13 +4013,15 @@ void render_vulkan_swapchain_frame_slot_object::test<36>()
     auto            parents               = makeParents(state);
     auto            presentation_target   = makePresentationTarget(parents);
     auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+    auto            upload_destination    = makeResidentUploadDestination(parents, state);
     auto            generation            = takeGeneration(resolveSlot(parents));
     state.clearFrameRecords();
     state.mResetPresentationPipelineOnDrawLookup = &presentation_pipeline;
 
-    ensureOperationError(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
-                         VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration,
-                         VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensureOperationError(
+        resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline, upload_destination),
+        VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration,
+        VulkanSwapchainFrameSlotDisposition::Reusable);
     ensure("pipeline invalidation during lookup is caught before atomic dispatch publication",
            state.mDeviceLookups == expected && state.mEvents.empty() && state.mAcquires.empty());
     ensure("pipeline invalidation during lookup leaves the base operation unpublished",
@@ -3815,12 +4038,14 @@ void render_vulkan_swapchain_frame_slot_object::test<37>()
     auto            parents               = makeParents(state);
     auto            presentation_target   = makePresentationTarget(parents);
     auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+    auto            upload_destination    = makeResidentUploadDestination(parents, state);
     auto            generation            = takeGeneration(resolveSlot(parents));
     state.clearFrameRecords();
 
-    ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
-                           VulkanSwapchainFrameSlotDisposition::Reusable);
-    ensure("draw dispatch resolves every old presentation and render-pass command before the four draw commands",
+    ensureOperationSuccess(
+        resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline, upload_destination),
+        VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("draw dispatch resolves every old presentation and render-pass command before the five draw commands",
            state.mDeviceLookups == expectedRenderPassDrawPresentationLookups() && state.mEvents.empty());
 
     state.clearFrameRecords();
@@ -3829,17 +4054,18 @@ void render_vulkan_swapchain_frame_slot_object::test<37>()
     const auto                     expected_clear = clear_color;
     state.mClearColorToMutateOnAcquire            = &clear_color;
 
-    const auto result = generation.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, clear_color);
+    const auto result = generation.executeAcquireRenderPassDrawToPresent(parents.mPhysical, presentation_target, presentation_pipeline,
+                                                                         upload_destination, clear_color);
     ensure("the exact draw frame presents and retires the acquired image",
            requirePresentationSuccess(result) ==
                    VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2 } &&
                generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
 
-    const std::vector<std::string> expected_events{
-        "wait fence",    "acquire image", "reset buffer", "begin buffer",  "pipeline barrier", "begin render pass",
-        "bind pipeline", "set viewport",  "set scissor",  "draw",          "end render pass",  "pipeline barrier",
-        "end buffer",    "reset fence",   "queue submit", "queue present", "wait fence"
-    };
+    const std::vector<std::string> expected_events{ "wait fence",       "acquire image",     "reset buffer",  "begin buffer",
+                                                    "pipeline barrier", "begin render pass", "bind pipeline", "bind vertex buffer",
+                                                    "set viewport",     "set scissor",       "draw",          "end render pass",
+                                                    "pipeline barrier", "end buffer",        "reset fence",   "queue submit",
+                                                    "queue present",    "wait fence" };
     ensure("draw recording follows the exact acquire, pass, draw, submit, present, and retire order", state.mEvents == expected_events);
 
     ensure("draw mode begins the exact pass with the same-index framebuffer and copied clear value",
@@ -3858,6 +4084,11 @@ void render_vulkan_swapchain_frame_slot_object::test<37>()
            state.mPipelineBinds.size() == 1 && state.mPipelineBinds[0].mCommandBuffer == generation.commandBuffer() &&
                state.mPipelineBinds[0].mBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
                state.mPipelineBinds[0].mPipeline == presentation_pipeline.pipeline());
+    ensure("draw mode binds the exact resident vertex buffer at binding zero and offset zero",
+           state.mVertexBufferBinds.size() == 1 && state.mVertexBufferBinds[0].mCommandBuffer == generation.commandBuffer() &&
+               state.mVertexBufferBinds[0].mFirstBinding == 0 && state.mVertexBufferBinds[0].mBindingCount == 1 &&
+               state.mVertexBufferBinds[0].mBuffer == upload_destination.buffer() && state.mVertexBufferBinds[0].mOffset == 0 &&
+               !generation.hasRetainedUploadDestinationGeneration());
 
     const VkExtent2D extent = presentation_target.imageExtent();
     ensure("draw mode sets one positive-height full-extent viewport",
@@ -3911,25 +4142,30 @@ void render_vulkan_swapchain_frame_slot_object::test<38>()
         auto            presentation_target = makePresentationTarget(parents);
         auto            first_pipeline      = makePresentationPipeline(parents, presentation_target);
         auto            second_pipeline     = makePresentationPipeline(parents, presentation_target);
+        auto            upload_destination  = makeResidentUploadDestination(parents, state);
         auto            generation          = takeGeneration(resolveSlot(parents));
         ensure("the two pipeline owners deliberately expose exact-looking handles",
                first_pipeline.pipelineLayout() == second_pipeline.pipelineLayout() &&
                    first_pipeline.pipeline() == second_pipeline.pipeline());
-        ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, first_pipeline),
-                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensureOperationSuccess(
+            resolveRenderPassDrawPresentation(generation, parents, presentation_target, first_pipeline, upload_destination),
+            VulkanSwapchainFrameSlotDisposition::Reusable);
         state.clearFrameRecords();
 
-        ensureOperationError(resolveRenderPassDrawPresentation(generation, parents, presentation_target, second_pipeline),
-                             VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration,
-                             VulkanSwapchainFrameSlotDisposition::Reusable);
-        const auto distinct = generation.executeAcquireRenderPassDrawToPresent(presentation_target, second_pipeline, {});
+        ensureOperationError(
+            resolveRenderPassDrawPresentation(generation, parents, presentation_target, second_pipeline, upload_destination),
+            VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration,
+            VulkanSwapchainFrameSlotDisposition::Reusable);
+        const auto distinct = generation.executeAcquireRenderPassDrawToPresent(parents.mPhysical, presentation_target, second_pipeline,
+                                                                               upload_destination, {});
         ensure("a handle-equivalent replacement pipeline fails exact owner identity before acquisition",
                requirePresentationError(distinct).mCode ==
                        VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration &&
                    state.mInstanceLookups.empty() && state.mDeviceLookups.empty() && state.mEvents.empty() && state.mAcquires.empty());
 
         first_pipeline.reset();
-        const auto stale = generation.executeAcquireRenderPassDrawToPresent(presentation_target, first_pipeline, {});
+        const auto stale = generation.executeAcquireRenderPassDrawToPresent(parents.mPhysical, presentation_target, first_pipeline,
+                                                                            upload_destination, {});
         ensure("a stale retained pipeline fails its handle snapshots before acquisition",
                requirePresentationError(stale).mCode ==
                        VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration &&
@@ -3942,14 +4178,17 @@ void render_vulkan_swapchain_frame_slot_object::test<38>()
         auto            parents               = makeParents(state);
         auto            presentation_target   = makePresentationTarget(parents);
         auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            upload_destination    = makeResidentUploadDestination(parents, state);
         auto            generation            = takeGeneration(resolveSlot(parents));
-        ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
-                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensureOperationSuccess(
+            resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline, upload_destination),
+            VulkanSwapchainFrameSlotDisposition::Reusable);
         state.clearFrameRecords();
         state.mAcquireIndices                     = { 1 };
         state.mResetPresentationPipelineOnAcquire = &presentation_pipeline;
 
-        const auto  result = generation.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, {});
+        const auto  result = generation.executeAcquireRenderPassDrawToPresent(parents.mPhysical, presentation_target, presentation_pipeline,
+                                                                              upload_destination, {});
         const auto& error  = requirePresentationError(result);
         ensure("post-acquire pipeline invalidation retains the exact cancellable image obligation",
                error.mCode == VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration &&
@@ -3977,20 +4216,24 @@ void render_vulkan_swapchain_frame_slot_object::test<39>()
     auto            parents               = makeParents(state);
     auto            presentation_target   = makePresentationTarget(parents);
     auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+    auto            upload_destination    = makeResidentUploadDestination(parents, state);
     auto            generation            = takeGeneration(resolveSlot(parents));
-    ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
-                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensureOperationSuccess(
+        resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline, upload_destination),
+        VulkanSwapchainFrameSlotDisposition::Reusable);
     auto moved = std::move(generation);
     state.clearFrameRecords();
 
-    const auto source = generation.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, {});
+    const auto source = generation.executeAcquireRenderPassDrawToPresent(parents.mPhysical, presentation_target, presentation_pipeline,
+                                                                         upload_destination, {});
     ensure("moving a draw-bound slot disarms target and pipeline provenance in the source",
            requirePresentationError(source).mCode == VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration &&
                state.mEvents.empty());
 
     state.mAcquireIndices = { 1 };
     ensure("moving a draw-bound slot transfers every callback and exact owner snapshot",
-           requirePresentationSuccess(moved.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, {})) ==
+           requirePresentationSuccess(moved.executeAcquireRenderPassDrawToPresent(parents.mPhysical, presentation_target,
+                                                                                  presentation_pipeline, upload_destination, {})) ==
                    VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1 } &&
                state.mPipelineBinds.size() == 1 && state.mPipelineBinds[0].mPipeline == presentation_pipeline.pipeline() &&
                state.mDraws.size() == 1);
@@ -4034,8 +4277,8 @@ void render_vulkan_swapchain_frame_slot_object::test<40>()
         ensure("render-pass clear remains usable without a pipeline",
                requirePresentationSuccess(generation.executeAcquireRenderPassClearToPresent(presentation_target, {})).mImageIndex == 2);
         ensure("all legacy modes remain independent of the missing draw command",
-               state.mPipelineBinds.empty() && state.mViewports.empty() && state.mScissors.empty() && state.mDraws.empty() &&
-                   state.mClears.size() == 1 && state.mRenderPassBegins.size() == 1 && state.mPresents.size() == 3);
+               state.mPipelineBinds.empty() && state.mVertexBufferBinds.empty() && state.mViewports.empty() && state.mScissors.empty() &&
+                   state.mDraws.empty() && state.mClears.size() == 1 && state.mRenderPassBegins.size() == 1 && state.mPresents.size() == 3);
     }
 
     {
@@ -4044,9 +4287,11 @@ void render_vulkan_swapchain_frame_slot_object::test<40>()
         auto            parents               = makeParents(state);
         auto            presentation_target   = makePresentationTarget(parents);
         auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            upload_destination    = makeResidentUploadDestination(parents, state);
         auto            generation            = takeGeneration(resolveSlot(parents));
-        ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
-                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensureOperationSuccess(
+            resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline, upload_destination),
+            VulkanSwapchainFrameSlotDisposition::Reusable);
         ensureOperationSuccess(resolveClearPresentation(generation, parents), VulkanSwapchainFrameSlotDisposition::Reusable);
         presentation_pipeline.reset();
         state.clearFrameRecords();
@@ -4059,7 +4304,8 @@ void render_vulkan_swapchain_frame_slot_object::test<40>()
         ensure("render-pass clear ignores stale retained pipeline provenance",
                requirePresentationSuccess(generation.executeAcquireRenderPassClearToPresent(presentation_target, {})).mImageIndex == 2);
         ensure("legacy execution never emits a draw from stale retained callbacks",
-               state.mPipelineBinds.empty() && state.mViewports.empty() && state.mScissors.empty() && state.mDraws.empty());
+               state.mPipelineBinds.empty() && state.mVertexBufferBinds.empty() && state.mViewports.empty() && state.mScissors.empty() &&
+                   state.mDraws.empty());
     }
 
     {
@@ -4068,23 +4314,30 @@ void render_vulkan_swapchain_frame_slot_object::test<40>()
         auto            parents               = makeParents(state);
         auto            presentation_target   = makePresentationTarget(parents);
         auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            upload_destination    = makeResidentUploadDestination(parents, state);
         auto            generation            = takeGeneration(resolveSlot(parents));
-        ensureOperationSuccess(resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline),
-                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensureOperationSuccess(
+            resolveRenderPassDrawPresentation(generation, parents, presentation_target, presentation_pipeline, upload_destination),
+            VulkanSwapchainFrameSlotDisposition::Reusable);
         state.clearFrameRecords();
         state.mAcquireIndices = { 2 };
         state.mPresentResults = { VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS };
 
-        const auto first = generation.executeAcquireRenderPassDrawToPresent(presentation_target, presentation_pipeline, {});
+        const auto first = generation.executeAcquireRenderPassDrawToPresent(parents.mPhysical, presentation_target, presentation_pipeline,
+                                                                            upload_destination, {});
         ensure("a retryable draw present failure retains the presentation-ready transaction",
                requirePresentationError(first).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
-                   generation.acquiredImageIndex() == 2);
+                   generation.acquiredImageIndex() == 2 && generation.retainsUploadDestinationGeneration(upload_destination) &&
+                   generation.activeUploadDestinationMatchesSnapshot() && state.mVertexBufferBinds.size() == 1 &&
+                   state.mDraws.size() == 1 && state.mQueueSubmits.size() == 1);
         presentation_pipeline.reset();
         presentation_target.reset();
         ensure("presentation retry and completion do not consult stale draw owners",
                requirePresentationSuccess(generation.retryPresentation()) ==
                        VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2 } &&
-                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex());
+                   generation.disposition() == VulkanSwapchainFrameSlotDisposition::Reusable && !generation.acquiredImageIndex() &&
+                   !generation.hasRetainedUploadDestinationGeneration() && state.mVertexBufferBinds.size() == 1 &&
+                   state.mDraws.size() == 1 && state.mQueueSubmits.size() == 1);
     }
 }
 
@@ -4098,13 +4351,20 @@ void render_vulkan_swapchain_frame_slot_object::test<41>()
         std::declval<const VulkanPhysicalDeviceGeneration&>(), std::declval<const VulkanLogicalDeviceGeneration&>(),
         std::declval<const VulkanSwapchainConfigurationGeneration&>(), std::declval<const VulkanSwapchainGeneration&>(),
         std::declval<const VulkanSwapchainImagesGeneration&>(), std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
-        std::declval<const VulkanSwapchainPresentationPipelineGeneration&>(), std::declval<const VulkanSwapchainReadbackGeneration&>())));
+        std::declval<const VulkanSwapchainPresentationPipelineGeneration&>(), std::declval<const VulkanUploadDestinationGeneration&>(),
+        std::declval<const VulkanSwapchainReadbackGeneration&>())));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeAcquireRenderPassDrawReadbackToPresent(
+        std::declval<const VulkanPhysicalDeviceGeneration&>(),
         std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
         std::declval<const VulkanSwapchainPresentationPipelineGeneration&>(),
+        std::declval<const VulkanUploadDestinationGeneration&>(),
         std::declval<VulkanSwapchainReadbackGeneration&>())));
     static_assert(noexcept(std::declval<const VulkanSwapchainFrameSlotGeneration&>().retainsReadbackGeneration(
         std::declval<const VulkanSwapchainReadbackGeneration&>())));
+    static_assert(noexcept(std::declval<const VulkanSwapchainFrameSlotGeneration&>().hasRetainedUploadDestinationGeneration()));
+    static_assert(noexcept(std::declval<const VulkanSwapchainFrameSlotGeneration&>().retainsUploadDestinationGeneration(
+        std::declval<const VulkanUploadDestinationGeneration&>())));
+    static_assert(noexcept(std::declval<const VulkanSwapchainFrameSlotGeneration&>().activeUploadDestinationMatchesSnapshot()));
 
     DrawReadbackFixture fixture;
     fixture.mState.mMissingCommand = MissingCommand::CmdCopyImageToBuffer;
@@ -4134,8 +4394,11 @@ void render_vulkan_swapchain_frame_slot_object::test<42>()
     fixture.mState.mAcquireIndices = { 1 };
     fixture.configureFinalGreen();
     fixture.mState.mRequireSentinelBeforeFinalWrite = true;
+    fixture.mState.mExpectedRetentionSlot             = &fixture.mSlot;
+    fixture.mState.mExpectedRetainedUploadDestination = &fixture.mUploadDestination;
 
-    const auto  result = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto result = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     const auto& success = requirePresentationSuccess(result);
     const std::uint64_t pixel_count =
         static_cast<std::uint64_t>(fixture.mReadback.imageExtent().width) * fixture.mReadback.imageExtent().height;
@@ -4143,8 +4406,15 @@ void render_vulkan_swapchain_frame_slot_object::test<42>()
            success.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented && success.mImageIndex == 1 &&
                success.mObservation == VulkanSwapchainReadbackObservation{ fixture.mReadback.imageFormat(), fixture.mReadback.imageExtent(),
                                                                            pixel_count, pixel_count, 0, 0 } &&
-               fixture.mState.mFinalFenceWrites == 1 && fixture.mState.mSentinelChecks == 1 &&
-               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+               fixture.mState.mFinalFenceWrites == 1 && fixture.mState.mSentinelChecks == 1 && fixture.mState.mRetentionChecks >= 2 &&
+               fixture.mState.mRetentionFailures == 0 && !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               !fixture.mSlot.hasRetainedUploadDestinationGeneration());
+
+    ensure("the readback draw binds the exact resident destination once",
+           fixture.mState.mVertexBufferBinds.size() == 1 &&
+               fixture.mState.mVertexBufferBinds[0].mBuffer == fixture.mUploadDestination.buffer() &&
+               fixture.mState.mVertexBufferBinds[0].mFirstBinding == 0 && fixture.mState.mVertexBufferBinds[0].mBindingCount == 1 &&
+               fixture.mState.mVertexBufferBinds[0].mOffset == 0);
 
     ensure("the render pass uses the fixed opaque-red coverage clear",
            fixture.mState.mRenderPassBegins.size() == 1 && fixture.mState.mRenderPassBegins[0].mHadClearValues &&
@@ -4200,13 +4470,28 @@ void render_vulkan_swapchain_frame_slot_object::test<42>()
                image_to_present.mImageBarrier.newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR && fixture.mState.mQueueSubmits.size() == 1 &&
                fixture.mState.mQueueSubmits[0].mWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
-    const std::vector<std::string> expected_events{
-        "wait fence",        "acquire image",    "reset buffer",     "begin buffer",         "pipeline barrier",
-        "begin render pass", "bind pipeline",    "set viewport",     "set scissor",          "draw",
-        "end render pass",   "pipeline barrier", "pipeline barrier", "copy image to buffer", "pipeline barrier",
-        "pipeline barrier",  "end buffer",       "reset fence",      "queue submit",         "queue present",
-        "wait fence"
-    };
+    const std::vector<std::string> expected_events{ "wait fence",
+                                                    "acquire image",
+                                                    "reset buffer",
+                                                    "begin buffer",
+                                                    "pipeline barrier",
+                                                    "begin render pass",
+                                                    "bind pipeline",
+                                                    "bind vertex buffer",
+                                                    "set viewport",
+                                                    "set scissor",
+                                                    "draw",
+                                                    "end render pass",
+                                                    "pipeline barrier",
+                                                    "pipeline barrier",
+                                                    "copy image to buffer",
+                                                    "pipeline barrier",
+                                                    "pipeline barrier",
+                                                    "end buffer",
+                                                    "reset fence",
+                                                    "queue submit",
+                                                    "queue present",
+                                                    "wait fence" };
     ensure("draw, copy, present, and final wait occur in one exact order", fixture.mState.mEvents == expected_events);
 }
 
@@ -4221,12 +4506,14 @@ void render_vulkan_swapchain_frame_slot_object::test<43>()
     fixture.configureFinalGreen();
     fixture.mState.mRequireSentinelBeforeFinalWrite = true;
 
-    const auto first = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto first = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     ensure("a final-fence timeout retains the exact readback without classifying",
            requirePresentationError(first).mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
                requirePresentationError(first).mResult == VK_TIMEOUT &&
                fixture.mSlot.disposition() == VulkanSwapchainFrameSlotDisposition::PresentPending &&
-               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0 &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mSlot.retainsUploadDestinationGeneration(fixture.mUploadDestination) && fixture.mState.mFinalFenceWrites == 0 &&
                hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
 
     const auto  retry   = fixture.mSlot.retryPresentationCompletion();
@@ -4234,7 +4521,7 @@ void render_vulkan_swapchain_frame_slot_object::test<43>()
     ensure("retry classifies exactly once after the two fences succeed",
            success.mObservation && success.mObservation->mGreenPixelCount == success.mObservation->mTotalPixelCount &&
                fixture.mState.mFinalFenceWrites == 1 && fixture.mState.mSentinelChecks == 1 && fixture.mState.mCopies.size() == 1 &&
-               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.hasRetainedUploadDestinationGeneration());
 }
 
 template<>
@@ -4247,19 +4534,21 @@ void render_vulkan_swapchain_frame_slot_object::test<44>()
     fixture.mState.mPresentResults = { VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS };
     fixture.configureFinalGreen();
 
-    const auto first = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto first = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     ensure("a retryable present allocation failure retains the submitted readback",
            requirePresentationError(first).mCommand == VulkanSwapchainFrameSlotCommand::QueuePresent &&
                requirePresentationError(first).mResult == VK_ERROR_OUT_OF_HOST_MEMORY &&
                fixture.mSlot.disposition() == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
-               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0);
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mSlot.retainsUploadDestinationGeneration(fixture.mUploadDestination) && fixture.mState.mFinalFenceWrites == 0);
     const auto  retry   = fixture.mSlot.retryPresentation();
     const auto& success = requirePresentationSuccess(retry);
     ensure("present retry reuses one copy and returns its post-fence observation",
            success.mObservation && success.mObservation->mUnexpectedPixelCount == 0 &&
                success.mObservation->mGreenPixelCount == success.mObservation->mTotalPixelCount && fixture.mState.mPresents.size() == 2 &&
                fixture.mState.mCopies.size() == 1 && fixture.mState.mFinalFenceWrites == 1 &&
-               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.hasRetainedUploadDestinationGeneration());
 }
 
 template<>
@@ -4272,17 +4561,21 @@ void render_vulkan_swapchain_frame_slot_object::test<45>()
     fixture.mState.mEndCommandBufferResult   = VK_ERROR_OUT_OF_HOST_MEMORY;
     fixture.mState.mExpectedRetentionSlot    = &fixture.mSlot;
     fixture.mState.mExpectedRetainedReadback = &fixture.mReadback;
+    fixture.mState.mExpectedRetainedUploadDestination = &fixture.mUploadDestination;
 
-    const auto failed = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto failed = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     ensure("a record failure retains the poisoned owner with the acquired image",
            requirePresentationError(failed).mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
                fixture.mSlot.disposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
-               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mSlot.retainsUploadDestinationGeneration(fixture.mUploadDestination) &&
+               hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
     ensureOperationSuccess(fixture.mSlot.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
     ensure("record-failure cancellation drains and releases before clearing the owner",
            fixture.mState.mRetentionChecks >= 3 && fixture.mState.mRetentionFailures == 0 && fixture.mState.mReleases.size() == 1 &&
                fixture.mState.mPresents.empty() && fixture.mState.mFinalFenceWrites == 0 &&
-               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.hasRetainedUploadDestinationGeneration());
 }
 
 template<>
@@ -4295,16 +4588,19 @@ void render_vulkan_swapchain_frame_slot_object::test<46>()
     fixture.mState.mPresentResults           = { VK_ERROR_OUT_OF_DEVICE_MEMORY };
     fixture.mState.mExpectedRetentionSlot    = &fixture.mSlot;
     fixture.mState.mExpectedRetainedReadback = &fixture.mReadback;
+    fixture.mState.mExpectedRetainedUploadDestination = &fixture.mUploadDestination;
 
-    const auto pending = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto pending = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     ensure("a submitted copy remains active while presentation is retryable",
            requirePresentationError(pending).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
-               fixture.mState.mCopies.size() == 1 && fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+               fixture.mState.mCopies.size() == 1 && fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mSlot.retainsUploadDestinationGeneration(fixture.mUploadDestination));
     ensureOperationSuccess(fixture.mSlot.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
     ensure("submitted cancellation waits both fences, suppresses classification, then releases",
            fixture.mState.mRetentionChecks >= 3 && fixture.mState.mRetentionFailures == 0 && fixture.mState.mReleases.size() == 1 &&
                fixture.mState.mFinalFenceWrites == 0 && hasExactReadbackSentinel(fixture.mState.mReadbackBytes) &&
-               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.hasRetainedUploadDestinationGeneration());
 }
 
 template<>
@@ -4317,16 +4613,17 @@ void render_vulkan_swapchain_frame_slot_object::test<47>()
     fixture.mState.mWaitResults       = { VK_SUCCESS, VK_ERROR_DEVICE_LOST };
     fixture.mState.mQueueSubmitResult = VK_ERROR_DEVICE_LOST;
 
-    const auto submitted =
-        fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto submitted = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     ensure("device loss reported by submit retains possible buffer use until its fence retires",
            requirePresentationError(submitted).mDisposition == VulkanSwapchainFrameSlotDisposition::SubmissionPending &&
-               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mCopies.size() == 1);
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mSlot.retainsUploadDestinationGeneration(fixture.mUploadDestination) && fixture.mState.mCopies.size() == 1);
     const auto retired = fixture.mSlot.retryPresentationCompletion();
     ensure("terminal device loss retires without touching mapped bytes",
            requirePresentationError(retired).mDisposition == VulkanSwapchainFrameSlotDisposition::DeviceLost &&
-               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0 &&
-               hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.hasRetainedUploadDestinationGeneration() &&
+               fixture.mState.mFinalFenceWrites == 0 && hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
 }
 
 template<>
@@ -4338,15 +4635,18 @@ void render_vulkan_swapchain_frame_slot_object::test<48>()
     fixture.mState.clearFrameRecords();
     fixture.mState.mPresentResults = { VK_ERROR_UNKNOWN };
 
-    const auto result = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto result = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     ensure("indeterminate presentation retains the owner and never reads mapped bytes",
            requirePresentationError(result).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationIndeterminate &&
-               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0 &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mSlot.retainsUploadDestinationGeneration(fixture.mUploadDestination) && fixture.mState.mFinalFenceWrites == 0 &&
                hasExactReadbackSentinel(fixture.mState.mReadbackBytes));
     const VkCommandPool command_pool = fixture.mSlot.commandPool();
     fixture.mSlot.reset();
-    ensure("reset refuses an indeterminate active readback",
+    ensure("reset refuses indeterminate active readback and vertex-buffer ownership",
            fixture.mSlot.commandPool() == command_pool && fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mSlot.retainsUploadDestinationGeneration(fixture.mUploadDestination) &&
                fixture.mState.mDestroyedCommandPools.empty());
 }
 
@@ -4360,8 +4660,8 @@ void render_vulkan_swapchain_frame_slot_object::test<49>()
     fixture.mState.mFinalFenceBytes           = { 0, 255, 0, 255 };
     fixture.mState.mWriteReadbackOnFinalFence = true;
 
-    const auto partial_result =
-        fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto partial_result = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     const auto& partial = requirePresentationSuccess(partial_result);
     ensure("a partial copy is a successful exact-count mismatch, not a Vulkan error",
            partial.mObservation && partial.mObservation->mGreenPixelCount == 1 && partial.mObservation->mRedPixelCount == 0 &&
@@ -4370,8 +4670,8 @@ void render_vulkan_swapchain_frame_slot_object::test<49>()
     fixture.mState.clearFrameRecords();
     fixture.configureFinalGreen();
     fixture.mState.mRequireSentinelBeforeFinalWrite = true;
-    const auto second_result =
-        fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto second_result                        = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     const auto& second = requirePresentationSuccess(second_result);
     ensure("a second run re-poisons every byte before the next copy",
            second.mObservation && second.mObservation->mGreenPixelCount == second.mObservation->mTotalPixelCount &&
@@ -4384,15 +4684,19 @@ template<>
 void render_vulkan_swapchain_frame_slot_object::test<50>()
 {
     DrawReadbackFixture fixture;
-    ensureOperationSuccess(resolveRenderPassDrawPresentation(fixture.mSlot, fixture.mParents, fixture.mTarget, fixture.mPipeline),
-                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensureOperationSuccess(
+        resolveRenderPassDrawPresentation(fixture.mSlot, fixture.mParents, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination),
+        VulkanSwapchainFrameSlotDisposition::Reusable);
     fixture.mState.clearFrameRecords();
     const auto  before  = fixture.mState.mReadbackBytes;
-    const auto  result  = fixture.mSlot.executeAcquireRenderPassDrawToPresent(fixture.mTarget, fixture.mPipeline, {});
+    const auto  result = fixture.mSlot.executeAcquireRenderPassDrawToPresent(fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline,
+                                                                             fixture.mUploadDestination, {});
     const auto& success = requirePresentationSuccess(result);
     ensure("the existing draw path returns no observation and performs no readback work",
            !success.mObservation && fixture.mState.mCopies.empty() && fixture.mState.mReadbackBytes == before &&
-               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.hasRetainedUploadDestinationGeneration() &&
+               fixture.mState.mVertexBufferBinds.size() == 1 &&
+               fixture.mState.mVertexBufferBinds[0].mBuffer == fixture.mUploadDestination.buffer());
 }
 
 template<>
@@ -4407,21 +4711,25 @@ void render_vulkan_swapchain_frame_slot_object::test<51>()
     fixture.configureFinalGreen();
 
     const VkCommandPool command_pool = fixture.mSlot.commandPool();
-    const auto pending = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto          pending      = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     ensure("active pre-native ownership makes reset refuse despite a Reusable disposition",
            requirePresentationError(pending).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending &&
                fixture.mSlot.commandPool() == command_pool && fixture.mState.mDestroyedCommandPools.empty() &&
-               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback));
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mSlot.retainsUploadDestinationGeneration(fixture.mUploadDestination));
 
     auto moved = std::move(fixture.mSlot);
     ensure("a pending move transfers retention and disarms the source",
-           moved.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+           moved.retainsReadbackGeneration(fixture.mReadback) && moved.retainsUploadDestinationGeneration(fixture.mUploadDestination) &&
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.hasRetainedUploadDestinationGeneration() &&
                moved.commandPool() == command_pool && fixture.mSlot.commandPool() == VK_NULL_HANDLE);
     const auto  completion = moved.retryPresentationCompletion();
     const auto& success    = requirePresentationSuccess(completion);
     ensure("the moved transaction classifies exactly once and becomes reusable",
            success.mObservation && success.mObservation->mGreenPixelCount == success.mObservation->mTotalPixelCount &&
-               !moved.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 1);
+               !moved.retainsReadbackGeneration(fixture.mReadback) && !moved.hasRetainedUploadDestinationGeneration() &&
+               fixture.mState.mFinalFenceWrites == 1);
 }
 
 template<>
@@ -4433,19 +4741,245 @@ void render_vulkan_swapchain_frame_slot_object::test<52>()
     fixture.mState.clearFrameRecords();
     fixture.mState.mResetReadbackOnAcquire = &fixture.mReadback;
 
-    const auto mismatch =
-        fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(fixture.mTarget, fixture.mPipeline, fixture.mReadback);
+    const auto mismatch = fixture.mSlot.executeAcquireRenderPassDrawReadbackToPresent(
+        fixture.mParents.mPhysical, fixture.mTarget, fixture.mPipeline, fixture.mUploadDestination, fixture.mReadback);
     ensure("post-acquire structural replacement suppresses copy and retains cancellation ownership",
            requirePresentationError(mismatch).mCode == VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration &&
                requirePresentationError(mismatch).mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
-               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mCopies.empty() &&
+               fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) &&
+               fixture.mSlot.retainsUploadDestinationGeneration(fixture.mUploadDestination) && fixture.mState.mCopies.empty() &&
                fixture.mState.mFinalFenceWrites == 0);
     fixture.mState.mExpectedRetentionSlot    = &fixture.mSlot;
     fixture.mState.mExpectedRetainedReadback = &fixture.mReadback;
+    fixture.mState.mExpectedRetainedUploadDestination = &fixture.mUploadDestination;
     ensureOperationSuccess(fixture.mSlot.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
     ensure("structural mismatch does not strand cancellation or inspect invalid memory",
            fixture.mState.mRetentionChecks >= 2 && fixture.mState.mRetentionFailures == 0 && fixture.mState.mReleases.size() == 1 &&
-               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && fixture.mState.mFinalFenceWrites == 0);
+               !fixture.mSlot.retainsReadbackGeneration(fixture.mReadback) && !fixture.mSlot.hasRetainedUploadDestinationGeneration() &&
+               fixture.mState.mFinalFenceWrites == 0);
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<53>()
+{
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            destination           = makeNonresidentUploadDestination(parents, state);
+        auto            slot                  = takeGeneration(resolveSlot(parents));
+        state.clearFrameRecords();
+
+        ensureOperationError(resolveRenderPassDrawPresentation(slot, parents, presentation_target, presentation_pipeline, destination),
+                             VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration,
+                             VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("a nonresident destination is rejected before dispatch lookup or acquisition",
+               state.mInstanceLookups.empty() && state.mDeviceLookups.empty() && state.mEvents.empty() && state.mAcquires.empty() &&
+                   !slot.hasRetainedUploadDestinationGeneration());
+    }
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            wrong_description     = screenTriangleDescription();
+        wrong_description.mBytes[0] ^= 0xff;
+        auto destination = makeResidentUploadDestination(parents, state, wrong_description);
+        auto slot        = takeGeneration(resolveSlot(parents));
+        state.clearFrameRecords();
+
+        VulkanUploadDestinationGenerationTestAccess::forceContentIdentity(destination, LLRenderContract::SCREEN_TRIANGLE_CONTENT_IDENTITY);
+        ensure("the collision fixture has the canonical stable identity but a different immutable description",
+               destination.expectedContentIdentity() == LLRenderContract::SCREEN_TRIANGLE_CONTENT_IDENTITY &&
+                   destination.residentContentIdentity() == LLRenderContract::SCREEN_TRIANGLE_CONTENT_IDENTITY &&
+                   destination.isResident() && !destination.matchesDescription(vulkanScreenTriangleUploadSourceDescription()));
+        ensureOperationError(resolveRenderPassDrawPresentation(slot, parents, presentation_target, presentation_pipeline, destination),
+                             VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration,
+                             VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("a different resident 48-byte payload is rejected before native work",
+               state.mInstanceLookups.empty() && state.mDeviceLookups.empty() && state.mEvents.empty() && state.mAcquires.empty() &&
+                   state.mVertexBufferBinds.empty() && state.mDraws.empty() && !slot.hasRetainedUploadDestinationGeneration());
+    }
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            destination           = makeResidentUploadDestination(parents, state, LLRenderContract::BufferHandle{ 9, 7 });
+        auto            slot                  = takeGeneration(resolveSlot(parents));
+        state.clearFrameRecords();
+
+        ensureOperationError(resolveRenderPassDrawPresentation(slot, parents, presentation_target, presentation_pipeline, destination),
+                             VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration,
+                             VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("a resident destination with the wrong neutral handle is rejected before native work",
+               state.mInstanceLookups.empty() && state.mDeviceLookups.empty() && state.mEvents.empty() && state.mAcquires.empty() &&
+                   !slot.hasRetainedUploadDestinationGeneration());
+    }
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            destination           = makeResidentUploadDestination(parents, state);
+        auto            slot                  = takeGeneration(resolveSlot(parents));
+        state.clearFrameRecords();
+        destination.reset();
+
+        ensureOperationError(resolveRenderPassDrawPresentation(slot, parents, presentation_target, presentation_pipeline, destination),
+                             VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration,
+                             VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("an inert destination is rejected before dispatch lookup or acquisition",
+               state.mInstanceLookups.empty() && state.mDeviceLookups.empty() && state.mEvents.empty() && state.mAcquires.empty() &&
+                   !slot.hasRetainedUploadDestinationGeneration());
+    }
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            other_parents         = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            destination           = makeResidentUploadDestination(other_parents, state);
+        auto            slot                  = takeGeneration(resolveSlot(parents));
+        state.clearFrameRecords();
+
+        ensureOperationError(resolveRenderPassDrawPresentation(slot, parents, presentation_target, presentation_pipeline, destination),
+                             VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration,
+                             VulkanSwapchainFrameSlotDisposition::Reusable);
+        ensure("a destination from handle-equivalent parent generations is rejected before native work",
+               state.mInstanceLookups.empty() && state.mDeviceLookups.empty() && state.mEvents.empty() && state.mAcquires.empty() &&
+                   !slot.hasRetainedUploadDestinationGeneration());
+    }
+    {
+        FakeState       state;
+        ScopedFakeState scope(state);
+        auto            parents               = makeParents(state);
+        auto            presentation_target   = makePresentationTarget(parents);
+        auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+        auto            destination           = makeResidentUploadDestination(parents, state);
+        auto            slot                  = takeGeneration(resolveSlot(parents));
+        ensure("the valid fixture retains the exact canonical immutable description",
+               destination.matchesDescription(vulkanScreenTriangleUploadSourceDescription()));
+        ensureOperationSuccess(resolveRenderPassDrawPresentation(slot, parents, presentation_target, presentation_pipeline, destination),
+                               VulkanSwapchainFrameSlotDisposition::Reusable);
+        auto other_parents = makeParents(state);
+        state.clearFrameRecords();
+
+        const auto result = slot.executeAcquireRenderPassDrawToPresent(other_parents.mPhysical, presentation_target, presentation_pipeline,
+                                                                       destination, {});
+        ensure("execute rejects a handle-equivalent physical-device generation before retaining or acquiring",
+               requirePresentationError(result).mCode == VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration &&
+                   requirePresentationError(result).mDisposition == VulkanSwapchainFrameSlotDisposition::Reusable &&
+                   state.mEvents.empty() && state.mAcquires.empty() && !slot.hasRetainedUploadDestinationGeneration());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<54>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents               = makeParents(state);
+    auto            presentation_target   = makePresentationTarget(parents);
+    auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+    auto            destination           = makeResidentUploadDestination(parents, state);
+    auto            slot                  = takeGeneration(resolveSlot(parents));
+    state.clearFrameRecords();
+    state.mResetUploadDestinationOnBindLookup = &destination;
+
+    ensureOperationError(resolveRenderPassDrawPresentation(slot, parents, presentation_target, presentation_pipeline, destination),
+                         VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration,
+                         VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("destination invalidation during bind lookup is caught before transactional dispatch publication",
+           state.mDeviceLookups == expectedRenderPassDrawPresentationLookups() && state.mEvents.empty() && state.mAcquires.empty() &&
+               state.mVertexBufferBinds.empty() && state.mDraws.empty() && !slot.hasRetainedUploadDestinationGeneration());
+    ensure("failed destination revalidation leaves shared presentation dispatch unpublished",
+           requirePresentationError(slot.executeAcquireToPresent()).mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+               state.mEvents.empty());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<55>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents               = makeParents(state);
+    auto            presentation_target   = makePresentationTarget(parents);
+    auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+    auto            destination           = makeResidentUploadDestination(parents, state);
+    auto            slot                  = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveRenderPassDrawPresentation(slot, parents, presentation_target, presentation_pipeline, destination),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    state.mResetUploadDestinationOnAcquire = &destination;
+
+    const auto result =
+        slot.executeAcquireRenderPassDrawToPresent(parents.mPhysical, presentation_target, presentation_pipeline, destination, {});
+    ensure("post-acquire destination invalidation retains a cancellable image without recording the draw",
+           requirePresentationError(result).mCode == VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration &&
+               requirePresentationError(result).mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               slot.retainsUploadDestinationGeneration(destination) && !slot.activeUploadDestinationMatchesSnapshot() &&
+               state.mEvents == std::vector<std::string>{ "wait fence", "acquire image" } && state.mVertexBufferBinds.empty() &&
+               state.mDraws.empty() && state.mQueueSubmits.empty());
+
+    const VkCommandPool command_pool = slot.commandPool();
+    slot.reset();
+    ensure("reset refuses a slot whose acquired image may still name the invalidated destination",
+           slot.commandPool() == command_pool && slot.retainsUploadDestinationGeneration(destination) &&
+               state.mDestroyedCommandPools.empty());
+
+    state.mExpectedRetentionSlot             = &slot;
+    state.mExpectedRetainedUploadDestination = &destination;
+    ensureOperationSuccess(slot.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("cancellation drains and releases before clearing destination retention",
+           state.mRetentionChecks >= 2 && state.mRetentionFailures == 0 && state.mReleases.size() == 1 &&
+               !slot.hasRetainedUploadDestinationGeneration());
+}
+
+template<>
+template<>
+void render_vulkan_swapchain_frame_slot_object::test<56>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents               = makeParents(state);
+    auto            presentation_target   = makePresentationTarget(parents);
+    auto            presentation_pipeline = makePresentationPipeline(parents, presentation_target);
+    auto            destination           = makeResidentUploadDestination(parents, state);
+    auto            slot                  = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveRenderPassDrawPresentation(slot, parents, presentation_target, presentation_pipeline, destination),
+                           VulkanSwapchainFrameSlotDisposition::Reusable);
+    state.clearFrameRecords();
+    state.mPresentResults = { VK_ERROR_OUT_OF_HOST_MEMORY };
+
+    const auto first =
+        slot.executeAcquireRenderPassDrawToPresent(parents.mPhysical, presentation_target, presentation_pipeline, destination, {});
+    ensure("a retryable present failure retains the exact destination after one bind, draw, and submission",
+           requirePresentationError(first).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+               slot.retainsUploadDestinationGeneration(destination) && slot.activeUploadDestinationMatchesSnapshot() &&
+               state.mVertexBufferBinds.size() == 1 && state.mDraws.size() == 1 && state.mQueueSubmits.size() == 1 &&
+               state.mPresents.size() == 1);
+
+    destination.reset();
+    const auto retry = slot.retryPresentation();
+    ensure("retry rejects a changed destination without rebinding, redrawing, resubmitting, or presenting",
+           requirePresentationError(retry).mCode == VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration &&
+               requirePresentationError(retry).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+               slot.retainsUploadDestinationGeneration(destination) && !slot.activeUploadDestinationMatchesSnapshot() &&
+               state.mVertexBufferBinds.size() == 1 && state.mDraws.size() == 1 && state.mQueueSubmits.size() == 1 &&
+               state.mPresents.size() == 1);
+
+    ensureOperationSuccess(slot.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("successful cancellation clears changed destination retention", !slot.hasRetainedUploadDestinationGeneration());
 }
 
 } // namespace tut

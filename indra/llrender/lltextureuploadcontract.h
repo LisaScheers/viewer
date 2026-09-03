@@ -19,8 +19,10 @@
 #include "llrendercontract.h"
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -48,6 +50,28 @@ inline constexpr std::size_t TEXTURE_UPLOAD_OUTPUT_BYTE_COUNT =
 
 inline constexpr std::uint64_t TEXTURE_UPLOAD_PRIOR_REVISION = 22;
 inline constexpr std::uint64_t TEXTURE_UPLOAD_REVISION       = 23;
+
+inline constexpr std::array<float, 12> SCREEN_TRIANGLE_POSITIONS{ -1.f, 1.f, 0.f, 0.f, -1.f, -3.f, 0.f, 0.f, 3.f, 1.f, 0.f, 0.f };
+static_assert(std::numeric_limits<float>::is_iec559);
+static_assert(sizeof(float) == 4);
+inline constexpr auto SCREEN_TRIANGLE_BYTES =
+    std::bit_cast<std::array<std::uint8_t, sizeof(SCREEN_TRIANGLE_POSITIONS)>>(SCREEN_TRIANGLE_POSITIONS);
+
+constexpr std::uint64_t stableByteContentIdentity(const auto& bytes) noexcept
+{
+    constexpr std::uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
+    constexpr std::uint64_t FNV_PRIME        = 1099511628211ULL;
+
+    std::uint64_t identity = FNV_OFFSET_BASIS;
+    for (std::uint8_t byte : bytes)
+    {
+        identity ^= byte;
+        identity *= FNV_PRIME;
+    }
+    return identity != 0 ? identity : 1;
+}
+
+inline constexpr std::uint64_t SCREEN_TRIANGLE_CONTENT_IDENTITY = stableByteContentIdentity(SCREEN_TRIANGLE_BYTES);
 
 struct StreamingUploadHandles
 {

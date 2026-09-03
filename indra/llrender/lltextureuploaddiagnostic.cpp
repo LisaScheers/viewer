@@ -232,7 +232,7 @@ std::FILE* openExclusive(const std::filesystem::path& path, int& open_error)
 TextureUploadFixture makeTextureUploadFixture()
 {
     TextureUploadFixture fixture;
-    fixture.mScreenTriangle = { -1.f, 1.f, 0.f, 0.f, -1.f, -3.f, 0.f, 0.f, 3.f, 1.f, 0.f, 0.f };
+    fixture.mScreenTriangle = SCREEN_TRIANGLE_POSITIONS;
 
     for (std::size_t top_row = 0; top_row < TEXTURE_UPLOAD_RESIDENT_HEIGHT; ++top_row)
     {

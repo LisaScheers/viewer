@@ -522,6 +522,7 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       PRIVATE VK_NO_PROTOTYPES)
   target_link_libraries(llrendervulkanswapchainframeslot
       PUBLIC
+          llrendervulkanuploaddestination
           llrendervulkanswapchainpresentationpipeline
           llrendervulkanswapchainreadback)
   set_target_properties(llrendervulkanswapchainframeslot PROPERTIES FOLDER "Tests")
@@ -532,7 +533,7 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
   LL_ADD_INTEGRATION_TEST(
       llrendervulkanswapchainframeslot
       ""
-      "llrendervulkanswapchainframeslot;llcommon")
+      "llrendervulkanswapchainframeslot;llrendervulkanuploadtransfer;llcommon")
   target_compile_definitions(
       INTEGRATION_TEST_llrendervulkanswapchainframeslot
       PRIVATE VK_NO_PROTOTYPES)

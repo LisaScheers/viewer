@@ -1056,4 +1056,28 @@ void render_vulkan_upload_source_object::test<9>()
     }
 }
 
+template<>
+template<>
+void render_vulkan_upload_source_object::test<10>()
+{
+    FakeState       state;
+    ScopedFakeState scope(state);
+    auto            parents    = makeParents(state);
+    const auto      canonical  = vulkanScreenTriangleUploadSourceDescription();
+    auto            generation = takeGeneration(resolveVulkanUploadSourceGeneration(parents.mPhysical, parents.mLogical, canonical));
+
+    ensure("the shared screen-triangle description carries the canonical handle and exact bytes",
+           canonical.mHandle == LLRenderContract::StreamingUploadHandles{}.mScreenTriangle &&
+               canonical.mBytes == LLRenderContract::SCREEN_TRIANGLE_BYTES);
+    ensure("the upload source publishes the shared canonical FNV identity",
+           generation.contentIdentity() == LLRenderContract::SCREEN_TRIANGLE_CONTENT_IDENTITY && generation.matchesDescription(canonical));
+
+    generation.reset();
+    auto arbitrary            = description();
+    auto arbitrary_generation = takeGeneration(resolveVulkanUploadSourceGeneration(parents.mPhysical, parents.mLogical, arbitrary));
+    ensure("generic upload sources continue to accept arbitrary 48-byte payloads",
+           arbitrary_generation.matchesDescription(arbitrary) &&
+               arbitrary_generation.contentIdentity() == LLRenderContract::stableByteContentIdentity(arbitrary.mBytes));
+}
+
 } // namespace tut

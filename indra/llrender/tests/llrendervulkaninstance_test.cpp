@@ -35,9 +35,33 @@
 #include <variant>
 #include <vector>
 
+namespace LLRenderVulkan
+{
+
+struct VulkanUploadDestinationGenerationTestAccess
+{
+    static void forceContentIdentity(VulkanUploadDestinationGeneration& destination, std::uint64_t content_identity) noexcept
+    {
+        destination.mExpectedContentIdentity = content_identity;
+        destination.mResidentContentIdentity = content_identity;
+    }
+};
+
+struct VulkanInstanceGenerationTestAccess
+{
+    static VulkanUploadDestinationGeneration& uploadDestination(VulkanInstanceGeneration& instance) noexcept
+    {
+        return *instance.mUploadDestinationGeneration;
+    }
+};
+
+} // namespace LLRenderVulkan
+
 namespace
 {
 using namespace LLRenderVulkan;
+
+constexpr LLRenderContract::BufferHandle SCREEN_TRIANGLE_HANDLE = LLRenderContract::StreamingUploadHandles{}.mScreenTriangle;
 
 enum class MissingCommand : std::uint8_t
 {
@@ -110,7 +134,8 @@ enum class MissingCommand : std::uint8_t
     UnmapMemory,
     FlushMappedMemoryRanges,
     CmdCopyImageToBuffer,
-    CmdCopyBuffer
+    CmdCopyBuffer,
+    CmdBindVertexBuffers
 };
 
 enum class Event : std::uint8_t
@@ -170,7 +195,8 @@ enum class Event : std::uint8_t
     FreeUploadDestinationMemory,
     DestroyUploadTransferFence,
     DestroyUploadTransferCommandPool,
-    CopyBuffer
+    CopyBuffer,
+    BindVertexBuffer
 };
 
 enum class ReadbackResetReentryPoint : std::uint8_t
@@ -560,6 +586,7 @@ struct FakeState
     std::size_t           mBeginRenderPassCalls         = 0;
     std::size_t           mEndRenderPassCalls           = 0;
     std::size_t             mBindPipelineCalls            = 0;
+    std::size_t                                                        mBindVertexBufferCalls        = 0;
     std::size_t             mSetViewportCalls             = 0;
     std::size_t             mSetScissorCalls              = 0;
     std::size_t             mDrawCalls                    = 0;
@@ -582,6 +609,10 @@ struct FakeState
     VkSubpassContents     mOperationSubpassContents     = VK_SUBPASS_CONTENTS_MAX_ENUM;
     VkPipelineBindPoint     mOperationPipelineBindPoint   = VK_PIPELINE_BIND_POINT_MAX_ENUM;
     VkPipeline              mOperationPipeline            = VK_NULL_HANDLE;
+    std::uint32_t           mOperationFirstVertexBinding = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t           mOperationVertexBindingCount = 0;
+    VkBuffer                mOperationVertexBuffer       = VK_NULL_HANDLE;
+    VkDeviceSize            mOperationVertexBufferOffset = std::numeric_limits<VkDeviceSize>::max();
     VkViewport              mOperationViewport{};
     VkRect2D                mOperationScissor{};
     std::uint32_t           mDrawVertexCount   = 0;
@@ -1915,6 +1946,25 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer     command_buffe
     gFakeState->mEvents.push_back(Event::BindPipeline);
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindVertexBuffers(VkCommandBuffer     command_buffer,
+                                                    std::uint32_t       first_binding,
+                                                    std::uint32_t       binding_count,
+                                                    const VkBuffer*     buffers,
+                                                    const VkDeviceSize* offsets) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mCommandBuffer || first_binding != 0 || binding_count != 1 || !buffers || !offsets ||
+        buffers[0] == VK_NULL_HANDLE)
+    {
+        return;
+    }
+    ++gFakeState->mBindVertexBufferCalls;
+    gFakeState->mOperationFirstVertexBinding = first_binding;
+    gFakeState->mOperationVertexBindingCount = binding_count;
+    gFakeState->mOperationVertexBuffer       = buffers[0];
+    gFakeState->mOperationVertexBufferOffset = offsets[0];
+    gFakeState->mEvents.push_back(Event::BindVertexBuffer);
+}
+
 VKAPI_ATTR void VKAPI_CALL fakeCmdSetViewport(VkCommandBuffer   command_buffer,
                                               std::uint32_t     first_viewport,
                                               std::uint32_t     viewport_count,
@@ -2400,6 +2450,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     {
         return gFakeState->mMissing == MissingCommand::CmdBindPipeline ? nullptr : eraseFunctionType(fakeCmdBindPipeline);
     }
+    if (std::strcmp(name, "vkCmdBindVertexBuffers") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CmdBindVertexBuffers ? nullptr : eraseFunctionType(fakeCmdBindVertexBuffers);
+    }
     if (std::strcmp(name, "vkCmdSetViewport") == 0)
     {
         return gFakeState->mMissing == MissingCommand::CmdSetViewport ? nullptr : eraseFunctionType(fakeCmdSetViewport);
@@ -2683,12 +2737,7 @@ VulkanLogicalDeviceRequest makeLogicalDeviceRequest(FakeState& state, VulkanInst
 
 VulkanUploadSourceDescription makeUploadSourceDescription() noexcept
 {
-    VulkanUploadSourceDescription description{ { 7, 3 } };
-    for (std::size_t index = 0; index < description.mBytes.size(); ++index)
-    {
-        description.mBytes[index] = static_cast<std::uint8_t>(index * 5 + 1);
-    }
-    return description;
+    return vulkanScreenTriangleUploadSourceDescription();
 }
 
 VulkanUploadSourceRequest makeUploadSourceRequest(FakeState&                    state,
@@ -4041,6 +4090,100 @@ void acquireUploadTransferChain(FakeState& state, VulkanInstanceGeneration& owne
     tut::ensure("the upload-transfer fixture succeeds", !owner.acquireUploadTransferGeneration(makeUploadTransferRequest(state, owner)));
 }
 
+void acquireResidentUploadDestination(FakeState&                    state,
+                                      VulkanInstanceGeneration&     owner,
+                                      VulkanUploadSourceDescription description   = makeUploadSourceDescription(),
+                                      bool                          retire_upload = true)
+{
+    const auto events                        = state.mEvents;
+    const auto wait_results                  = state.mWaitForFencesResults;
+    const auto wait_result_index             = state.mWaitForFencesResultIndex;
+    const auto memory_properties_calls       = state.mMemoryPropertiesCalls;
+    const auto create_buffer_calls           = state.mCreateBufferCalls;
+    const auto destroy_buffer_calls          = state.mDestroyBufferCalls;
+    const auto memory_requirements_calls     = state.mGetBufferMemoryRequirementsCalls;
+    const auto allocate_memory_calls         = state.mAllocateMemoryCalls;
+    const auto free_memory_calls             = state.mFreeMemoryCalls;
+    const auto bind_buffer_memory_calls      = state.mBindBufferMemoryCalls;
+    const auto map_memory_calls              = state.mMapMemoryCalls;
+    const auto unmap_memory_calls            = state.mUnmapMemoryCalls;
+    const auto flush_calls                   = state.mFlushMappedMemoryRangesCalls;
+    const auto create_command_pool_calls     = state.mCreateCommandPoolCalls;
+    const auto destroy_command_pool_calls    = state.mDestroyCommandPoolCalls;
+    const auto allocate_command_buffer_calls = state.mAllocateCommandBufferCalls;
+    const auto create_fence_calls            = state.mCreateFenceCalls;
+    const auto destroy_fence_calls           = state.mDestroyFenceCalls;
+    const auto wait_calls                    = state.mWaitForFencesCalls;
+    const auto begin_calls                   = state.mBeginCommandBufferCalls;
+    const auto end_calls                     = state.mEndCommandBufferCalls;
+    const auto queue_submit_calls            = state.mQueueSubmitCalls;
+    const auto pipeline_barrier_calls        = state.mPipelineBarrierCalls;
+    const auto copy_buffer_calls             = state.mCopyBufferCalls;
+    const auto destroyed_buffers             = state.mDestroyedBuffers;
+    const auto freed_memories                = state.mFreedMemories;
+    const auto flushed_ranges                = state.mFlushedMemoryRanges;
+    const auto destroyed_command_pools       = state.mDestroyedCommandPools;
+    const auto destroyed_fences              = state.mDestroyedFences;
+    const auto buffer_barriers               = state.mBufferBarriers;
+    const auto buffer_barrier_stages         = state.mBufferBarrierStages;
+
+    state.mWaitForFencesResults     = { VK_SUCCESS };
+    state.mWaitForFencesResultIndex = 0;
+    state.mMemoryProperties.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    tut::ensure("the resident-destination fixture acquires its exact source",
+                !owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner, description)));
+    tut::ensure("the resident-destination fixture acquires its exact device-local owner",
+                !owner.acquireUploadDestinationGeneration(makeUploadDestinationRequest(state, owner, description)));
+    tut::ensure("the resident-destination fixture acquires its one-shot transfer",
+                !owner.acquireUploadTransferGeneration(makeUploadTransferRequest(state, owner, description)));
+    ensureUploadTransferDisposition(owner.executeUploadTransfer(makeUploadTransferOperationRequest(state, owner, description)),
+                                    VulkanUploadTransferDisposition::Complete);
+    if (retire_upload)
+    {
+        tut::ensure("the resident-destination fixture retires the source and terminal transfer",
+                    owner.uploadDestinationIsResident() && owner.resetUploadSourceGeneration() && !owner.hasUploadSourceGeneration() &&
+                        !owner.hasUploadTransferGeneration() && owner.hasUploadDestinationGeneration());
+    }
+    else
+    {
+        tut::ensure("the resident-destination fixture retains its completed upload chain",
+                    owner.uploadDestinationIsResident() && owner.hasUploadSourceGeneration() && owner.hasUploadTransferGeneration() &&
+                        owner.uploadTransferDisposition() == VulkanUploadTransferDisposition::Complete);
+    }
+
+    state.mEvents                           = events;
+    state.mWaitForFencesResults             = wait_results;
+    state.mWaitForFencesResultIndex         = wait_result_index;
+    state.mMemoryPropertiesCalls            = memory_properties_calls;
+    state.mCreateBufferCalls                = create_buffer_calls;
+    state.mDestroyBufferCalls               = destroy_buffer_calls;
+    state.mGetBufferMemoryRequirementsCalls = memory_requirements_calls;
+    state.mAllocateMemoryCalls              = allocate_memory_calls;
+    state.mFreeMemoryCalls                  = free_memory_calls;
+    state.mBindBufferMemoryCalls            = bind_buffer_memory_calls;
+    state.mMapMemoryCalls                   = map_memory_calls;
+    state.mUnmapMemoryCalls                 = unmap_memory_calls;
+    state.mFlushMappedMemoryRangesCalls     = flush_calls;
+    state.mCreateCommandPoolCalls           = create_command_pool_calls;
+    state.mDestroyCommandPoolCalls          = destroy_command_pool_calls;
+    state.mAllocateCommandBufferCalls       = allocate_command_buffer_calls;
+    state.mCreateFenceCalls                 = create_fence_calls;
+    state.mDestroyFenceCalls                = destroy_fence_calls;
+    state.mWaitForFencesCalls               = wait_calls;
+    state.mBeginCommandBufferCalls          = begin_calls;
+    state.mEndCommandBufferCalls            = end_calls;
+    state.mQueueSubmitCalls                 = queue_submit_calls;
+    state.mPipelineBarrierCalls             = pipeline_barrier_calls;
+    state.mCopyBufferCalls                  = copy_buffer_calls;
+    state.mDestroyedBuffers                 = destroyed_buffers;
+    state.mFreedMemories                    = freed_memories;
+    state.mFlushedMemoryRanges              = flushed_ranges;
+    state.mDestroyedCommandPools            = destroyed_command_pools;
+    state.mDestroyedFences                  = destroyed_fences;
+    state.mBufferBarriers                   = buffer_barriers;
+    state.mBufferBarrierStages              = buffer_barrier_stages;
+}
+
 void acquireConfigurationChain(FakeState& state, VulkanInstanceGeneration& owner, VkExtent2D drawable_extent = { 800, 600 })
 {
     acquireLogicalChain(state, owner);
@@ -4393,6 +4536,55 @@ bool readbackOperationAbaWindowIsCurrent(void* userdata, std::uint64_t native_wi
     return true;
 }
 
+struct UploadDestinationOperationAbaContext
+{
+    FakeState*                mState        = nullptr;
+    VulkanInstanceGeneration* mOwner        = nullptr;
+    std::size_t               mOwnerChecks  = 0;
+    std::size_t               mWindowChecks = 0;
+    bool                      mReset        = false;
+    bool                      mReacquired   = false;
+};
+
+bool uploadDestinationOperationAbaOwnerIsCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
+{
+    auto* context = static_cast<UploadDestinationOperationAbaContext*>(userdata);
+    if (!context || !context->mState || !context->mOwner || context->mOwner != &generation)
+    {
+        return false;
+    }
+    ++context->mOwnerChecks;
+    if (context->mOwnerChecks == 2)
+    {
+        const VulkanUploadSourceDescription description = makeUploadSourceDescription();
+        context->mReset                                 = context->mOwner->resetUploadDestinationGeneration();
+        if (context->mReset &&
+            !context->mOwner->acquireUploadSourceGeneration(makeUploadSourceRequest(*context->mState, *context->mOwner, description)) &&
+            !context->mOwner->acquireUploadDestinationGeneration(
+                makeUploadDestinationRequest(*context->mState, *context->mOwner, description)) &&
+            !context->mOwner->acquireUploadTransferGeneration(makeUploadTransferRequest(*context->mState, *context->mOwner, description)))
+        {
+            const VulkanUploadTransferParentOperationResult result =
+                context->mOwner->executeUploadTransfer(makeUploadTransferOperationRequest(*context->mState, *context->mOwner, description));
+            const auto* disposition = std::get_if<VulkanUploadTransferDisposition>(&result);
+            context->mReacquired    = disposition && *disposition == VulkanUploadTransferDisposition::Complete &&
+                                   context->mOwner->resetUploadSourceGeneration() && context->mOwner->uploadDestinationIsResident();
+        }
+    }
+    return true;
+}
+
+bool uploadDestinationOperationAbaWindowIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    auto* context = static_cast<UploadDestinationOperationAbaContext*>(userdata);
+    if (!context || !context->mOwner || native_window_generation != context->mOwner->nativeWindowGeneration())
+    {
+        return false;
+    }
+    ++context->mWindowChecks;
+    return true;
+}
+
 struct UploadSourceLogicalAbaContext
 {
     VulkanInstanceGeneration* mOwner       = nullptr;
@@ -4567,7 +4759,7 @@ struct render_vulkan_instance_test
 {
 };
 
-using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 119>;
+using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 124>;
 using render_vulkan_instance_test_object = render_vulkan_instance_test_group::object;
 render_vulkan_instance_test_group render_vulkan_instance_tests("render Vulkan instance");
 
@@ -9636,6 +9828,7 @@ void render_vulkan_instance_test_object::test<92>()
     ScopedFakeState          scope(state);
     VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
     acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+    acquireResidentUploadDestination(state, owner);
 
     state.mAcquiredImageIndex = 2;
     VulkanSwapchainFrameClearColor                         mutable_color{ { 0.125f, 0.25f, 0.5f, 1.0f } };
@@ -9650,6 +9843,7 @@ void render_vulkan_instance_test_object::test<92>()
 
     const auto begin    = std::find(state.mEvents.begin(), state.mEvents.end(), Event::BeginRenderPass);
     const auto bind     = std::find(state.mEvents.begin(), state.mEvents.end(), Event::BindPipeline);
+    const auto vertex   = std::find(state.mEvents.begin(), state.mEvents.end(), Event::BindVertexBuffer);
     const auto viewport = std::find(state.mEvents.begin(), state.mEvents.end(), Event::SetViewport);
     const auto scissor  = std::find(state.mEvents.begin(), state.mEvents.end(), Event::SetScissor);
     const auto draw     = std::find(state.mEvents.begin(), state.mEvents.end(), Event::Draw);
@@ -9662,16 +9856,19 @@ void render_vulkan_instance_test_object::test<92>()
                state.mOperationRenderPass == state.mPresentationRenderPass &&
                state.mOperationFramebuffer == state.mPresentationFramebuffers[2] &&
                state.mOperationPipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
-               state.mOperationPipeline == state.mPresentationPipeline && state.mBindPipelineCalls == 1 && state.mSetViewportCalls == 1 &&
-               state.mOperationViewport.x == 0.0f && state.mOperationViewport.y == 0.0f && state.mOperationViewport.width == 1280.0f &&
-               state.mOperationViewport.height == 720.0f && state.mOperationViewport.minDepth == 0.0f &&
-               state.mOperationViewport.maxDepth == 1.0f && state.mSetScissorCalls == 1 && state.mOperationScissor.offset.x == 0 &&
-               state.mOperationScissor.offset.y == 0 && state.mOperationScissor.extent.width == 1280 &&
-               state.mOperationScissor.extent.height == 720 && state.mDrawCalls == 1 && state.mDrawVertexCount == 3 &&
-               state.mDrawInstanceCount == 1 && state.mDrawFirstVertex == 0 && state.mDrawFirstInstance == 0 &&
-               begin != state.mEvents.end() && bind != state.mEvents.end() && viewport != state.mEvents.end() &&
-               scissor != state.mEvents.end() && draw != state.mEvents.end() && end != state.mEvents.end() && begin < bind &&
-               bind < viewport && viewport < scissor && scissor < draw && draw < end);
+               state.mOperationPipeline == state.mPresentationPipeline && state.mBindPipelineCalls == 1 &&
+               state.mBindVertexBufferCalls == 1 && state.mOperationFirstVertexBinding == 0 && state.mOperationVertexBindingCount == 1 &&
+               state.mOperationVertexBuffer == owner.uploadDestinationBuffer() && state.mOperationVertexBufferOffset == 0 &&
+               state.mSetViewportCalls == 1 && state.mOperationViewport.x == 0.0f && state.mOperationViewport.y == 0.0f &&
+               state.mOperationViewport.width == 1280.0f && state.mOperationViewport.height == 720.0f &&
+               state.mOperationViewport.minDepth == 0.0f && state.mOperationViewport.maxDepth == 1.0f && state.mSetScissorCalls == 1 &&
+               state.mOperationScissor.offset.x == 0 && state.mOperationScissor.offset.y == 0 &&
+               state.mOperationScissor.extent.width == 1280 && state.mOperationScissor.extent.height == 720 && state.mDrawCalls == 1 &&
+               state.mDrawVertexCount == 3 && state.mDrawInstanceCount == 1 && state.mDrawFirstVertex == 0 &&
+               state.mDrawFirstInstance == 0 && begin != state.mEvents.end() && bind != state.mEvents.end() &&
+               vertex != state.mEvents.end() && viewport != state.mEvents.end() && scissor != state.mEvents.end() &&
+               draw != state.mEvents.end() && end != state.mEvents.end() && begin < bind && bind < vertex && vertex < viewport &&
+               viewport < scissor && scissor < draw && draw < end);
 
     state.mEvents.clear();
     state.mFrameSlotDestroyOwner          = &owner;
@@ -9701,6 +9898,7 @@ void render_vulkan_instance_test_object::test<93>()
     ScopedFakeState          scope(state);
     VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
     acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+    acquireResidentUploadDestination(state, owner);
 
     PresentationPipelineReplacementContext                 replacement{ &state, &owner };
     const VulkanSwapchainFrameSlotOperationRequest         request{ owner.nativeWindowGeneration(),
@@ -9729,6 +9927,7 @@ void render_vulkan_instance_test_object::test<94>()
     ScopedFakeState          scope(state);
     VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
     acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+    acquireResidentUploadDestination(state, owner);
     VulkanSwapchainFrameSlotOperationRequest request = makeSwapchainFrameSlotOperationRequest(state, owner, { 1280, 720 });
 
     state.mAcquiredImageIndex   = 1;
@@ -9740,7 +9939,8 @@ void render_vulkan_instance_test_object::test<94>()
            pending_error.mOperationError && pending_error.mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
                pending_error.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending &&
                owner.hasSwapchainFrameSlotGeneration() && owner.hasSwapchainPresentationPipelineGeneration() &&
-               owner.hasSwapchainPresentationTargetGeneration() && !owner.resetSwapchainPresentationPipelineGeneration() &&
+               owner.hasSwapchainPresentationTargetGeneration() && owner.hasUploadDestinationGeneration() &&
+               !owner.resetUploadDestinationGeneration() && !owner.resetSwapchainPresentationPipelineGeneration() &&
                !owner.resetSwapchainPresentationTargetGeneration() && !owner.resetSwapchainImagesGeneration() &&
                !owner.resetLogicalDeviceGeneration() && owner.hasLogicalDeviceGeneration() && owner.hasSwapchainConfigurationGeneration() &&
                owner.hasSwapchainGeneration() && owner.hasSwapchainImagesGeneration() && owner.hasSwapchainPresentationTargetGeneration() &&
@@ -9825,6 +10025,7 @@ void render_vulkan_instance_test_object::test<96>()
         ScopedFakeState          scope(state);
         VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
         acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+        acquireResidentUploadDestination(state, owner);
 
         PresentationTargetReplacementContext                   replacement{ &state, &owner };
         const VulkanSwapchainFrameSlotOperationRequest         request{ owner.nativeWindowGeneration(),
@@ -9847,6 +10048,7 @@ void render_vulkan_instance_test_object::test<96>()
         ScopedFakeState          scope(state);
         VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
         acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+        acquireResidentUploadDestination(state, owner);
 
         FrameSlotReplacementContext                            replacement{ &state, &owner };
         const VulkanSwapchainFrameSlotOperationRequest         request{ owner.nativeWindowGeneration(),
@@ -9869,6 +10071,7 @@ void render_vulkan_instance_test_object::test<96>()
         ScopedFakeState          scope(state);
         VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
         acquireCompleteSwapchainChain(state, owner, { 1280, 720 });
+        acquireResidentUploadDestination(state, owner);
 
         OwnerResetDuringOperationContext                       reset{ &owner, owner.nativeWindowGeneration() };
         const VulkanSwapchainFrameSlotOperationRequest         request{ owner.nativeWindowGeneration(),
@@ -10106,6 +10309,7 @@ template<>
 void render_vulkan_instance_test_object::test<101>()
 {
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotParentOperationCode::SwapchainReadbackNotLive) == 20);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive) == 21);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdCopyImageToBuffer) == 25);
     static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
         std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
@@ -10139,6 +10343,7 @@ void render_vulkan_instance_test_object::test<101>()
         ScopedFakeState          scope(state);
         VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
         acquireCompleteSwapchainChain(state, owner, extent);
+        acquireResidentUploadDestination(state, owner);
         const auto storage_before = state.mReadbackObservationStorage;
 
         const VulkanSwapchainFrameSlotParentPresentationResult result = owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(
@@ -10161,6 +10366,7 @@ void render_vulkan_instance_test_object::test<102>()
     ScopedFakeState          scope(state);
     VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
     acquireCompleteSwapchainChain(state, owner, extent);
+    acquireResidentUploadDestination(state, owner);
     const VkBuffer       original_buffer = owner.swapchainReadbackBuffer();
     const VkDeviceMemory original_memory = owner.swapchainReadbackMemory();
 
@@ -10195,6 +10401,7 @@ void render_vulkan_instance_test_object::test<103>()
         ScopedFakeState          scope(state);
         VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
         acquireCompleteSwapchainChain(state, owner, extent);
+        acquireResidentUploadDestination(state, owner);
         state.mReadbackResetReentryPoint = point;
         state.mReadbackResetReentryOwner = &owner;
 
@@ -10239,6 +10446,7 @@ void render_vulkan_instance_test_object::test<104>()
         ScopedFakeState          scope(state);
         VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
         acquireCompleteSwapchainChain(state, owner, extent);
+        acquireResidentUploadDestination(state, owner);
         state.mEndCommandBufferResult = VK_ERROR_UNKNOWN;
 
         VulkanSwapchainFrameSlotOperationRequest               request = makeSwapchainFrameSlotOperationRequest(state, owner, extent);
@@ -10270,6 +10478,7 @@ void render_vulkan_instance_test_object::test<104>()
         ScopedFakeState          scope(state);
         VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
         acquireCompleteSwapchainChain(state, owner, extent);
+        acquireResidentUploadDestination(state, owner);
         state.mWaitForFencesResults = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
 
         const VulkanSwapchainFrameSlotOperationRequest request = makeSwapchainFrameSlotOperationRequest(state, owner, extent);
@@ -10309,6 +10518,7 @@ void render_vulkan_instance_test_object::test<105>()
     ScopedFakeState          scope(state);
     VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
     acquireCompleteSwapchainChain(state, owner, extent);
+    acquireResidentUploadDestination(state, owner);
     state.mWaitForFencesResults = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
 
     const auto pending_result = owner.acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
@@ -11233,6 +11443,223 @@ void render_vulkan_instance_test_object::test<119>()
                    state.mDestroyedCommandPools.end() &&
                std::find(state.mDestroyedBuffers.begin(), state.mDestroyedBuffers.end(), state.mUploadDestinationBuffer) !=
                    state.mDestroyedBuffers.end() &&
+               owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<120>()
+{
+    constexpr VkExtent2D     extent{ 64, 64 };
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, extent);
+    const VulkanSwapchainFrameSlotOperationRequest request = makeSwapchainFrameSlotOperationRequest(state, owner, extent);
+
+    const std::size_t owner_checks   = state.mInstanceOwnerChecks;
+    const std::size_t window_checks  = state.mSurfaceWindowChecks;
+    const std::size_t lookups        = state.mDeviceProcAddrCalls;
+    const auto        missing_result = owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+    const auto&       missing_error  = requireSwapchainFrameSlotPresentationError(missing_result);
+    ensure("draw rejects an absent upload destination before callbacks, dispatch, or frame work",
+           missing_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive && !missing_error.mOperationError &&
+               state.mInstanceOwnerChecks == owner_checks && state.mSurfaceWindowChecks == window_checks &&
+               state.mDeviceProcAddrCalls == lookups && state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 &&
+               state.mBindVertexBufferCalls == 0 && state.mDrawCalls == 0);
+
+    state.mMemoryProperties.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    ensure("the nonresident fixture acquires source and destination without a transfer",
+           !owner.acquireUploadSourceGeneration(makeUploadSourceRequest(state, owner)) &&
+               !owner.acquireUploadDestinationGeneration(makeUploadDestinationRequest(state, owner)) &&
+               owner.hasUploadDestinationGeneration() && !owner.uploadDestinationIsResident());
+    const std::size_t nonresident_owner_checks  = state.mInstanceOwnerChecks;
+    const std::size_t nonresident_window_checks = state.mSurfaceWindowChecks;
+    const std::size_t nonresident_lookups       = state.mDeviceProcAddrCalls;
+    const auto  nonresident_result = owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+    const auto& nonresident_error  = requireSwapchainFrameSlotPresentationError(nonresident_result);
+    ensure("draw rejects a structurally live but nonresident destination before callbacks or frame work",
+           nonresident_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive &&
+               !nonresident_error.mOperationError && state.mInstanceOwnerChecks == nonresident_owner_checks &&
+               state.mSurfaceWindowChecks == nonresident_window_checks && state.mDeviceProcAddrCalls == nonresident_lookups &&
+               state.mWaitForFencesCalls == 0 && state.mAcquireNextImageCalls == 0 && state.mBindVertexBufferCalls == 0 &&
+               state.mDrawCalls == 0 && owner.reset());
+
+    FakeState                wrong_handle_state;
+    ScopedFakeState          wrong_handle_scope(wrong_handle_state);
+    VulkanInstanceGeneration wrong_handle_owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(wrong_handle_state)));
+    acquireCompleteSwapchainChain(wrong_handle_state, wrong_handle_owner, extent);
+    VulkanUploadSourceDescription wrong_description = makeUploadSourceDescription();
+    wrong_description.mHandle                       = { 7, 3 };
+    acquireResidentUploadDestination(wrong_handle_state, wrong_handle_owner, wrong_description);
+    const std::size_t wrong_owner_checks  = wrong_handle_state.mInstanceOwnerChecks;
+    const std::size_t wrong_window_checks = wrong_handle_state.mSurfaceWindowChecks;
+    const std::size_t wrong_lookups       = wrong_handle_state.mDeviceProcAddrCalls;
+    const auto        wrong_result        = wrong_handle_owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(
+        makeSwapchainFrameSlotOperationRequest(wrong_handle_state, wrong_handle_owner, extent),
+        VulkanSwapchainFrameClearColor{});
+    const auto& wrong_error = requireSwapchainFrameSlotPresentationError(wrong_result);
+    ensure("draw rejects a resident destination with the wrong logical resource identity before native frame work",
+           wrong_error.mCode == VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive && !wrong_error.mOperationError &&
+               wrong_handle_state.mInstanceOwnerChecks == wrong_owner_checks &&
+               wrong_handle_state.mSurfaceWindowChecks == wrong_window_checks && wrong_handle_state.mDeviceProcAddrCalls == wrong_lookups &&
+               wrong_handle_state.mWaitForFencesCalls == 0 && wrong_handle_state.mAcquireNextImageCalls == 0 &&
+               wrong_handle_state.mBindVertexBufferCalls == 0 && wrong_handle_state.mDrawCalls == 0 && wrong_handle_owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<121>()
+{
+    constexpr VkExtent2D     extent{ 64, 64 };
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, extent);
+    acquireResidentUploadDestination(state, owner);
+    const VkBuffer       original_buffer = owner.uploadDestinationBuffer();
+    const VkDeviceMemory original_memory = owner.uploadDestinationMemory();
+
+    UploadDestinationOperationAbaContext           replacement{ &state, &owner };
+    const VulkanSwapchainFrameSlotOperationRequest request{ owner.nativeWindowGeneration(),
+                                                            owner.swapchainDrawableExtent(),
+                                                            { &replacement, uploadDestinationOperationAbaOwnerIsCurrent },
+                                                            { &replacement, uploadDestinationOperationAbaWindowIsCurrent } };
+    const auto  result = owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(request, VulkanSwapchainFrameClearColor{});
+    const auto& error  = requireSwapchainFrameSlotPresentationError(result);
+    ensure("post-dispatch freshness can replace a destination with the same-looking native handles",
+           replacement.mOwnerChecks == 2 && replacement.mWindowChecks == 2 && replacement.mReset && replacement.mReacquired &&
+               owner.uploadDestinationIsResident() && owner.uploadDestinationBuffer() == original_buffer &&
+               owner.uploadDestinationMemory() == original_memory);
+    ensure("the destination pointer and epoch reject same-looking ABA before frame acquisition or binding",
+           error.mCode == VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive && !error.mOperationError &&
+               state.mAcquireNextImageCalls == 0 && state.mBindVertexBufferCalls == 0 && state.mDrawCalls == 0 && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<122>()
+{
+    constexpr VkExtent2D     extent{ 64, 64 };
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, extent);
+    acquireResidentUploadDestination(state, owner, makeUploadSourceDescription(), false);
+    const VkBuffer       destination_buffer = owner.uploadDestinationBuffer();
+    const VkDeviceMemory destination_memory = owner.uploadDestinationMemory();
+    const VkCommandPool  transfer_pool      = owner.uploadTransferCommandPool();
+    const VkFence        transfer_fence     = owner.uploadTransferFence();
+    state.mWaitForFencesResults             = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
+
+    const auto pending_result = owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(
+        makeSwapchainFrameSlotOperationRequest(state, owner, extent), VulkanSwapchainFrameClearColor{});
+    const auto& pending_error = requireSwapchainFrameSlotPresentationError(pending_result);
+    ensure("a submitted draw retains the exact destination and refuses direct reset atomically",
+           pending_error.mOperationError &&
+               pending_error.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending &&
+               owner.hasUploadDestinationGeneration() && !owner.resetUploadDestinationGeneration() &&
+               !owner.resetSwapchainFrameSlotGeneration() && !owner.resetSwapchainImagesGeneration() &&
+               owner.uploadDestinationBuffer() == destination_buffer && owner.uploadDestinationMemory() == destination_memory &&
+               owner.hasUploadTransferGeneration() && owner.uploadTransferCommandPool() == transfer_pool &&
+               owner.uploadTransferFence() == transfer_fence && owner.hasSwapchainFrameSlotGeneration() && state.mDestroyBufferCalls == 0 &&
+               state.mFreeMemoryCalls == 0);
+
+    VulkanInstanceGeneration moved(std::move(owner));
+    ensure("aggregate move transfers the active destination and frame-slot retention without teardown",
+           owner.instance() == VK_NULL_HANDLE && !owner.hasUploadDestinationGeneration() && !owner.hasSwapchainFrameSlotGeneration() &&
+               moved.uploadDestinationBuffer() == destination_buffer && moved.uploadDestinationMemory() == destination_memory &&
+               moved.hasSwapchainFrameSlotGeneration() && moved.uploadTransferCommandPool() == transfer_pool &&
+               moved.uploadTransferFence() == transfer_fence && !moved.resetUploadDestinationGeneration() &&
+               moved.hasUploadTransferGeneration() && state.mDestroyBufferCalls == 0 && state.mFreeMemoryCalls == 0);
+    const auto  completion_result = moved.retrySwapchainFrameSlotPresentationCompletion(makeExactFrameSlotOperationRequest(moved));
+    const auto& completion        = requireSwapchainFrameSlotPresentationSuccess(completion_result);
+    ensure("active retry authenticates the moved destination through fence retirement",
+           completion.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented &&
+               moved.swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable);
+    ensure("fence retirement releases the frame slot's destination retention",
+           moved.hasUploadDestinationGeneration() && moved.resetUploadDestinationGeneration() && !moved.hasUploadDestinationGeneration());
+    ensure("direct destination reset preserves the reusable swapchain child chain",
+           moved.hasSwapchainGeneration() && moved.hasSwapchainImagesGeneration() && moved.hasSwapchainPresentationTargetGeneration() &&
+               moved.hasSwapchainPresentationPipelineGeneration() && moved.hasSwapchainFrameSlotGeneration());
+    ensure("direct destination reset destroys exactly its native allocation",
+           state.mDestroyBufferCalls == 1 && state.mFreeMemoryCalls == 1);
+    ensure("the completed aggregate remains fully resettable", moved.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<123>()
+{
+    constexpr VkExtent2D     initial_extent{ 64, 64 };
+    constexpr VkExtent2D     rebuilt_extent{ 96, 64 };
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, initial_extent);
+    acquireResidentUploadDestination(state, owner);
+    const LLRenderContract::BufferHandle destination_handle   = owner.uploadDestinationResourceHandle();
+    const std::uint64_t                  destination_identity = owner.uploadDestinationResidentContentIdentity();
+    const VkBuffer                       destination_buffer   = owner.uploadDestinationBuffer();
+    const VkDeviceMemory                 destination_memory   = owner.uploadDestinationMemory();
+    ensure("the resident destination is independent after source and transfer retirement",
+           destination_handle == SCREEN_TRIANGLE_HANDLE && destination_identity != 0 && !owner.hasUploadSourceGeneration() &&
+               !owner.hasUploadTransferGeneration());
+
+    requireSwapchainFrameSlotPresentationSuccess(owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(
+        makeSwapchainFrameSlotOperationRequest(state, owner, initial_extent), VulkanSwapchainFrameClearColor{}));
+    ensureSwapchainChainRebuildOutcome(owner.rebuildSwapchainChain(makeSwapchainChainRebuildRequest(state, owner, rebuilt_extent)),
+                                       VulkanSwapchainChainRebuildOutcome::Ready);
+    ensure("same-surface rebuild preserves the exact resident device-local destination",
+           owner.uploadDestinationResourceHandle() == destination_handle &&
+               owner.uploadDestinationResidentContentIdentity() == destination_identity &&
+               owner.uploadDestinationBuffer() == destination_buffer && owner.uploadDestinationMemory() == destination_memory &&
+               owner.uploadDestinationIsResident() && owner.uploadDestinationIsDeviceLocal() && !owner.uploadDestinationIsMapped());
+    requireSwapchainFrameSlotPresentationSuccess(owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(
+        makeSwapchainFrameSlotOperationRequest(state, owner, rebuilt_extent), VulkanSwapchainFrameClearColor{}));
+    ensure("the rebuilt slot binds and draws from the same destination without another upload submission",
+           state.mBindVertexBufferCalls == 2 && state.mOperationVertexBuffer == destination_buffer &&
+               state.mOperationVertexBufferOffset == 0 && state.mDrawCalls == 2 && !owner.hasUploadTransferGeneration() &&
+               owner.resetUploadDestinationGeneration() && owner.hasSwapchainPresentationTargetGeneration() &&
+               owner.hasSwapchainPresentationPipelineGeneration() && owner.hasSwapchainFrameSlotGeneration() && owner.reset());
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<124>()
+{
+    constexpr VkExtent2D     extent{ 64, 64 };
+    FakeState                state;
+    ScopedFakeState          scope(state);
+    VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+    acquireCompleteSwapchainChain(state, owner, extent);
+    auto wrong_description = makeUploadSourceDescription();
+    wrong_description.mBytes[0] ^= 0xff;
+    acquireResidentUploadDestination(state, owner, wrong_description);
+    auto& destination = VulkanInstanceGenerationTestAccess::uploadDestination(owner);
+    VulkanUploadDestinationGenerationTestAccess::forceContentIdentity(destination, LLRenderContract::SCREEN_TRIANGLE_CONTENT_IDENTITY);
+    ensure("the aggregate collision fixture has the canonical stable identity but a different immutable description",
+           destination.resourceHandle() == SCREEN_TRIANGLE_HANDLE &&
+               destination.expectedContentIdentity() == LLRenderContract::SCREEN_TRIANGLE_CONTENT_IDENTITY &&
+               destination.residentContentIdentity() == LLRenderContract::SCREEN_TRIANGLE_CONTENT_IDENTITY && destination.isResident() &&
+               !destination.matchesDescription(vulkanScreenTriangleUploadSourceDescription()));
+    const auto device_proc_addr_calls = state.mDeviceProcAddrCalls;
+    const auto wait_calls             = state.mWaitForFencesCalls;
+    const auto acquire_calls          = state.mAcquireNextImageCalls;
+    const auto bind_calls             = state.mBindVertexBufferCalls;
+    const auto draw_calls             = state.mDrawCalls;
+    const auto submit_calls           = state.mQueueSubmitCalls;
+    const auto present_calls          = state.mQueuePresentCalls;
+
+    const auto result = owner.acquireRenderPassDrawToPresentSwapchainFrameSlot(makeSwapchainFrameSlotOperationRequest(state, owner, extent),
+                                                                               VulkanSwapchainFrameClearColor{});
+    const auto& error = requireSwapchainFrameSlotPresentationError(result);
+    ensure("the aggregate rejects a resident noncanonical screen-triangle payload",
+           error.mCode == VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive && !error.mOperationError);
+    ensure("noncanonical payload rejection occurs before dispatch, acquisition, binding, submission, or presentation",
+           state.mDeviceProcAddrCalls == device_proc_addr_calls && state.mWaitForFencesCalls == wait_calls &&
+               state.mAcquireNextImageCalls == acquire_calls && state.mBindVertexBufferCalls == bind_calls &&
+               state.mDrawCalls == draw_calls && state.mQueueSubmitCalls == submit_calls && state.mQueuePresentCalls == present_calls &&
                owner.reset());
 }
 

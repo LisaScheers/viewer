@@ -16,6 +16,7 @@
 #include "llrendervulkanswapchainframeslot.h"
 #include "llrendervulkanswapchainpresentationpipeline.h"
 #include "llrendervulkanswapchainpresentationtarget.h"
+#include "lltextureuploadcontract.h"
 
 #include <algorithm>
 #include <cmath>
@@ -58,6 +59,7 @@ namespace
         PFN_vkCmdBeginRenderPass        mCmdBeginRenderPass     = nullptr;
         PFN_vkCmdEndRenderPass          mCmdEndRenderPass       = nullptr;
         PFN_vkCmdBindPipeline           mCmdBindPipeline        = nullptr;
+        PFN_vkCmdBindVertexBuffers      mCmdBindVertexBuffers   = nullptr;
         PFN_vkCmdSetViewport            mCmdSetViewport         = nullptr;
         PFN_vkCmdSetScissor             mCmdSetScissor          = nullptr;
         PFN_vkCmdDraw                   mCmdDraw                = nullptr;
@@ -70,6 +72,21 @@ namespace
     {
         return std::all_of(clear_color.mRgba.begin(), clear_color.mRgba.end(),
                            [](float component) { return std::isfinite(component) && component >= 0.0f && component <= 1.0f; });
+    }
+
+    bool validUploadDestination(const VulkanUploadDestinationGeneration& destination,
+                                const VulkanPhysicalDeviceGeneration&    physical_device,
+                                const VulkanLogicalDeviceGeneration&     logical_device) noexcept
+    {
+        constexpr VulkanUploadSourceDescription screen_triangle = vulkanScreenTriangleUploadSourceDescription();
+        return destination.createdFor(physical_device, logical_device) && destination.matchesDescription(screen_triangle) &&
+               destination.resourceHandle() == screen_triangle.mHandle &&
+               destination.expectedContentIdentity() == LLRenderContract::SCREEN_TRIANGLE_CONTENT_IDENTITY &&
+               destination.residentContentIdentity() == destination.expectedContentIdentity() && destination.isResident() &&
+               destination.buffer() != VK_NULL_HANDLE && destination.memory() != VK_NULL_HANDLE &&
+               destination.byteCount() == VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+               destination.usage() == (VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) &&
+               destination.allocationSize() >= VULKAN_UPLOAD_SOURCE_BYTE_COUNT && destination.isDeviceLocal() && !destination.isMapped();
     }
 
     VulkanSwapchainFrameSlotResolutionError failure(VulkanSwapchainFrameSlotResolutionCode         code,
@@ -329,12 +346,25 @@ VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(VulkanSwa
     mCmdBeginRenderPass(std::exchange(other.mCmdBeginRenderPass, nullptr)),
     mCmdEndRenderPass(std::exchange(other.mCmdEndRenderPass, nullptr)),
     mCmdBindPipeline(std::exchange(other.mCmdBindPipeline, nullptr)),
+    mCmdBindVertexBuffers(std::exchange(other.mCmdBindVertexBuffers, nullptr)),
     mCmdSetViewport(std::exchange(other.mCmdSetViewport, nullptr)),
     mCmdSetScissor(std::exchange(other.mCmdSetScissor, nullptr)),
     mCmdDraw(std::exchange(other.mCmdDraw, nullptr)),
     mCmdCopyImageToBuffer(std::exchange(other.mCmdCopyImageToBuffer, nullptr)),
     mQueuePresent(std::exchange(other.mQueuePresent, nullptr)),
     mReleaseSwapchainImages(std::exchange(other.mReleaseSwapchainImages, nullptr)),
+    mUploadDestinationPhysicalDeviceGeneration(std::exchange(other.mUploadDestinationPhysicalDeviceGeneration, nullptr)),
+    mActiveUploadDestinationGeneration(std::exchange(other.mActiveUploadDestinationGeneration, nullptr)),
+    mActiveUploadDestinationResourceHandle(std::exchange(other.mActiveUploadDestinationResourceHandle, {})),
+    mActiveUploadDestinationExpectedIdentity(std::exchange(other.mActiveUploadDestinationExpectedIdentity, 0)),
+    mActiveUploadDestinationResidentIdentity(std::exchange(other.mActiveUploadDestinationResidentIdentity, 0)),
+    mActiveUploadDestinationBuffer(std::exchange(other.mActiveUploadDestinationBuffer, VK_NULL_HANDLE)),
+    mActiveUploadDestinationMemory(std::exchange(other.mActiveUploadDestinationMemory, VK_NULL_HANDLE)),
+    mActiveUploadDestinationByteCount(std::exchange(other.mActiveUploadDestinationByteCount, 0)),
+    mActiveUploadDestinationUsage(std::exchange(other.mActiveUploadDestinationUsage, 0)),
+    mActiveUploadDestinationAllocationSize(std::exchange(other.mActiveUploadDestinationAllocationSize, 0)),
+    mActiveUploadDestinationMemoryTypeIndex(std::exchange(other.mActiveUploadDestinationMemoryTypeIndex, 0)),
+    mActiveUploadDestinationMemoryPropertyFlags(std::exchange(other.mActiveUploadDestinationMemoryPropertyFlags, 0)),
     mReadbackPhysicalDeviceGeneration(std::exchange(other.mReadbackPhysicalDeviceGeneration, nullptr)),
     mResolvedReadbackGeneration(std::exchange(other.mResolvedReadbackGeneration, nullptr)),
     mActiveReadbackGeneration(std::exchange(other.mActiveReadbackGeneration, nullptr)),
@@ -490,7 +520,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainImagesGeneration&        images_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       RecordingMode::LayoutOnly, nullptr, nullptr, nullptr, nullptr);
+                                       RecordingMode::LayoutOnly, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveClearPresentationDispatch(
@@ -500,7 +530,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainImagesGeneration&        images_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       RecordingMode::TransferClear, nullptr, nullptr, nullptr, nullptr);
+                                       RecordingMode::TransferClear, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveRenderPassPresentationDispatch(
@@ -511,20 +541,22 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainPresentationTargetGeneration& presentation_target_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       RecordingMode::RenderPassClear, nullptr, &presentation_target_generation, nullptr, nullptr);
+                                       RecordingMode::RenderPassClear, nullptr, &presentation_target_generation, nullptr, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveRenderPassDrawPresentationDispatch(
+    const VulkanPhysicalDeviceGeneration&                physical_device_generation,
     const VulkanLogicalDeviceGeneration&                 logical_device_generation,
     const VulkanSwapchainConfigurationGeneration&        configuration_generation,
     const VulkanSwapchainGeneration&                     swapchain_generation,
     const VulkanSwapchainImagesGeneration&               images_generation,
     const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
-    const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation) noexcept
+    const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
+    const VulkanUploadDestinationGeneration&             upload_destination_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
-                                       RecordingMode::RenderPassDraw, nullptr, &presentation_target_generation,
-                                       &presentation_pipeline_generation, nullptr);
+                                       RecordingMode::RenderPassDraw, &physical_device_generation, &presentation_target_generation,
+                                       &presentation_pipeline_generation, &upload_destination_generation, nullptr);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolveRenderPassDrawReadbackPresentationDispatch(
@@ -535,11 +567,12 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanSwapchainImagesGeneration&               images_generation,
     const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
     const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
+    const VulkanUploadDestinationGeneration&             upload_destination_generation,
     const VulkanSwapchainReadbackGeneration&             readback_generation) noexcept
 {
     return resolvePresentationDispatch(logical_device_generation, configuration_generation, swapchain_generation, images_generation,
                                        RecordingMode::RenderPassDrawReadback, &physical_device_generation, &presentation_target_generation,
-                                       &presentation_pipeline_generation, &readback_generation);
+                                       &presentation_pipeline_generation, &upload_destination_generation, &readback_generation);
 }
 
 VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::resolvePresentationDispatch(
@@ -551,6 +584,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VulkanPhysicalDeviceGeneration*                physical_device_generation,
     const VulkanSwapchainPresentationTargetGeneration*   presentation_target_generation,
     const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation,
+    const VulkanUploadDestinationGeneration*             upload_destination_generation,
     const VulkanSwapchainReadbackGeneration*             readback_generation) noexcept
 {
     if (mLogicalDeviceGeneration != &logical_device_generation || !valid(logical_device_generation) ||
@@ -615,6 +649,11 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     const VkPipelineLayout presentation_pipeline_layout =
         draw_required ? presentation_pipeline_generation->pipelineLayout() : VK_NULL_HANDLE;
     const VkPipeline presentation_pipeline = draw_required ? presentation_pipeline_generation->pipeline() : VK_NULL_HANDLE;
+    if (draw_required && (!physical_device_generation || !upload_destination_generation ||
+                          !validUploadDestination(*upload_destination_generation, *physical_device_generation, logical_device_generation)))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration, mDisposition);
+    }
     if (readback_required &&
         (!physical_device_generation || !readback_generation ||
          !readback_generation->createdFor(*physical_device_generation, logical_device_generation, configuration_generation,
@@ -633,10 +672,11 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
         mAcquireNextImage && mCmdPipelineBarrier && (!transfer_clear_required || mCmdClearColorImage) &&
         (!render_pass_required ||
          (mCmdBeginRenderPass && mCmdEndRenderPass && mPresentationTargetGeneration == presentation_target_generation)) &&
-        (!draw_required || (mCmdBindPipeline && mCmdSetViewport && mCmdSetScissor && mCmdDraw &&
+        (!draw_required || (mCmdBindPipeline && mCmdBindVertexBuffers && mCmdSetViewport && mCmdSetScissor && mCmdDraw &&
                             mPresentationPipelineGeneration == presentation_pipeline_generation &&
                             mPresentationPipelineLayout == presentation_pipeline_generation->pipelineLayout() &&
-                            mPresentationPipeline == presentation_pipeline_generation->pipeline())) &&
+                            mPresentationPipeline == presentation_pipeline_generation->pipeline() &&
+                            mUploadDestinationPhysicalDeviceGeneration == physical_device_generation)) &&
         (!readback_required || (mCmdCopyImageToBuffer && mReadbackPhysicalDeviceGeneration == physical_device_generation &&
                                 mResolvedReadbackGeneration == readback_generation)) &&
         mQueuePresent && mReleaseSwapchainImages;
@@ -746,6 +786,12 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
             return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
                                     VulkanSwapchainFrameSlotCommand::CmdBindPipeline);
         }
+        dispatch.mCmdBindVertexBuffers = resolveDevice<PFN_vkCmdBindVertexBuffers>(get_device_proc_addr, mDevice, "vkCmdBindVertexBuffers");
+        if (!dispatch.mCmdBindVertexBuffers)
+        {
+            return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
+                                    VulkanSwapchainFrameSlotCommand::CmdBindVertexBuffers);
+        }
         dispatch.mCmdSetViewport = resolveDevice<PFN_vkCmdSetViewport>(get_device_proc_addr, mDevice, "vkCmdSetViewport");
         if (!dispatch.mCmdSetViewport)
         {
@@ -801,6 +847,10 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration, mDisposition);
     }
+    if (draw_required && !validUploadDestination(*upload_destination_generation, *physical_device_generation, logical_device_generation))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration, mDisposition);
+    }
     if (readback_required &&
         (!readback_generation->createdFor(*physical_device_generation, logical_device_generation, configuration_generation,
                                           swapchain_generation, images_generation) ||
@@ -833,12 +883,14 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::reso
     if (draw_required)
     {
         mCmdBindPipeline                = dispatch.mCmdBindPipeline;
+        mCmdBindVertexBuffers                      = dispatch.mCmdBindVertexBuffers;
         mCmdSetViewport                 = dispatch.mCmdSetViewport;
         mCmdSetScissor                  = dispatch.mCmdSetScissor;
         mCmdDraw                        = dispatch.mCmdDraw;
         mPresentationPipelineGeneration = presentation_pipeline_generation;
         mPresentationPipelineLayout     = presentation_pipeline_layout;
         mPresentationPipeline           = presentation_pipeline;
+        mUploadDestinationPhysicalDeviceGeneration = physical_device_generation;
     }
     if (readback_required)
     {
@@ -1004,7 +1056,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retr
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireToPresent() noexcept
 {
-    return executeAcquireToPresent(RecordingMode::LayoutOnly, nullptr, nullptr, nullptr, nullptr);
+    return executeAcquireToPresent(RecordingMode::LayoutOnly, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireClearToPresent(
@@ -1014,7 +1066,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor, mDisposition);
     }
-    return executeAcquireToPresent(RecordingMode::TransferClear, &clear_color, nullptr, nullptr, nullptr);
+    return executeAcquireToPresent(RecordingMode::TransferClear, &clear_color, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireRenderPassClearToPresent(
@@ -1025,29 +1077,70 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor, mDisposition);
     }
-    return executeAcquireToPresent(RecordingMode::RenderPassClear, &clear_color, &presentation_target_generation, nullptr, nullptr);
+    return executeAcquireToPresent(RecordingMode::RenderPassClear, &clear_color, nullptr, &presentation_target_generation, nullptr, nullptr,
+                                   nullptr);
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireRenderPassDrawToPresent(
+    const VulkanPhysicalDeviceGeneration&                physical_device_generation,
     const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
     const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
+    const VulkanUploadDestinationGeneration&             upload_destination_generation,
     const VulkanSwapchainFrameClearColor&                clear_color) noexcept
 {
     if (!validClearColor(clear_color))
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor, mDisposition);
     }
-    return executeAcquireToPresent(RecordingMode::RenderPassDraw, &clear_color, &presentation_target_generation,
-                                   &presentation_pipeline_generation, nullptr);
+    return executeAcquireToPresent(RecordingMode::RenderPassDraw, &clear_color, &physical_device_generation,
+                                   &presentation_target_generation, &presentation_pipeline_generation, &upload_destination_generation,
+                                   nullptr);
 }
 
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireRenderPassDrawReadbackToPresent(
+    const VulkanPhysicalDeviceGeneration&                physical_device_generation,
     const VulkanSwapchainPresentationTargetGeneration&   presentation_target_generation,
     const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
+    const VulkanUploadDestinationGeneration&             upload_destination_generation,
     VulkanSwapchainReadbackGeneration&                   readback_generation) noexcept
 {
-    return executeAcquireToPresent(RecordingMode::RenderPassDrawReadback, nullptr, &presentation_target_generation,
-                                   &presentation_pipeline_generation, &readback_generation);
+    return executeAcquireToPresent(RecordingMode::RenderPassDrawReadback, nullptr, &physical_device_generation,
+                                   &presentation_target_generation, &presentation_pipeline_generation, &upload_destination_generation,
+                                   &readback_generation);
+}
+
+bool VulkanSwapchainFrameSlotGeneration::activeUploadDestinationMatchesSnapshot() const noexcept
+{
+    if (!mActiveUploadDestinationGeneration || !mUploadDestinationPhysicalDeviceGeneration || !mLogicalDeviceGeneration)
+    {
+        return false;
+    }
+    const auto& destination = *mActiveUploadDestinationGeneration;
+    return validUploadDestination(destination, *mUploadDestinationPhysicalDeviceGeneration, *mLogicalDeviceGeneration) &&
+           destination.resourceHandle() == mActiveUploadDestinationResourceHandle &&
+           destination.expectedContentIdentity() == mActiveUploadDestinationExpectedIdentity &&
+           destination.residentContentIdentity() == mActiveUploadDestinationResidentIdentity && destination.isResident() &&
+           destination.buffer() == mActiveUploadDestinationBuffer && destination.memory() == mActiveUploadDestinationMemory &&
+           destination.byteCount() == mActiveUploadDestinationByteCount && destination.usage() == mActiveUploadDestinationUsage &&
+           destination.allocationSize() == mActiveUploadDestinationAllocationSize &&
+           destination.memoryTypeIndex() == mActiveUploadDestinationMemoryTypeIndex &&
+           destination.memoryPropertyFlags() == mActiveUploadDestinationMemoryPropertyFlags && destination.isDeviceLocal() &&
+           !destination.isMapped();
+}
+
+void VulkanSwapchainFrameSlotGeneration::clearActiveUploadDestination() noexcept
+{
+    mActiveUploadDestinationGeneration          = nullptr;
+    mActiveUploadDestinationResourceHandle      = {};
+    mActiveUploadDestinationExpectedIdentity    = 0;
+    mActiveUploadDestinationResidentIdentity    = 0;
+    mActiveUploadDestinationBuffer              = VK_NULL_HANDLE;
+    mActiveUploadDestinationMemory              = VK_NULL_HANDLE;
+    mActiveUploadDestinationByteCount           = 0;
+    mActiveUploadDestinationUsage               = 0;
+    mActiveUploadDestinationAllocationSize      = 0;
+    mActiveUploadDestinationMemoryTypeIndex     = 0;
+    mActiveUploadDestinationMemoryPropertyFlags = 0;
 }
 
 bool VulkanSwapchainFrameSlotGeneration::activeReadbackMatchesSnapshot() const noexcept
@@ -1078,8 +1171,10 @@ void VulkanSwapchainFrameSlotGeneration::clearActiveReadback() noexcept
 VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::executeAcquireToPresent(
     RecordingMode                                        recording_mode,
     const VulkanSwapchainFrameClearColor*                clear_color,
+    const VulkanPhysicalDeviceGeneration*                physical_device_generation,
     const VulkanSwapchainPresentationTargetGeneration*   presentation_target_generation,
     const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation,
+    const VulkanUploadDestinationGeneration*             upload_destination_generation,
     VulkanSwapchainReadbackGeneration*                   readback_generation) noexcept
 {
     if (mDisposition != VulkanSwapchainFrameSlotDisposition::Reusable)
@@ -1108,9 +1203,16 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration, mDisposition);
     }
+    if (draw_required && (!physical_device_generation || mUploadDestinationPhysicalDeviceGeneration != physical_device_generation ||
+                          !upload_destination_generation || !mLogicalDeviceGeneration ||
+                          !validUploadDestination(*upload_destination_generation, *physical_device_generation, *mLogicalDeviceGeneration)))
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration, mDisposition);
+    }
     if (readback_required &&
-        (!readback_generation || !mReadbackPhysicalDeviceGeneration || mResolvedReadbackGeneration != readback_generation ||
-         !mLogicalDeviceGeneration || !mConfigurationGeneration || !mSwapchainGeneration || !mImagesGeneration ||
+        (!physical_device_generation || mReadbackPhysicalDeviceGeneration != physical_device_generation || !readback_generation ||
+         mResolvedReadbackGeneration != readback_generation || !mLogicalDeviceGeneration || !mConfigurationGeneration ||
+         !mSwapchainGeneration || !mImagesGeneration ||
          !readback_generation->createdFor(*mReadbackPhysicalDeviceGeneration, *mLogicalDeviceGeneration, *mConfigurationGeneration,
                                           *mSwapchainGeneration, *mImagesGeneration) ||
          readback_generation->buffer() == VK_NULL_HANDLE || !readback_generation->isMapped() ||
@@ -1129,6 +1231,21 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     else if (clear_color)
     {
         clear_color_snapshot = *clear_color;
+    }
+
+    if (draw_required)
+    {
+        mActiveUploadDestinationGeneration          = upload_destination_generation;
+        mActiveUploadDestinationResourceHandle      = upload_destination_generation->resourceHandle();
+        mActiveUploadDestinationExpectedIdentity    = upload_destination_generation->expectedContentIdentity();
+        mActiveUploadDestinationResidentIdentity    = upload_destination_generation->residentContentIdentity();
+        mActiveUploadDestinationBuffer              = upload_destination_generation->buffer();
+        mActiveUploadDestinationMemory              = upload_destination_generation->memory();
+        mActiveUploadDestinationByteCount           = upload_destination_generation->byteCount();
+        mActiveUploadDestinationUsage               = upload_destination_generation->usage();
+        mActiveUploadDestinationAllocationSize      = upload_destination_generation->allocationSize();
+        mActiveUploadDestinationMemoryTypeIndex     = upload_destination_generation->memoryTypeIndex();
+        mActiveUploadDestinationMemoryPropertyFlags = upload_destination_generation->memoryPropertyFlags();
     }
 
     if (readback_required)
@@ -1163,6 +1280,8 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
             return VulkanSwapchainFrameSlotCommand::CmdEndRenderPass;
         if (draw_required && !mCmdBindPipeline)
             return VulkanSwapchainFrameSlotCommand::CmdBindPipeline;
+        if (draw_required && !mCmdBindVertexBuffers)
+            return VulkanSwapchainFrameSlotCommand::CmdBindVertexBuffers;
         if (draw_required && !mCmdSetViewport)
             return VulkanSwapchainFrameSlotCommand::CmdSetViewport;
         if (draw_required && !mCmdSetScissor)
@@ -1183,6 +1302,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     };
     if (const auto command = missing_command())
     {
+        clearActiveUploadDestination();
         clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition, command);
     }
@@ -1193,6 +1313,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
                                                       : VulkanSwapchainFrameSlotDisposition::Reusable;
+        clearActiveUploadDestination();
         clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::WaitForFences, result);
@@ -1200,12 +1321,20 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     mSubmissionFenceSignaled        = true;
     mPresentCompletionFenceSignaled = true;
 
+    if (draw_required && !activeUploadDestinationMatchesSnapshot())
+    {
+        clearActiveUploadDestination();
+        clearActiveReadback();
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration, mDisposition);
+    }
+
     if (readback_required &&
         (!activeReadbackMatchesSnapshot() ||
          !mActiveReadbackGeneration->createdFor(*mReadbackPhysicalDeviceGeneration, *mLogicalDeviceGeneration, *mConfigurationGeneration,
                                                 *mSwapchainGeneration, *mImagesGeneration) ||
          !mActiveReadbackGeneration->poisonForPresentationObservation()))
     {
+        clearActiveUploadDestination();
         clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition);
     }
@@ -1215,12 +1344,14 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
                                VK_NULL_HANDLE, &image_index);
     if (result == VK_ERROR_OUT_OF_DATE_KHR)
     {
+        clearActiveUploadDestination();
         clearActiveReadback();
         return VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::SwapchainReplacementRequired,
                                                             std::nullopt };
     }
     if (result == VK_ERROR_SURFACE_LOST_KHR)
     {
+        clearActiveUploadDestination();
         clearActiveReadback();
         return VulkanSwapchainFrameSlotPresentationSuccess{ VulkanSwapchainFrameSlotPresentationOutcome::SurfaceLost, std::nullopt };
     }
@@ -1228,6 +1359,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     {
         mDisposition = result == VK_ERROR_DEVICE_LOST ? VulkanSwapchainFrameSlotDisposition::DeviceLost
                                                       : VulkanSwapchainFrameSlotDisposition::Reusable;
+        clearActiveUploadDestination();
         clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::AcquireNextImage, result);
@@ -1246,6 +1378,11 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
     if (readback_required && !activeReadbackMatchesSnapshot())
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition, std::nullopt,
+                                VK_SUCCESS, image_index);
+    }
+    if (draw_required && !activeUploadDestinationMatchesSnapshot())
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration, mDisposition, std::nullopt,
                                 VK_SUCCESS, image_index);
     }
     VkRenderPass  presentation_render_pass = VK_NULL_HANDLE;
@@ -1282,6 +1419,11 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration, mDisposition,
                                 std::nullopt, VK_SUCCESS, image_index);
     }
+    if (draw_required && !activeUploadDestinationMatchesSnapshot())
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration, mDisposition, std::nullopt,
+                                VK_SUCCESS, image_index);
+    }
 
     result = mResetCommandBuffer(mCommandBuffer, 0);
     if (result != VK_SUCCESS)
@@ -1289,6 +1431,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveUploadDestination();
             clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
@@ -1303,6 +1446,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveUploadDestination();
             clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
@@ -1365,6 +1509,9 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         if (draw_required)
         {
             mCmdBindPipeline(mCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mPresentationPipeline);
+
+            const VkDeviceSize vertex_buffer_offset = 0;
+            mCmdBindVertexBuffers(mCommandBuffer, 0, 1, &mActiveUploadDestinationBuffer, &vertex_buffer_offset);
 
             VkViewport viewport{};
             viewport.width    = static_cast<float>(presentation_extent.width);
@@ -1435,6 +1582,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveUploadDestination();
             clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
@@ -1448,6 +1596,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveUploadDestination();
             clearActiveReadback();
         }
         else if (result != VK_ERROR_OUT_OF_HOST_MEMORY && result != VK_ERROR_OUT_OF_DEVICE_MEMORY)
@@ -1504,6 +1653,11 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::QueuePresent, VK_SUCCESS, mAcquiredImageIndex);
+    }
+    if (mActiveUploadDestinationGeneration && !activeUploadDestinationMatchesSnapshot())
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration, mDisposition, std::nullopt,
+                                VK_SUCCESS, mAcquiredImageIndex);
     }
 
     VkSwapchainPresentFenceInfoKHR fence_info{};
@@ -1576,6 +1730,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
             {
                 mPendingSubmissionReportedDeviceLost = false;
                 mDisposition                         = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+                clearActiveUploadDestination();
                 clearActiveReadback();
                 return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                         VulkanSwapchainFrameSlotCommand::QueueSubmit, VK_ERROR_DEVICE_LOST, mAcquiredImageIndex);
@@ -1588,6 +1743,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
         {
             mPendingSubmissionReportedDeviceLost = false;
             mDisposition                         = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveUploadDestination();
             clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
@@ -1611,6 +1767,7 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
         if (result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveUploadDestination();
             clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
@@ -1629,10 +1786,14 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
     if (present_result == VK_ERROR_DEVICE_LOST)
     {
         mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+        clearActiveUploadDestination();
         clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::QueuePresent, present_result, image_index);
     }
+
+    const bool invalid_upload_destination = mActiveUploadDestinationGeneration && !activeUploadDestinationMatchesSnapshot();
+    clearActiveUploadDestination();
 
     std::optional<VulkanSwapchainReadbackObservation> observation;
     bool                                              invalid_readback = false;
@@ -1647,6 +1808,11 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::r
     }
 
     mDisposition = VulkanSwapchainFrameSlotDisposition::Reusable;
+    if (invalid_upload_destination)
+    {
+        return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration, mDisposition, std::nullopt,
+                                VK_SUCCESS, image_index);
+    }
     if (invalid_readback)
     {
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainReadbackGeneration, mDisposition, std::nullopt,
@@ -1691,6 +1857,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::canc
             mAcquiredImageIndex.reset();
             mCancellationPhase = CancellationPhase::Idle;
             mDisposition       = VulkanSwapchainFrameSlotDisposition::Reusable;
+            clearActiveUploadDestination();
             clearActiveReadback();
             return mDisposition;
         }
@@ -1700,6 +1867,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::canc
                                                       : VulkanSwapchainFrameSlotDisposition::ReleaseIndeterminate;
         if (mDisposition == VulkanSwapchainFrameSlotDisposition::DeviceLost)
         {
+            clearActiveUploadDestination();
             clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
@@ -1732,6 +1900,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::canc
         if (reset_result == VK_ERROR_DEVICE_LOST)
         {
             mDisposition = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveUploadDestination();
             clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
@@ -1833,6 +2002,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retr
             mCancellationSubmissionPending        = false;
             mCancellationSubmitReportedDeviceLost = false;
             mDisposition                          = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+            clearActiveUploadDestination();
             clearActiveReadback();
         }
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
@@ -1844,6 +2014,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retr
     {
         mCancellationSubmitReportedDeviceLost = false;
         mDisposition                          = VulkanSwapchainFrameSlotDisposition::DeviceLost;
+        clearActiveUploadDestination();
         clearActiveReadback();
         return operationFailure(VulkanSwapchainFrameSlotOperationCode::CommandFailure, mDisposition,
                                 VulkanSwapchainFrameSlotCommand::QueueSubmit, VK_ERROR_DEVICE_LOST, mAcquiredImageIndex);
@@ -1876,7 +2047,7 @@ VulkanSwapchainFrameSlotOperationResult VulkanSwapchainFrameSlotGeneration::retr
 
 void VulkanSwapchainFrameSlotGeneration::reset() noexcept
 {
-    if (mActiveReadbackGeneration || mDisposition == VulkanSwapchainFrameSlotDisposition::Pending ||
+    if (mActiveUploadDestinationGeneration || mActiveReadbackGeneration || mDisposition == VulkanSwapchainFrameSlotDisposition::Pending ||
         mDisposition == VulkanSwapchainFrameSlotDisposition::ImageAcquired ||
         mDisposition == VulkanSwapchainFrameSlotDisposition::SubmissionPending ||
         mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady ||
@@ -1954,12 +2125,15 @@ void VulkanSwapchainFrameSlotGeneration::reset() noexcept
     mCmdBeginRenderPass               = nullptr;
     mCmdEndRenderPass                 = nullptr;
     mCmdBindPipeline                  = nullptr;
+    mCmdBindVertexBuffers                      = nullptr;
     mCmdSetViewport                   = nullptr;
     mCmdSetScissor                    = nullptr;
     mCmdDraw                          = nullptr;
     mCmdCopyImageToBuffer             = nullptr;
     mQueuePresent                     = nullptr;
     mReleaseSwapchainImages           = nullptr;
+    mUploadDestinationPhysicalDeviceGeneration = nullptr;
+    clearActiveUploadDestination();
     mReadbackPhysicalDeviceGeneration = nullptr;
     mResolvedReadbackGeneration       = nullptr;
     clearActiveReadback();

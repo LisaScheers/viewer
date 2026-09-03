@@ -110,6 +110,7 @@ public:
 
 private:
     friend struct VulkanUploadDestinationGenerationFactory;
+    friend struct VulkanUploadDestinationGenerationTestAccess;
     friend class VulkanUploadTransferGeneration;
 
     VulkanUploadDestinationGeneration(const VulkanPhysicalDeviceGeneration& physical_device_generation,

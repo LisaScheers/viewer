@@ -15,6 +15,7 @@
 
 #include "linden_common.h"
 
+#include "lltextureuploaddiagnostic.h"
 #include "llwindowmacosxvulkan-objc.h"
 #include "llwindowmacosxvulkan.h"
 #include "lltut.h"
@@ -107,7 +108,8 @@ struct FakeState
         mMemoryProperties.memoryHeapCount              = 1;
         mMemoryProperties.memoryHeaps[0].size          = 64 * 1024 * 1024;
         mMemoryProperties.memoryTypeCount              = 1;
-        mMemoryProperties.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        mMemoryProperties.memoryTypes[0].propertyFlags =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         mMemoryProperties.memoryTypes[0].heapIndex     = 0;
     }
 
@@ -226,14 +228,24 @@ struct FakeState
     VkPhysicalDeviceMemoryProperties mMemoryProperties{};
     VkBuffer                         mReadbackBuffer          = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x81000));
     VkDeviceMemory                   mReadbackMemory          = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x82000));
-    std::uint8_t                     mReadbackMappedByte      = 0;
-    VkDeviceSize                     mReadbackBufferSize      = 0;
-    std::size_t                      mCreateBufferCount       = 0;
-    std::size_t                      mAllocateMemoryCount     = 0;
-    std::size_t                      mMapMemoryCount          = 0;
-    std::size_t                      mUnmapMemoryCount        = 0;
-    std::size_t                      mDestroyBufferCount      = 0;
-    std::size_t                      mFreeMemoryCount         = 0;
+    VkBuffer                         mUploadSourceBuffer      = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x83000));
+    VkDeviceMemory                   mUploadSourceMemory      = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x84000));
+    VkBuffer                         mUploadDestinationBuffer = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x85000));
+    VkDeviceMemory                   mUploadDestinationMemory = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x86000));
+    VkBuffer                         mLastCreatedBuffer       = VK_NULL_HANDLE;
+    std::array<std::uint8_t, LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT> mUploadMappedBytes{};
+    std::uint8_t                                                              mReadbackMappedByte            = 0;
+    VkDeviceSize                                                              mReadbackBufferSize            = 0;
+    std::size_t                                                               mCreateBufferCount             = 0;
+    std::size_t                                                               mAllocateMemoryCount           = 0;
+    std::size_t                                                               mMapMemoryCount                = 0;
+    std::size_t                                                               mUnmapMemoryCount              = 0;
+    std::size_t                                                               mDestroyBufferCount            = 0;
+    std::size_t                                                               mFreeMemoryCount               = 0;
+    std::size_t                                                               mUploadSourceDestroyCount      = 0;
+    std::size_t                                                               mUploadSourceFreeCount         = 0;
+    std::size_t                                                               mUploadDestinationDestroyCount = 0;
+    std::size_t                                                               mUploadDestinationFreeCount    = 0;
     std::size_t                      mCreateCommandPoolCount  = 0;
     std::size_t                      mDestroyCommandPoolCount = 0;
     std::size_t                      mCreateSemaphoreCount    = 0;
@@ -246,6 +258,8 @@ struct FakeState
     std::size_t                mAcquireNextImageCount      = 0;
     std::uint32_t              mAcquiredImageIndex         = 0;
     std::size_t                mPipelineBarrierCount       = 0;
+    std::size_t                                                               mCopyBufferCount               = 0;
+    bool                                                                      mInvalidCopyBuffer             = false;
     std::size_t                mClearColorImageCount       = 0;
     std::size_t                mBeginRenderPassCount       = 0;
     std::size_t                mEndRenderPassCount         = 0;
@@ -256,12 +270,21 @@ struct FakeState
     VkClearValue               mRenderPassClear{};
     VkSubpassContents          mRenderPassContents         = VK_SUBPASS_CONTENTS_MAX_ENUM;
     std::size_t                mBindPipelineCount          = 0;
+    std::size_t                                                               mBindVertexBuffersCount     = 0;
     std::size_t                mSetViewportCount           = 0;
     std::size_t                mSetScissorCount            = 0;
     std::size_t                mDrawCount                  = 0;
     VkCommandBuffer            mDrawCommandBuffer          = VK_NULL_HANDLE;
     VkPipelineBindPoint        mPipelineBindPoint          = VK_PIPELINE_BIND_POINT_MAX_ENUM;
     VkPipeline                 mBoundPipeline              = VK_NULL_HANDLE;
+    VkBuffer                                                                  mBoundVertexBuffer          = VK_NULL_HANDLE;
+    VkDeviceSize                                                              mBoundVertexOffset = std::numeric_limits<VkDeviceSize>::max();
+    std::uint32_t              mFirstVertexBinding         = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t              mVertexBindingCount         = 0;
+    std::size_t                mCommandOrder               = 0;
+    std::size_t                mBindPipelineOrder          = 0;
+    std::size_t                mBindVertexBuffersOrder     = 0;
+    std::size_t                mDrawOrder                  = 0;
     std::uint32_t              mFirstViewport              = std::numeric_limits<std::uint32_t>::max();
     VkViewport                 mViewport{};
     std::uint32_t              mFirstScissor = std::numeric_limits<std::uint32_t>::max();
@@ -1078,6 +1101,24 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_b
     }
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeCmdCopyBuffer(VkCommandBuffer     command_buffer,
+                                             VkBuffer            source,
+                                             VkBuffer            destination,
+                                             std::uint32_t       region_count,
+                                             const VkBufferCopy* regions) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer && source == gState->mUploadSourceBuffer &&
+        destination == gState->mUploadDestinationBuffer && region_count == 1 && regions && regions[0].srcOffset == 0 &&
+        regions[0].dstOffset == 0 && regions[0].size == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT)
+    {
+        ++gState->mCopyBufferCount;
+    }
+    else if (gState)
+    {
+        gState->mInvalidCopyBuffer = true;
+    }
+}
+
 VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer               command_buffer,
                                                    VkImage                       image,
                                                    VkImageLayout                 image_layout,
@@ -1132,6 +1173,25 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer     command_buffe
         gState->mDrawCommandBuffer = command_buffer;
         gState->mPipelineBindPoint = pipeline_bind_point;
         gState->mBoundPipeline     = pipeline;
+        gState->mBindPipelineOrder = ++gState->mCommandOrder;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindVertexBuffers(VkCommandBuffer     command_buffer,
+                                                    std::uint32_t       first_binding,
+                                                    std::uint32_t       binding_count,
+                                                    const VkBuffer*     buffers,
+                                                    const VkDeviceSize* offsets) noexcept
+{
+    if (gState && command_buffer == gState->mCommandBuffer && binding_count == 1 && buffers && offsets)
+    {
+        ++gState->mBindVertexBuffersCount;
+        gState->mDrawCommandBuffer      = command_buffer;
+        gState->mFirstVertexBinding     = first_binding;
+        gState->mVertexBindingCount     = binding_count;
+        gState->mBoundVertexBuffer      = buffers[0];
+        gState->mBoundVertexOffset      = offsets[0];
+        gState->mBindVertexBuffersOrder = ++gState->mCommandOrder;
     }
 }
 
@@ -1170,6 +1230,7 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdDraw(VkCommandBuffer command_buffer,
     if (gState && command_buffer == gState->mCommandBuffer)
     {
         ++gState->mDrawCount;
+        gState->mDrawOrder         = ++gState->mCommandOrder;
         gState->mDrawVertexCount   = vertex_count;
         gState->mDrawInstanceCount = instance_count;
         gState->mDrawFirstVertex   = first_vertex;
@@ -1226,21 +1287,47 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice,
     }
     ++gState->mCreateBufferCount;
     gState->mReadbackBufferSize = create_info->size;
-    *buffer                     = gState->mReadbackBuffer;
+    if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+    {
+        *buffer = gState->mUploadSourceBuffer;
+    }
+    else if (create_info->usage == (VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+    {
+        *buffer = gState->mUploadDestinationBuffer;
+    }
+    else
+    {
+        *buffer = gState->mReadbackBuffer;
+    }
+    gState->mLastCreatedBuffer = *buffer;
     return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice, VkBuffer buffer, const VkAllocationCallbacks*) noexcept
 {
-    if (gState && buffer == gState->mReadbackBuffer)
+    if (!gState)
+    {
+        return;
+    }
+    if (buffer == gState->mReadbackBuffer)
     {
         ++gState->mDestroyBufferCount;
+    }
+    else if (buffer == gState->mUploadSourceBuffer)
+    {
+        ++gState->mUploadSourceDestroyCount;
+    }
+    else if (buffer == gState->mUploadDestinationBuffer)
+    {
+        ++gState->mUploadDestinationDestroyCount;
     }
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice, VkBuffer buffer, VkMemoryRequirements* requirements) noexcept
 {
-    if (gState && buffer == gState->mReadbackBuffer && requirements)
+    if (gState &&
+        (buffer == gState->mReadbackBuffer || buffer == gState->mUploadSourceBuffer || buffer == gState->mUploadDestinationBuffer) &&
+        requirements)
     {
         *requirements = { gState->mReadbackBufferSize, 256, 1 };
     }
@@ -1257,39 +1344,68 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice,
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gState->mAllocateMemoryCount;
-    *memory = gState->mReadbackMemory;
+    *memory =
+        gState->mLastCreatedBuffer == gState->mUploadSourceBuffer
+            ? gState->mUploadSourceMemory
+            : (gState->mLastCreatedBuffer == gState->mUploadDestinationBuffer ? gState->mUploadDestinationMemory : gState->mReadbackMemory);
     return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks*) noexcept
 {
-    if (gState && memory == gState->mReadbackMemory)
+    if (!gState)
+    {
+        return;
+    }
+    if (memory == gState->mReadbackMemory)
     {
         ++gState->mFreeMemoryCount;
+    }
+    else if (memory == gState->mUploadSourceMemory)
+    {
+        ++gState->mUploadSourceFreeCount;
+    }
+    else if (memory == gState->mUploadDestinationMemory)
+    {
+        ++gState->mUploadDestinationFreeCount;
     }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset) noexcept
 {
-    return gState && buffer == gState->mReadbackBuffer && memory == gState->mReadbackMemory && offset == 0 ? VK_SUCCESS
-                                                                                                           : VK_ERROR_INITIALIZATION_FAILED;
+    const bool matching_pair = gState && ((buffer == gState->mReadbackBuffer && memory == gState->mReadbackMemory) ||
+                                          (buffer == gState->mUploadSourceBuffer && memory == gState->mUploadSourceMemory) ||
+                                          (buffer == gState->mUploadDestinationBuffer && memory == gState->mUploadDestinationMemory));
+    return matching_pair && offset == 0 ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
     fakeMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** data) noexcept
 {
-    if (!gState || memory != gState->mReadbackMemory || offset != 0 || size != VK_WHOLE_SIZE || flags != 0 || !data)
+    if (!gState || (memory != gState->mReadbackMemory && memory != gState->mUploadSourceMemory) || offset != 0 || size != VK_WHOLE_SIZE ||
+        flags != 0 || !data)
     {
         return VK_ERROR_MEMORY_MAP_FAILED;
     }
     ++gState->mMapMemoryCount;
-    *data = &gState->mReadbackMappedByte;
+    *data = memory == gState->mUploadSourceMemory ? static_cast<void*>(gState->mUploadMappedBytes.data())
+                                                  : static_cast<void*>(&gState->mReadbackMappedByte);
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeFlushMappedMemoryRanges(VkDevice                   device,
+                                                           std::uint32_t              range_count,
+                                                           const VkMappedMemoryRange* ranges) noexcept
+{
+    return gState && device == gState->mDevice && range_count == 1 && ranges && ranges[0].sType == VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE &&
+                   ranges[0].memory == gState->mUploadSourceMemory && ranges[0].offset == 0 && ranges[0].size == VK_WHOLE_SIZE
+               ? VK_SUCCESS
+               : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice, VkDeviceMemory memory) noexcept
 {
-    if (gState && memory == gState->mReadbackMemory)
+    if (gState && (memory == gState->mReadbackMemory || memory == gState->mUploadSourceMemory))
     {
         ++gState->mUnmapMemoryCount;
     }
@@ -1338,10 +1454,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     if (std::strcmp(name, "vkAcquireNextImageKHR") == 0)
         return eraseFunctionType(fakeAcquireNextImage);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdPipelineBarrier);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdCopyBuffer);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdClearColorImage);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdBeginRenderPass);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdEndRenderPass);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdBindPipeline);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(CmdBindVertexBuffers);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdSetViewport);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdSetScissor);
     LL_MACOS_VULKAN_DEVICE_COMMAND(CmdDraw);
@@ -1356,6 +1474,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     LL_MACOS_VULKAN_DEVICE_COMMAND(FreeMemory);
     LL_MACOS_VULKAN_DEVICE_COMMAND(BindBufferMemory);
     LL_MACOS_VULKAN_DEVICE_COMMAND(MapMemory);
+    LL_MACOS_VULKAN_DEVICE_COMMAND(FlushMappedMemoryRanges);
     LL_MACOS_VULKAN_DEVICE_COMMAND(UnmapMemory);
 #undef LL_MACOS_VULKAN_DEVICE_COMMAND
     return nullptr;
@@ -1733,6 +1852,97 @@ bool acquireCompleteSwapchainChain(LLWindowMacOSXVulkan& owner) noexcept
            !owner.acquireSwapchainImagesGeneration() && !owner.acquireSwapchainPresentationTargetGeneration() &&
            !owner.acquireSwapchainPresentationPipelineGeneration() && !owner.acquireSwapchainReadbackGeneration() &&
            !owner.acquireSwapchainFrameSlotGeneration();
+}
+
+struct UploadOperationContext
+{
+    const LLWindowMacOSXVulkan*                     mOwner      = nullptr;
+    const LLRenderVulkan::VulkanInstanceGeneration* mGeneration = nullptr;
+};
+
+bool uploadInstanceOwnerIsCurrent(void* userdata, const LLRenderVulkan::VulkanInstanceGeneration& generation) noexcept
+{
+    const auto* context = static_cast<const UploadOperationContext*>(userdata);
+    return context && context->mOwner && context->mGeneration == &generation && context->mOwner->instanceGeneration() == &generation;
+}
+
+bool uploadWindowGenerationIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto* context = static_cast<const UploadOperationContext*>(userdata);
+    return context && context->mOwner && context->mOwner->isGenerationCurrent(native_window_generation);
+}
+
+struct ResidentUploadDestination
+{
+    LLRenderContract::BufferHandle mHandle;
+    std::uint64_t                  mExpectedIdentity = 0;
+    std::uint64_t                  mResidentIdentity = 0;
+    VkBuffer                       mBuffer           = VK_NULL_HANDLE;
+    VkDeviceMemory                 mMemory           = VK_NULL_HANDLE;
+};
+
+bool acquireResidentUploadDestination(LLWindowMacOSXVulkan& owner, ResidentUploadDestination& retained) noexcept
+{
+    using namespace LLRenderVulkan;
+
+    auto* generation = const_cast<VulkanInstanceGeneration*>(owner.instanceGeneration());
+    if (!generation)
+    {
+        return false;
+    }
+
+    const LLRenderContract::TextureUploadFixture fixture = LLRenderContract::makeTextureUploadFixture();
+    static_assert(sizeof(fixture.mScreenTriangle) == VULKAN_UPLOAD_SOURCE_BYTE_COUNT);
+    VulkanUploadSourceDescription description;
+    description.mHandle = LLRenderContract::StreamingUploadHandles{}.mScreenTriangle;
+    std::memcpy(description.mBytes.data(), fixture.mScreenTriangle.data(), description.mBytes.size());
+
+    UploadOperationContext                     context{ &owner, generation };
+    const VulkanUploadSourceRequest            source_request{ generation->nativeWindowGeneration(),
+                                                    description,
+                                                               { &context, uploadInstanceOwnerIsCurrent },
+                                                               { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanUploadDestinationRequest       destination_request{ generation->nativeWindowGeneration(),
+                                                              description,
+                                                                    { &context, uploadInstanceOwnerIsCurrent },
+                                                                    { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanUploadTransferRequest          transfer_request{ generation->nativeWindowGeneration(),
+                                                        description,
+                                                                 { &context, uploadInstanceOwnerIsCurrent },
+                                                                 { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanUploadTransferOperationRequest operation_request{ generation->nativeWindowGeneration(),
+                                                                  description,
+                                                                  { &context, uploadInstanceOwnerIsCurrent },
+                                                                  { &context, uploadWindowGenerationIsCurrent } };
+    if (generation->acquireUploadSourceGeneration(source_request) || generation->acquireUploadDestinationGeneration(destination_request) ||
+        generation->acquireUploadTransferGeneration(transfer_request))
+    {
+        return false;
+    }
+
+    const auto  result      = generation->executeUploadTransfer(operation_request);
+    const auto* disposition = std::get_if<VulkanUploadTransferDisposition>(&result);
+    if (!disposition || *disposition != VulkanUploadTransferDisposition::Complete)
+    {
+        return false;
+    }
+
+    retained = { generation->uploadDestinationResourceHandle(), generation->uploadDestinationExpectedContentIdentity(),
+                 generation->uploadDestinationResidentContentIdentity(), generation->uploadDestinationBuffer(),
+                 generation->uploadDestinationMemory() };
+    const bool completed_exactly_once =
+        generation->uploadTransferSubmissionCount() == 1 && generation->uploadTransferCompletionWaitCount() == 1 &&
+        generation->uploadDestinationIsResident() && retained.mHandle == description.mHandle && retained.mExpectedIdentity != 0 &&
+        retained.mExpectedIdentity == retained.mResidentIdentity && retained.mBuffer != VK_NULL_HANDLE &&
+        retained.mMemory != VK_NULL_HANDLE && generation->uploadDestinationByteCount() == VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+        generation->uploadDestinationIsDeviceLocal();
+    const bool source_reset = generation->resetUploadSourceGeneration();
+    return completed_exactly_once && source_reset && !generation->hasUploadSourceGeneration() &&
+           !generation->hasUploadTransferGeneration() && generation->hasUploadDestinationGeneration() &&
+           generation->uploadDestinationResourceHandle() == retained.mHandle &&
+           generation->uploadDestinationExpectedContentIdentity() == retained.mExpectedIdentity &&
+           generation->uploadDestinationResidentContentIdentity() == retained.mResidentIdentity &&
+           generation->uploadDestinationBuffer() == retained.mBuffer && generation->uploadDestinationMemory() == retained.mMemory;
 }
 
 void failAllocation()
@@ -3482,7 +3692,8 @@ void window_macosx_vulkan_object::test<22>()
     const auto* missing_instance        = presentationError(missing_instance_result);
     ensure("diagnostic draw requires a live instance before observing Cocoa geometry",
            missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
-               missing_state.mRefreshCount == 0 && missing_state.mAcquireNextImageCount == 0 && missing_state.mDrawCount == 0);
+               missing_state.mRefreshCount == 0 && missing_state.mAcquireNextImageCount == 0 &&
+               missing_state.mBindVertexBuffersCount == 0 && missing_state.mDrawCount == 0);
 
     ensure("the missing-pipeline fixture acquires the exact target and a younger frame slot",
            !missing_owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
@@ -3497,14 +3708,14 @@ void window_macosx_vulkan_object::test<22>()
            missing_pipeline &&
                missing_pipeline->mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive &&
                missing_state.mRefreshCount == missing_pipeline_refreshes + 1 && missing_state.mAcquireNextImageCount == 0 &&
-               missing_state.mBindPipelineCount == 0 && missing_state.mDrawCount == 0);
+               missing_state.mBindPipelineCount == 0 && missing_state.mBindVertexBuffersCount == 0 && missing_state.mDrawCount == 0);
     missing_state.mAcquiredImageIndex = 1;
     const auto clear_without_pipeline = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(draw_clear);
     ensure("the existing render-pass clear route remains draw-free without a presentation pipeline",
            presentationSucceeded(clear_without_pipeline, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
                missing_state.mBeginRenderPassCount == 1 && missing_state.mEndRenderPassCount == 1 &&
-               missing_state.mBindPipelineCount == 0 && missing_state.mSetViewportCount == 0 && missing_state.mSetScissorCount == 0 &&
-               missing_state.mDrawCount == 0);
+               missing_state.mBindPipelineCount == 0 && missing_state.mBindVertexBuffersCount == 0 &&
+               missing_state.mSetViewportCount == 0 && missing_state.mSetScissorCount == 0 && missing_state.mDrawCount == 0);
     missing_state.mOwnerDuringDestroy = missing_owner;
     ensure("the missing-pipeline fixture tears down child-first", missing_owner->reset());
 
@@ -3514,11 +3725,20 @@ void window_macosx_vulkan_object::test<22>()
     auto* owner  = acquiredWindow(result);
     ensure("diagnostic draw fixture acquires target, pipeline, then a fresh frame slot", owner && acquireCompleteSwapchainChain(*owner));
     const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ResidentUploadDestination       retained_destination;
+    ensure("diagnostic draw fixture completes one upload and retires its source and terminal transfer",
+           owner && acquireResidentUploadDestination(*owner, retained_destination));
+    ensure("the upload copies the exact canonical bytes and destroys only its retired source",
+           state.mUploadMappedBytes == LLRenderContract::SCREEN_TRIANGLE_BYTES && state.mCopyBufferCount == 1 &&
+               !state.mInvalidCopyBuffer && state.mUploadSourceDestroyCount == 1 && state.mUploadSourceFreeCount == 1 &&
+               state.mUploadDestinationDestroyCount == 0 && state.mUploadDestinationFreeCount == 0);
     ensure("complete-chain acquisition has no implicit draw hook",
            instance && owner->isGenerationCurrent(222) && instance->nativeWindowGeneration() == 222 &&
                instance->hasSwapchainPresentationTargetGeneration() && instance->hasSwapchainPresentationPipelineGeneration() &&
-               instance->hasSwapchainFrameSlotGeneration() && state.mBindPipelineCount == 0 && state.mSetViewportCount == 0 &&
-               state.mSetScissorCount == 0 && state.mDrawCount == 0);
+               instance->hasSwapchainFrameSlotGeneration() && instance->hasUploadDestinationGeneration() &&
+               instance->uploadDestinationIsResident() && !instance->hasUploadSourceGeneration() &&
+               !instance->hasUploadTransferGeneration() && state.mBindPipelineCount == 0 && state.mBindVertexBuffersCount == 0 &&
+               state.mSetViewportCount == 0 && state.mSetScissorCount == 0 && state.mDrawCount == 0);
     const std::size_t refreshes_after_chain = state.mRefreshCount;
 
     state.mMainThread           = false;
@@ -3526,7 +3746,8 @@ void window_macosx_vulkan_object::test<22>()
     const auto* off_main        = presentationError(off_main_result);
     ensure("off-main diagnostic draw fails before refreshing or dispatching native work",
            off_main && off_main->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
-               state.mRefreshCount == refreshes_after_chain && state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+               state.mRefreshCount == refreshes_after_chain && state.mAcquireNextImageCount == 0 && state.mBindVertexBuffersCount == 0 &&
+               state.mDrawCount == 0);
 
     state.mMainThread                 = true;
     state.mRefreshSucceeds            = false;
@@ -3534,7 +3755,8 @@ void window_macosx_vulkan_object::test<22>()
     const auto* failed_refresh        = presentationError(failed_refresh_result);
     ensure("a failed Cocoa refresh is a stale diagnostic draw request",
            failed_refresh && failed_refresh->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
-               state.mRefreshCount == refreshes_after_chain + 1 && state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+               state.mRefreshCount == refreshes_after_chain + 1 && state.mAcquireNextImageCount == 0 &&
+               state.mBindVertexBuffersCount == 0 && state.mDrawCount == 0);
 
     state.mRefreshSucceeds            = true;
     state.mRefreshMutation            = RefreshMutation::Layer;
@@ -3542,7 +3764,8 @@ void window_macosx_vulkan_object::test<22>()
     const auto* stale_identity        = presentationError(stale_identity_result);
     ensure("a callback-mutated Metal-layer identity is rejected before diagnostic draw dispatch",
            stale_identity && stale_identity->mCode == VulkanSwapchainFrameSlotParentOperationCode::StaleWindowGeneration &&
-               state.mRefreshCount == refreshes_after_chain + 2 && state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+               state.mRefreshCount == refreshes_after_chain + 2 && state.mAcquireNextImageCount == 0 &&
+               state.mBindVertexBuffersCount == 0 && state.mDrawCount == 0);
 
     state.mRefreshMutation         = RefreshMutation::None;
     state.mRefreshWidth            = 0;
@@ -3551,7 +3774,7 @@ void window_macosx_vulkan_object::test<22>()
     ensure("zero refreshed Cocoa backing pixels fail without replacing the retained geometry",
            zero_extent && zero_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
                state.mRefreshCount == refreshes_after_chain + 3 && owner->drawableWidth() == 1280 && owner->drawableHeight() == 720 &&
-               state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+               state.mAcquireNextImageCount == 0 && state.mBindVertexBuffersCount == 0 && state.mDrawCount == 0);
 
     state.mRefreshWidth               = 1600;
     state.mRefreshHeight              = 900;
@@ -3560,7 +3783,7 @@ void window_macosx_vulkan_object::test<22>()
     ensure("diagnostic draw forwards changed positive pixels to exact parent authentication",
            changed_extent && changed_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch &&
                state.mRefreshCount == refreshes_after_chain + 4 && owner->drawableWidth() == 1600 && owner->drawableHeight() == 900 &&
-               state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+               state.mAcquireNextImageCount == 0 && state.mBindVertexBuffersCount == 0 && state.mDrawCount == 0);
 
     VulkanSwapchainFrameClearColor invalid_clear = draw_clear;
     invalid_clear.mRgba[0]                       = -0.01f;
@@ -3571,26 +3794,35 @@ void window_macosx_vulkan_object::test<22>()
     ensure("diagnostic draw preserves the core's typed normalized-color preflight",
            invalid_clear_error && invalid_clear_error->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor &&
                !invalid_clear_error->mOperationError && state.mRefreshCount == refreshes_after_chain + 5 &&
-               state.mAcquireNextImageCount == 0 && state.mDrawCount == 0);
+               state.mAcquireNextImageCount == 0 && state.mBindVertexBuffersCount == 0 && state.mDrawCount == 0);
 
     state.mAcquiredImageIndex                                              = 2;
     const VkRenderPass                                expected_render_pass = instance->swapchainPresentationRenderPass();
     const VkFramebuffer                               expected_framebuffer = instance->swapchainPresentationFramebuffer(2);
     const VkPipeline                                  expected_pipeline    = instance->swapchainPresentationPipeline();
     const VkExtent2D                                  expected_extent      = instance->swapchainImageExtent();
+    const std::size_t                                 queue_submits_before_draw = state.mQueueSubmitCount;
+    const std::size_t                                 waits_before_draw         = state.mWaitForFencesCount;
     const auto                                        draw_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
     const VulkanSwapchainFrameSlotPresentationSuccess expected_success{ VulkanSwapchainFrameSlotPresentationOutcome::Presented,
                                                                         std::uint32_t{ 2 } };
     ensure("diagnostic draw returns the exact parent success and reusable image disposition",
            draw_result == VulkanSwapchainFrameSlotParentPresentationResult{ expected_success } &&
                instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
-               !instance->swapchainFrameAcquiredImageIndex());
+               !instance->swapchainFrameAcquiredImageIndex() && instance->hasUploadDestinationGeneration() &&
+               instance->uploadDestinationResourceHandle() == retained_destination.mHandle &&
+               instance->uploadDestinationExpectedContentIdentity() == retained_destination.mExpectedIdentity &&
+               instance->uploadDestinationResidentContentIdentity() == retained_destination.mResidentIdentity &&
+               instance->uploadDestinationBuffer() == retained_destination.mBuffer &&
+               instance->uploadDestinationMemory() == retained_destination.mMemory && state.mUploadDestinationDestroyCount == 0 &&
+               state.mUploadDestinationFreeCount == 0);
     ensure("diagnostic draw refreshes once and records one balanced submitted pass",
            state.mRefreshCount == refreshes_after_chain + 6 && owner->drawableWidth() == 1280 && owner->drawableHeight() == 720 &&
                state.mAcquireNextImageCount == 1 && state.mPipelineBarrierCount == 2 && state.mBeginRenderPassCount == 1 &&
                state.mEndRenderPassCount == 1 && state.mClearColorImageCount == 0 && state.mBindPipelineCount == 1 &&
-               state.mSetViewportCount == 1 && state.mSetScissorCount == 1 && state.mDrawCount == 1 && state.mQueueSubmitCount == 1 &&
-               state.mQueuePresentCount == 1 && state.mWaitForFencesCount == 2 &&
+               state.mBindVertexBuffersCount == 1 && state.mSetViewportCount == 1 && state.mSetScissorCount == 1 && state.mDrawCount == 1 &&
+               state.mQueueSubmitCount == queue_submits_before_draw + 1 && state.mQueuePresentCount == 1 &&
+               state.mWaitForFencesCount == waits_before_draw + 2 &&
                state.mSubmitWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     ensure("diagnostic draw forwards the acquired framebuffer, pipeline, and exact clear value",
            state.mRenderPassCommandBuffer == state.mCommandBuffer && state.mRenderPass == expected_render_pass &&
@@ -3598,7 +3830,10 @@ void window_macosx_vulkan_object::test<22>()
                state.mRenderPassArea.offset.y == 0 && state.mRenderPassArea.extent.width == expected_extent.width &&
                state.mRenderPassArea.extent.height == expected_extent.height && state.mRenderPassContents == VK_SUBPASS_CONTENTS_INLINE &&
                state.mDrawCommandBuffer == state.mCommandBuffer && state.mPipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
-               state.mBoundPipeline == expected_pipeline && state.mRenderPassClear.color.float32[0] == draw_clear.mRgba[0] &&
+               state.mBoundPipeline == expected_pipeline && state.mFirstVertexBinding == 0 && state.mVertexBindingCount == 1 &&
+               state.mBoundVertexBuffer == retained_destination.mBuffer && state.mBoundVertexOffset == 0 &&
+               state.mBindPipelineOrder < state.mBindVertexBuffersOrder && state.mBindVertexBuffersOrder < state.mDrawOrder &&
+               state.mRenderPassClear.color.float32[0] == draw_clear.mRgba[0] &&
                state.mRenderPassClear.color.float32[1] == draw_clear.mRgba[1] &&
                state.mRenderPassClear.color.float32[2] == draw_clear.mRgba[2] &&
                state.mRenderPassClear.color.float32[3] == draw_clear.mRgba[3]);
@@ -3617,10 +3852,13 @@ void window_macosx_vulkan_object::test<22>()
     ensure("the existing render-pass clear wrapper remains independent from the explicit draw route",
            presentationSucceeded(clear_result, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
                state.mRefreshCount == refreshes_after_chain + 7 && state.mBeginRenderPassCount == 2 && state.mEndRenderPassCount == 2 &&
-               state.mBindPipelineCount == 1 && state.mSetViewportCount == 1 && state.mSetScissorCount == 1 && state.mDrawCount == 1);
+               state.mBindPipelineCount == 1 && state.mBindVertexBuffersCount == 1 && state.mSetViewportCount == 1 &&
+               state.mSetScissorCount == 1 && state.mDrawCount == 1 && state.mUploadDestinationDestroyCount == 0 &&
+               state.mUploadDestinationFreeCount == 0);
 
     state.mOwnerDuringDestroy = owner;
-    ensure("the diagnostic draw fixture tears down child-first", owner->reset());
+    ensure("the diagnostic draw fixture tears down child-first and finally releases the resident destination",
+           owner->reset() && state.mUploadDestinationDestroyCount == 1 && state.mUploadDestinationFreeCount == 1);
 }
 
 template<>

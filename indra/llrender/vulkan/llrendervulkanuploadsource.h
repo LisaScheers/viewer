@@ -16,7 +16,7 @@
 #ifndef LL_LLRENDERVULKANUPLOADSOURCE_H
 #define LL_LLRENDERVULKANUPLOADSOURCE_H
 
-#include "llrendercontract.h"
+#include "lltextureuploadcontract.h"
 #include "llrendervulkanlogicaldevice.h"
 
 #include <vulkan/vulkan.h>
@@ -30,7 +30,7 @@
 namespace LLRenderVulkan
 {
 
-inline constexpr std::size_t VULKAN_UPLOAD_SOURCE_BYTE_COUNT = 48;
+inline constexpr std::size_t VULKAN_UPLOAD_SOURCE_BYTE_COUNT = LLRenderContract::SCREEN_TRIANGLE_BYTES.size();
 
 using VulkanUploadSourceBytes = std::array<std::uint8_t, VULKAN_UPLOAD_SOURCE_BYTE_COUNT>;
 
@@ -41,6 +41,11 @@ struct VulkanUploadSourceDescription
 
     friend constexpr bool operator==(const VulkanUploadSourceDescription&, const VulkanUploadSourceDescription&) = default;
 };
+
+inline constexpr VulkanUploadSourceDescription vulkanScreenTriangleUploadSourceDescription() noexcept
+{
+    return { LLRenderContract::StreamingUploadHandles{}.mScreenTriangle, LLRenderContract::SCREEN_TRIANGLE_BYTES };
+}
 
 enum class VulkanUploadSourceCommand : std::uint8_t
 {

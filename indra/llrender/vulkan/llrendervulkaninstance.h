@@ -748,7 +748,8 @@ enum class VulkanSwapchainFrameSlotParentOperationCode : std::uint8_t
     InvalidClearColor,
     SwapchainPresentationTargetNotLive,
     SwapchainPresentationPipelineNotLive,
-    SwapchainReadbackNotLive
+    SwapchainReadbackNotLive,
+    UploadDestinationNotLive
 };
 
 struct VulkanSwapchainFrameSlotParentOperationError
@@ -1063,6 +1064,7 @@ public:
 
 private:
     friend struct VulkanInstanceGenerationFactory;
+    friend struct VulkanInstanceGenerationTestAccess;
 
     class NativeAcquisitionGuard;
     class VulkanSurfaceGeneration;

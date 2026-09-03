@@ -123,6 +123,8 @@ struct GraphicsPipelineRecord
     std::array<VkPipelineShaderStageCreateInfo, 2> mStages{};
     std::array<std::string, 2>                     mEntryPoints;
     VkPipelineVertexInputStateCreateInfo           mVertexInput{};
+    std::vector<VkVertexInputBindingDescription>   mVertexBindings;
+    std::vector<VkVertexInputAttributeDescription> mVertexAttributes;
     VkPipelineInputAssemblyStateCreateInfo         mInputAssembly{};
     bool                                           mTessellationNull = false;
     VkPipelineViewportStateCreateInfo              mViewport{};
@@ -755,7 +757,23 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateGraphicsPipelines(VkDevice             
         record.mEntryPoints[1] = info.pStages[1].pName ? info.pStages[1].pName : "";
     }
     if (info.pVertexInputState)
+    {
         record.mVertexInput = *info.pVertexInputState;
+        if (info.pVertexInputState->vertexBindingDescriptionCount != 0 && info.pVertexInputState->pVertexBindingDescriptions)
+        {
+            record.mVertexBindings.assign(info.pVertexInputState->pVertexBindingDescriptions,
+                                          info.pVertexInputState->pVertexBindingDescriptions +
+                                              info.pVertexInputState->vertexBindingDescriptionCount);
+            record.mVertexInput.pVertexBindingDescriptions = record.mVertexBindings.data();
+        }
+        if (info.pVertexInputState->vertexAttributeDescriptionCount != 0 && info.pVertexInputState->pVertexAttributeDescriptions)
+        {
+            record.mVertexAttributes.assign(info.pVertexInputState->pVertexAttributeDescriptions,
+                                            info.pVertexInputState->pVertexAttributeDescriptions +
+                                                info.pVertexInputState->vertexAttributeDescriptionCount);
+            record.mVertexInput.pVertexAttributeDescriptions = record.mVertexAttributes.data();
+        }
+    }
     if (info.pInputAssemblyState)
         record.mInputAssembly = *info.pInputAssemblyState;
     record.mTessellationNull = info.pTessellationState == nullptr;
@@ -1140,8 +1158,8 @@ void render_vulkan_swapchain_presentation_pipeline_object::test<3>()
            state.mShaderModuleRecords.size() == 2 &&
                state.mShaderModuleRecords[0].mStructureType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO &&
                !state.mShaderModuleRecords[0].mNext && state.mShaderModuleRecords[0].mFlags == 0 &&
-               state.mShaderModuleRecords[0].mCode.size() == 184 && state.mShaderModuleRecords[0].mCode[0] == 0x07230203 &&
-               shaderChecksum(state.mShaderModuleRecords[0].mCode) == UINT64_C(0x3f7b5ef9a923c49a) &&
+               state.mShaderModuleRecords[0].mCode.size() == 159 && state.mShaderModuleRecords[0].mCode[0] == 0x07230203 &&
+               shaderChecksum(state.mShaderModuleRecords[0].mCode) == UINT64_C(0x73a79c93438dbc51) &&
                state.mShaderModuleRecords[1].mStructureType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO &&
                !state.mShaderModuleRecords[1].mNext && state.mShaderModuleRecords[1].mFlags == 0 &&
                state.mShaderModuleRecords[1].mCode.size() == 76 && state.mShaderModuleRecords[1].mCode[0] == 0x07230203 &&
@@ -1162,9 +1180,15 @@ void render_vulkan_swapchain_presentation_pipeline_object::test<3>()
                record.mBasePipelineIndex == -1 && record.mAllocatorNull);
     ensure("vertex input, assembly, viewport, tessellation, and dynamic state are exact",
            record.mVertexInput.sType == VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO && !record.mVertexInput.pNext &&
-               record.mVertexInput.flags == 0 && record.mVertexInput.vertexBindingDescriptionCount == 0 &&
-               !record.mVertexInput.pVertexBindingDescriptions && record.mVertexInput.vertexAttributeDescriptionCount == 0 &&
-               !record.mVertexInput.pVertexAttributeDescriptions &&
+               record.mVertexInput.flags == 0 && record.mVertexInput.vertexBindingDescriptionCount == 1 &&
+               record.mVertexInput.pVertexBindingDescriptions == record.mVertexBindings.data() && record.mVertexBindings.size() == 1 &&
+               record.mVertexBindings[0].binding == 0 && record.mVertexBindings[0].stride == 16 &&
+               record.mVertexBindings[0].inputRate == VK_VERTEX_INPUT_RATE_VERTEX &&
+               record.mVertexInput.vertexAttributeDescriptionCount == 1 &&
+               record.mVertexInput.pVertexAttributeDescriptions == record.mVertexAttributes.data() &&
+               record.mVertexAttributes.size() == 1 && record.mVertexAttributes[0].location == 0 &&
+               record.mVertexAttributes[0].binding == 0 && record.mVertexAttributes[0].format == VK_FORMAT_R32G32B32_SFLOAT &&
+               record.mVertexAttributes[0].offset == 0 &&
                record.mInputAssembly.sType == VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO && !record.mInputAssembly.pNext &&
                record.mInputAssembly.flags == 0 && record.mInputAssembly.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &&
                record.mInputAssembly.primitiveRestartEnable == VK_FALSE && record.mTessellationNull &&

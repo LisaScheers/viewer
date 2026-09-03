@@ -182,16 +182,7 @@ namespace
 
     std::uint64_t computeContentIdentity(const VulkanUploadSourceBytes& bytes) noexcept
     {
-        constexpr std::uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
-        constexpr std::uint64_t FNV_PRIME        = 1099511628211ULL;
-
-        std::uint64_t identity = FNV_OFFSET_BASIS;
-        for (std::uint8_t byte : bytes)
-        {
-            identity ^= byte;
-            identity *= FNV_PRIME;
-        }
-        return identity != 0 ? identity : 1;
+        return LLRenderContract::stableByteContentIdentity(bytes);
     }
 
     VkBufferCreateInfo bufferCreateInfo() noexcept

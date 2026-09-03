@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Regenerate and verify the embedded Stage 50 presentation shaders."""
+"""Regenerate and verify the embedded presentation shaders."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import shutil
 import struct
@@ -18,8 +19,8 @@ SHADERS = {
         "source": "presentation.vert.glsl",
         "stage": "vert",
         "array": "PRESENTATION_VERTEX_SHADER",
-        "size": 736,
-        "sha256": "c22f211633f950d6f10a87934e705a32cb76f29d17b58853a5122c2a100c27c1",
+        "size": 636,
+        "sha256": "a2eafa25a5e418187e60e41a8a19a958f9394d83a03506e5d17ec285ba8a7b3f",
     },
     "fragment": {
         "source": "presentation.frag.glsl",
@@ -54,14 +55,55 @@ def run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
+def capture(command: list[str]) -> str:
+    return subprocess.run(command, check=True, stdout=subprocess.PIPE, text=True).stdout
+
+
+def has_descriptor_resource(value: object) -> bool:
+    if isinstance(value, dict):
+        if "set" in value and "binding" in value:
+            return True
+        return any(has_descriptor_resource(child) for child in value.values())
+    if isinstance(value, list):
+        return any(has_descriptor_resource(child) for child in value)
+    return False
+
+
+def verify_no_descriptors(label: str, disassembly: str, reflection: object) -> None:
+    if re.search(r"\b(?:DescriptorSet|Binding)\b", disassembly) or has_descriptor_resource(reflection):
+        raise SystemExit(f"{label} shader unexpectedly declares a descriptor")
+
+
+def verify_vertex_interface(disassembly: str, reflection: object) -> None:
+    if re.search(r"\bBuiltIn\s+VertexIndex\b", disassembly):
+        raise SystemExit("vertex shader unexpectedly uses BuiltIn VertexIndex")
+    if not isinstance(reflection, dict):
+        raise SystemExit("vertex reflection root is not an object")
+
+    entry_points = reflection.get("entryPoints")
+    if entry_points != [{"name": "main", "mode": "vert"}]:
+        raise SystemExit(f"vertex shader has an unexpected entry-point contract: {entry_points!r}")
+
+    inputs = reflection.get("inputs")
+    if not isinstance(inputs, list) or len(inputs) != 1:
+        raise SystemExit(f"vertex shader must declare exactly one reflected input: {inputs!r}")
+    vertex_input = inputs[0]
+    if not isinstance(vertex_input, dict) or vertex_input.get("location") != 0 or vertex_input.get("type") != "vec3":
+        raise SystemExit(f"vertex shader input must be vec3 at location zero: {vertex_input!r}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--glslang-validator")
     parser.add_argument("--spirv-val")
+    parser.add_argument("--spirv-dis")
+    parser.add_argument("--spirv-cross")
     args = parser.parse_args()
 
     glslang = require_tool(args.glslang_validator, "glslangValidator")
     validator = require_tool(args.spirv_val, "spirv-val")
+    disassembler = require_tool(args.spirv_dis, "spirv-dis")
+    reflector = require_tool(args.spirv_cross, "spirv-cross")
     directory = Path(__file__).resolve().parent
     cpp_source = (directory / "llrendervulkanswapchainpresentationpipeline.cpp").read_text(encoding="utf-8")
 
@@ -85,6 +127,14 @@ def main() -> int:
                 ]
             )
             run([validator, "--target-env", "vulkan1.1", str(output)])
+            disassembly = capture([disassembler, str(output)])
+            try:
+                reflection = json.loads(capture([reflector, str(output), "--reflect"]))
+            except json.JSONDecodeError as error:
+                raise SystemExit(f"{label} reflection is not valid JSON: {error}") from error
+            verify_no_descriptors(label, disassembly, reflection)
+            if label == "vertex":
+                verify_vertex_interface(disassembly, reflection)
             generated = output.read_bytes()
             embedded = embedded_bytes(cpp_source, str(contract["array"]))
             digest = hashlib.sha256(generated).hexdigest()

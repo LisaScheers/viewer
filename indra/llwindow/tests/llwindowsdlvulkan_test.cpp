@@ -15,6 +15,7 @@
 
 #include "linden_common.h"
 
+#include "lltextureuploaddiagnostic.h"
 #include "llwindowsdlvulkan.h"
 #include "lltut.h"
 
@@ -95,11 +96,12 @@ struct FakeState
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         mFormatProperties.optimalTilingFeatures =
             VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
-        mMemoryProperties.memoryHeapCount              = 1;
-        mMemoryProperties.memoryHeaps[0].size          = 64 * 1024 * 1024;
-        mMemoryProperties.memoryTypeCount              = 1;
-        mMemoryProperties.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        mMemoryProperties.memoryTypes[0].heapIndex     = 0;
+        mMemoryProperties.memoryHeapCount     = 1;
+        mMemoryProperties.memoryHeaps[0].size = 64 * 1024 * 1024;
+        mMemoryProperties.memoryTypeCount     = 1;
+        mMemoryProperties.memoryTypes[0].propertyFlags =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        mMemoryProperties.memoryTypes[0].heapIndex = 0;
     }
 
     std::array<Event, 48>              mEvents{};
@@ -141,76 +143,91 @@ struct FakeState
     bool                               mInstanceLiveDuringSurfaceDestroy      = false;
     bool                               mLoaderLiveDuringSurfaceDestroy        = false;
 
-    VkPhysicalDevice           mPhysicalDevice = reinterpret_cast<VkPhysicalDevice>(static_cast<std::uintptr_t>(0x11110));
-    VkPhysicalDeviceProperties mPhysicalProperties{};
-    VkFormatProperties         mFormatProperties{};
-    VkDevice                   mDevice    = reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(0x22220));
-    VkQueue                    mQueue     = reinterpret_cast<VkQueue>(static_cast<std::uintptr_t>(0x33330));
-    VkSwapchainKHR             mSwapchain = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(0x44440));
-    std::size_t                mCreateSwapchainCalls  = 0;
-    std::size_t                mDestroySwapchainCalls = 0;
-    VkSurfaceCapabilitiesKHR   mSurfaceCapabilities{};
-    std::array<VkImage, 3>     mImages{ reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x51000)),
+    VkPhysicalDevice                 mPhysicalDevice = reinterpret_cast<VkPhysicalDevice>(static_cast<std::uintptr_t>(0x11110));
+    VkPhysicalDeviceProperties       mPhysicalProperties{};
+    VkFormatProperties               mFormatProperties{};
+    VkDevice                         mDevice                = reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(0x22220));
+    VkQueue                          mQueue                 = reinterpret_cast<VkQueue>(static_cast<std::uintptr_t>(0x33330));
+    VkSwapchainKHR                   mSwapchain             = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(0x44440));
+    std::size_t                      mCreateSwapchainCalls  = 0;
+    std::size_t                      mDestroySwapchainCalls = 0;
+    VkSurfaceCapabilitiesKHR         mSurfaceCapabilities{};
+    std::array<VkImage, 3>           mImages{ reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x51000)),
                                     reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x52000)),
                                     reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x53000)) };
-    std::array<VkImageView, 3> mImageViews{ reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x61000)),
+    std::array<VkImageView, 3>       mImageViews{ reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x61000)),
                                             reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x62000)),
                                             reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x63000)) };
-    std::size_t                mNextImageView           = 0;
-    std::size_t                mCreateRenderPassCalls   = 0;
-    std::size_t                mDestroyRenderPassCalls  = 0;
-    std::size_t                mCreateFramebufferCalls  = 0;
-    std::size_t                mDestroyFramebufferCalls = 0;
-    std::size_t                mCreateShaderModuleCalls     = 0;
-    std::size_t                mDestroyShaderModuleCalls    = 0;
-    std::size_t                mCreatePipelineLayoutCalls   = 0;
-    std::size_t                mDestroyPipelineLayoutCalls = 0;
+    std::size_t                      mNextImageView               = 0;
+    std::size_t                      mCreateRenderPassCalls       = 0;
+    std::size_t                      mDestroyRenderPassCalls      = 0;
+    std::size_t                      mCreateFramebufferCalls      = 0;
+    std::size_t                      mDestroyFramebufferCalls     = 0;
+    std::size_t                      mCreateShaderModuleCalls     = 0;
+    std::size_t                      mDestroyShaderModuleCalls    = 0;
+    std::size_t                      mCreatePipelineLayoutCalls   = 0;
+    std::size_t                      mDestroyPipelineLayoutCalls  = 0;
     std::size_t                      mCreateGraphicsPipelineCalls = 0;
     std::size_t                      mDestroyPipelineCalls        = 0;
     VkPipelineLayout                 mLastPipelineLayout          = VK_NULL_HANDLE;
     VkPhysicalDeviceMemoryProperties mMemoryProperties{};
-    VkBuffer                         mReadbackBuffer             = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x81000));
-    VkDeviceMemory                   mReadbackMemory             = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x82000));
-    std::uint8_t                     mReadbackMappedByte         = 0;
-    VkDeviceSize                     mReadbackBufferSize         = 0;
-    std::size_t                      mCreateBufferCalls          = 0;
-    std::size_t                      mAllocateMemoryCalls        = 0;
-    std::size_t                      mMapMemoryCalls             = 0;
-    std::size_t                      mUnmapMemoryCalls           = 0;
-    std::size_t                      mDestroyBufferCalls         = 0;
-    std::size_t                      mFreeMemoryCalls            = 0;
-    VkCommandPool                    mCommandPool                = reinterpret_cast<VkCommandPool>(static_cast<std::uintptr_t>(0x71000));
-    VkCommandBuffer                  mCommandBuffer              = reinterpret_cast<VkCommandBuffer>(static_cast<std::uintptr_t>(0x72000));
-    VkSemaphore                      mImageAvailableSemaphore    = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x73000));
-    VkFence                    mSubmissionFence         = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x74000));
+    VkBuffer                         mReadbackBuffer          = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x81000));
+    VkDeviceMemory                   mReadbackMemory          = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x82000));
+    VkBuffer                         mUploadSourceBuffer      = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x83000));
+    VkDeviceMemory                   mUploadSourceMemory      = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x84000));
+    VkBuffer                         mUploadDestinationBuffer = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x85000));
+    VkDeviceMemory                   mUploadDestinationMemory = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x86000));
+    VkBuffer                         mLastCreatedBuffer       = VK_NULL_HANDLE;
+    std::array<std::uint8_t, LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT> mUploadMappedBytes{};
+    std::uint8_t                                                              mReadbackMappedByte  = 0;
+    VkDeviceSize                                                              mReadbackBufferSize  = 0;
+    std::size_t                                                               mCreateBufferCalls   = 0;
+    std::size_t                                                               mAllocateMemoryCalls = 0;
+    std::size_t                                                               mMapMemoryCalls      = 0;
+    std::size_t                                                               mUnmapMemoryCalls    = 0;
+    std::size_t                                                               mDestroyBufferCalls  = 0;
+    std::size_t                                                               mFreeMemoryCalls     = 0;
+    VkCommandPool              mCommandPool                = reinterpret_cast<VkCommandPool>(static_cast<std::uintptr_t>(0x71000));
+    VkCommandBuffer            mCommandBuffer              = reinterpret_cast<VkCommandBuffer>(static_cast<std::uintptr_t>(0x72000));
+    VkSemaphore                mImageAvailableSemaphore    = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x73000));
+    VkFence                    mSubmissionFence            = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x74000));
     VkSemaphore                mPresentationReadySemaphore = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x75000));
     VkFence                    mPresentCompletionFence     = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x76000));
-    bool                       mExposeWaitForFences     = true;
+    bool                       mExposeWaitForFences        = true;
     std::array<VkResult, 8>    mWaitResults{};
-    std::size_t                mWaitResultCount  = 0;
-    std::size_t                mWaitResultIndex  = 0;
-    std::size_t                mWaitCalls        = 0;
-    std::size_t                mQueueSubmitCalls = 0;
-    std::size_t                mCreateSemaphoreCalls         = 0;
-    std::size_t                mCreateFenceCalls             = 0;
-    std::size_t                mAcquireNextImageCalls        = 0;
-    std::size_t                mPipelineBarrierCalls         = 0;
-    std::size_t                mClearColorImageCalls          = 0;
-    std::size_t                mBeginRenderPassCalls         = 0;
-    std::size_t                mEndRenderPassCalls           = 0;
-    VkCommandBuffer            mRenderPassCommandBuffer      = VK_NULL_HANDLE;
-    VkRenderPass               mRenderPass                   = VK_NULL_HANDLE;
-    VkFramebuffer              mRenderPassFramebuffer        = VK_NULL_HANDLE;
+    std::size_t                mWaitResultCount         = 0;
+    std::size_t                mWaitResultIndex         = 0;
+    std::size_t                mWaitCalls               = 0;
+    std::size_t                mQueueSubmitCalls        = 0;
+    std::size_t                mCreateSemaphoreCalls    = 0;
+    std::size_t                mCreateFenceCalls        = 0;
+    std::size_t                mAcquireNextImageCalls   = 0;
+    std::size_t                mPipelineBarrierCalls    = 0;
+    std::size_t                mClearColorImageCalls    = 0;
+    std::size_t                mBeginRenderPassCalls    = 0;
+    std::size_t                mEndRenderPassCalls      = 0;
+    VkCommandBuffer            mRenderPassCommandBuffer = VK_NULL_HANDLE;
+    VkRenderPass               mRenderPass              = VK_NULL_HANDLE;
+    VkFramebuffer              mRenderPassFramebuffer   = VK_NULL_HANDLE;
     VkRect2D                   mRenderPassArea{};
     VkClearValue               mRenderPassClear{};
     VkSubpassContents          mRenderPassContents           = VK_SUBPASS_CONTENTS_MAX_ENUM;
     std::size_t                mBindPipelineCalls            = 0;
+    std::size_t                mBindVertexBuffersCalls       = 0;
     std::size_t                mSetViewportCalls             = 0;
     std::size_t                mSetScissorCalls              = 0;
     std::size_t                mDrawCalls                    = 0;
     VkCommandBuffer            mDrawCommandBuffer            = VK_NULL_HANDLE;
     VkPipelineBindPoint        mPipelineBindPoint            = VK_PIPELINE_BIND_POINT_MAX_ENUM;
     VkPipeline                 mBoundPipeline                = VK_NULL_HANDLE;
+    VkBuffer                   mBoundVertexBuffer            = VK_NULL_HANDLE;
+    VkDeviceSize               mBoundVertexOffset            = std::numeric_limits<VkDeviceSize>::max();
+    std::uint32_t              mFirstVertexBinding           = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t              mVertexBindingCount           = 0;
+    std::size_t                mCommandOrder                 = 0;
+    std::size_t                mBindPipelineOrder            = 0;
+    std::size_t                mBindVertexBuffersOrder       = 0;
+    std::size_t                mDrawOrder                    = 0;
     std::uint32_t              mFirstViewport                = std::numeric_limits<std::uint32_t>::max();
     VkViewport                 mViewport{};
     std::uint32_t              mFirstScissor = std::numeric_limits<std::uint32_t>::max();
@@ -958,12 +975,26 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_b
     }
 }
 
-VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer               command_buffer,
-                                                   VkImage                       image,
-                                                   VkImageLayout                 image_layout,
-                                                   const VkClearColorValue*      color,
-                                                   std::uint32_t                 range_count,
-                                                   const VkImageSubresourceRange* ranges) noexcept
+VKAPI_ATTR void VKAPI_CALL fakeCmdCopyBuffer(VkCommandBuffer     command_buffer,
+                                             VkBuffer            source,
+                                             VkBuffer            destination,
+                                             std::uint32_t       region_count,
+                                             const VkBufferCopy* regions) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && source == gVulkanState->mUploadSourceBuffer &&
+        destination == gVulkanState->mUploadDestinationBuffer && region_count == 1 && regions && regions[0].srcOffset == 0 &&
+        regions[0].dstOffset == 0 && regions[0].size == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT)
+    {
+        // The aggregate transfer tests authenticate publication and lifetime; no fake device bytes are exposed.
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer                command_buffer,
+                                                  VkImage                        image,
+                                                  VkImageLayout                  image_layout,
+                                                  const VkClearColorValue*       color,
+                                                  std::uint32_t                  range_count,
+                                                  const VkImageSubresourceRange* ranges) noexcept
 {
     if (gVulkanState && color && range_count == 1 && ranges)
     {
@@ -977,12 +1008,11 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer               
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeCmdBeginRenderPass(VkCommandBuffer              command_buffer,
-                                                   const VkRenderPassBeginInfo* begin_info,
-                                                   VkSubpassContents            contents) noexcept
+                                                  const VkRenderPassBeginInfo* begin_info,
+                                                  VkSubpassContents            contents) noexcept
 {
     if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && begin_info &&
-        begin_info->sType == VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO && begin_info->clearValueCount == 1 &&
-        begin_info->pClearValues)
+        begin_info->sType == VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO && begin_info->clearValueCount == 1 && begin_info->pClearValues)
     {
         ++gVulkanState->mBeginRenderPassCalls;
         gVulkanState->mRenderPassCommandBuffer = command_buffer;
@@ -1012,6 +1042,25 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer     command_buffe
         gVulkanState->mDrawCommandBuffer = command_buffer;
         gVulkanState->mPipelineBindPoint = pipeline_bind_point;
         gVulkanState->mBoundPipeline     = pipeline;
+        gVulkanState->mBindPipelineOrder = ++gVulkanState->mCommandOrder;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindVertexBuffers(VkCommandBuffer     command_buffer,
+                                                    std::uint32_t       first_binding,
+                                                    std::uint32_t       binding_count,
+                                                    const VkBuffer*     buffers,
+                                                    const VkDeviceSize* offsets) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && binding_count == 1 && buffers && offsets)
+    {
+        ++gVulkanState->mBindVertexBuffersCalls;
+        gVulkanState->mDrawCommandBuffer      = command_buffer;
+        gVulkanState->mFirstVertexBinding     = first_binding;
+        gVulkanState->mVertexBindingCount     = binding_count;
+        gVulkanState->mBoundVertexBuffer      = buffers[0];
+        gVulkanState->mBoundVertexOffset      = offsets[0];
+        gVulkanState->mBindVertexBuffersOrder = ++gVulkanState->mCommandOrder;
     }
 }
 
@@ -1050,6 +1099,7 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdDraw(VkCommandBuffer command_buffer,
     if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer)
     {
         ++gVulkanState->mDrawCalls;
+        gVulkanState->mDrawOrder         = ++gVulkanState->mCommandOrder;
         gVulkanState->mDrawVertexCount   = vertex_count;
         gVulkanState->mDrawInstanceCount = instance_count;
         gVulkanState->mDrawFirstVertex   = first_vertex;
@@ -1105,7 +1155,19 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice,
     }
     ++gVulkanState->mCreateBufferCalls;
     gVulkanState->mReadbackBufferSize = create_info->size;
-    *buffer                           = gVulkanState->mReadbackBuffer;
+    if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+    {
+        *buffer = gVulkanState->mUploadSourceBuffer;
+    }
+    else if (create_info->usage == (VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+    {
+        *buffer = gVulkanState->mUploadDestinationBuffer;
+    }
+    else
+    {
+        *buffer = gVulkanState->mReadbackBuffer;
+    }
+    gVulkanState->mLastCreatedBuffer = *buffer;
     return VK_SUCCESS;
 }
 
@@ -1119,7 +1181,10 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice, VkBuffer buffer, const Vk
 
 VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice, VkBuffer buffer, VkMemoryRequirements* requirements) noexcept
 {
-    if (gVulkanState && buffer == gVulkanState->mReadbackBuffer && requirements)
+    if (gVulkanState &&
+        (buffer == gVulkanState->mReadbackBuffer || buffer == gVulkanState->mUploadSourceBuffer ||
+         buffer == gVulkanState->mUploadDestinationBuffer) &&
+        requirements)
     {
         *requirements = { gVulkanState->mReadbackBufferSize, 256, 1 };
     }
@@ -1136,7 +1201,10 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice,
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     ++gVulkanState->mAllocateMemoryCalls;
-    *memory = gVulkanState->mReadbackMemory;
+    *memory = gVulkanState->mLastCreatedBuffer == gVulkanState->mUploadSourceBuffer
+                  ? gVulkanState->mUploadSourceMemory
+                  : (gVulkanState->mLastCreatedBuffer == gVulkanState->mUploadDestinationBuffer ? gVulkanState->mUploadDestinationMemory
+                                                                                                : gVulkanState->mReadbackMemory);
     return VK_SUCCESS;
 }
 
@@ -1150,26 +1218,40 @@ VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice, VkDeviceMemory memory, const
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset) noexcept
 {
-    return gVulkanState && buffer == gVulkanState->mReadbackBuffer && memory == gVulkanState->mReadbackMemory && offset == 0
-               ? VK_SUCCESS
-               : VK_ERROR_INITIALIZATION_FAILED;
+    const bool matching_pair =
+        gVulkanState && ((buffer == gVulkanState->mReadbackBuffer && memory == gVulkanState->mReadbackMemory) ||
+                         (buffer == gVulkanState->mUploadSourceBuffer && memory == gVulkanState->mUploadSourceMemory) ||
+                         (buffer == gVulkanState->mUploadDestinationBuffer && memory == gVulkanState->mUploadDestinationMemory));
+    return matching_pair && offset == 0 ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-    fakeMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** data) noexcept
+VKAPI_ATTR VkResult VKAPI_CALL fakeMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size,
+                                             VkMemoryMapFlags flags, void** data) noexcept
 {
-    if (!gVulkanState || memory != gVulkanState->mReadbackMemory || offset != 0 || size != VK_WHOLE_SIZE || flags != 0 || !data)
+    if (!gVulkanState || (memory != gVulkanState->mReadbackMemory && memory != gVulkanState->mUploadSourceMemory) || offset != 0 ||
+        size != VK_WHOLE_SIZE || flags != 0 || !data)
     {
         return VK_ERROR_MEMORY_MAP_FAILED;
     }
     ++gVulkanState->mMapMemoryCalls;
-    *data = &gVulkanState->mReadbackMappedByte;
+    *data = memory == gVulkanState->mUploadSourceMemory ? static_cast<void*>(gVulkanState->mUploadMappedBytes.data())
+                                                        : static_cast<void*>(&gVulkanState->mReadbackMappedByte);
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeFlushMappedMemoryRanges(VkDevice device, std::uint32_t range_count,
+                                                           const VkMappedMemoryRange* ranges) noexcept
+{
+    return gVulkanState && device == gVulkanState->mDevice && range_count == 1 && ranges &&
+                   ranges[0].sType == VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE && ranges[0].memory == gVulkanState->mUploadSourceMemory &&
+                   ranges[0].offset == 0 && ranges[0].size == VK_WHOLE_SIZE
+               ? VK_SUCCESS
+               : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice, VkDeviceMemory memory) noexcept
 {
-    if (gVulkanState && memory == gVulkanState->mReadbackMemory)
+    if (gVulkanState && (memory == gVulkanState->mReadbackMemory || memory == gVulkanState->mUploadSourceMemory))
     {
         ++gVulkanState->mUnmapMemoryCalls;
     }
@@ -1219,10 +1301,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     if (std::strcmp(name, "vkAcquireNextImageKHR") == 0)
         return eraseFunctionType(fakeAcquireNextImage);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdPipelineBarrier);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdCopyBuffer);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdClearColorImage);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdBeginRenderPass);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdEndRenderPass);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdBindPipeline);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdBindVertexBuffers);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdSetViewport);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdSetScissor);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdDraw);
@@ -1237,6 +1321,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     LL_SDL_VULKAN_DEVICE_COMMAND(FreeMemory);
     LL_SDL_VULKAN_DEVICE_COMMAND(BindBufferMemory);
     LL_SDL_VULKAN_DEVICE_COMMAND(MapMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(FlushMappedMemoryRanges);
     LL_SDL_VULKAN_DEVICE_COMMAND(UnmapMemory);
 #undef LL_SDL_VULKAN_DEVICE_COMMAND
     return nullptr;
@@ -1512,6 +1597,97 @@ bool acquireCompleteFrameSlot(LLWindowSDLVulkan& owner) noexcept
            !owner.acquireSwapchainImagesGeneration() && !owner.acquireSwapchainPresentationTargetGeneration() &&
            !owner.acquireSwapchainPresentationPipelineGeneration() && !owner.acquireSwapchainReadbackGeneration() &&
            !owner.acquireSwapchainFrameSlotGeneration();
+}
+
+struct UploadOperationContext
+{
+    const LLWindowSDLVulkan*                        mOwner      = nullptr;
+    const LLRenderVulkan::VulkanInstanceGeneration* mGeneration = nullptr;
+};
+
+bool uploadInstanceOwnerIsCurrent(void* userdata, const LLRenderVulkan::VulkanInstanceGeneration& generation) noexcept
+{
+    const auto* context = static_cast<const UploadOperationContext*>(userdata);
+    return context && context->mOwner && context->mGeneration == &generation && context->mOwner->instanceGeneration() == &generation;
+}
+
+bool uploadWindowGenerationIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto* context = static_cast<const UploadOperationContext*>(userdata);
+    return context && context->mOwner && context->mOwner->isGenerationCurrent(native_window_generation);
+}
+
+struct ResidentUploadDestination
+{
+    LLRenderContract::BufferHandle mHandle;
+    std::uint64_t                  mExpectedIdentity = 0;
+    std::uint64_t                  mResidentIdentity = 0;
+    VkBuffer                       mBuffer           = VK_NULL_HANDLE;
+    VkDeviceMemory                 mMemory           = VK_NULL_HANDLE;
+};
+
+bool acquireResidentUploadDestination(LLWindowSDLVulkan& owner, ResidentUploadDestination& retained) noexcept
+{
+    using namespace LLRenderVulkan;
+
+    auto* generation = const_cast<VulkanInstanceGeneration*>(owner.instanceGeneration());
+    if (!generation)
+    {
+        return false;
+    }
+
+    const LLRenderContract::TextureUploadFixture fixture = LLRenderContract::makeTextureUploadFixture();
+    static_assert(sizeof(fixture.mScreenTriangle) == VULKAN_UPLOAD_SOURCE_BYTE_COUNT);
+    VulkanUploadSourceDescription description;
+    description.mHandle = LLRenderContract::StreamingUploadHandles{}.mScreenTriangle;
+    std::memcpy(description.mBytes.data(), fixture.mScreenTriangle.data(), description.mBytes.size());
+
+    UploadOperationContext                     context{ &owner, generation };
+    const VulkanUploadSourceRequest            source_request{ generation->nativeWindowGeneration(),
+                                                    description,
+                                                               { &context, uploadInstanceOwnerIsCurrent },
+                                                               { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanUploadDestinationRequest       destination_request{ generation->nativeWindowGeneration(),
+                                                              description,
+                                                                    { &context, uploadInstanceOwnerIsCurrent },
+                                                                    { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanUploadTransferRequest          transfer_request{ generation->nativeWindowGeneration(),
+                                                        description,
+                                                                 { &context, uploadInstanceOwnerIsCurrent },
+                                                                 { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanUploadTransferOperationRequest operation_request{ generation->nativeWindowGeneration(),
+                                                                  description,
+                                                                  { &context, uploadInstanceOwnerIsCurrent },
+                                                                  { &context, uploadWindowGenerationIsCurrent } };
+    if (generation->acquireUploadSourceGeneration(source_request) || generation->acquireUploadDestinationGeneration(destination_request) ||
+        generation->acquireUploadTransferGeneration(transfer_request))
+    {
+        return false;
+    }
+
+    const auto  result      = generation->executeUploadTransfer(operation_request);
+    const auto* disposition = std::get_if<VulkanUploadTransferDisposition>(&result);
+    if (!disposition || *disposition != VulkanUploadTransferDisposition::Complete)
+    {
+        return false;
+    }
+
+    retained = { generation->uploadDestinationResourceHandle(), generation->uploadDestinationExpectedContentIdentity(),
+                 generation->uploadDestinationResidentContentIdentity(), generation->uploadDestinationBuffer(),
+                 generation->uploadDestinationMemory() };
+    const bool completed_exactly_once =
+        generation->uploadTransferSubmissionCount() == 1 && generation->uploadTransferCompletionWaitCount() == 1 &&
+        generation->uploadDestinationIsResident() && retained.mHandle == description.mHandle && retained.mExpectedIdentity != 0 &&
+        retained.mExpectedIdentity == retained.mResidentIdentity && retained.mBuffer != VK_NULL_HANDLE &&
+        retained.mMemory != VK_NULL_HANDLE && generation->uploadDestinationByteCount() == VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+        generation->uploadDestinationIsDeviceLocal();
+    const bool source_reset = generation->resetUploadSourceGeneration();
+    return completed_exactly_once && source_reset && !generation->hasUploadSourceGeneration() &&
+           !generation->hasUploadTransferGeneration() && generation->hasUploadDestinationGeneration() &&
+           generation->uploadDestinationResourceHandle() == retained.mHandle &&
+           generation->uploadDestinationExpectedContentIdentity() == retained.mExpectedIdentity &&
+           generation->uploadDestinationResidentContentIdentity() == retained.mResidentIdentity &&
+           generation->uploadDestinationBuffer() == retained.mBuffer && generation->uploadDestinationMemory() == retained.mMemory;
 }
 
 void failAllocation()
@@ -3102,14 +3278,14 @@ void window_sdl_vulkan_object::test<24>()
            missing_pipeline &&
                missing_pipeline->mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive &&
                missing_state.mDrawableSizeCalls == missing_pipeline_queries + 1 && missing_state.mAcquireNextImageCalls == 0 &&
-               missing_state.mBindPipelineCalls == 0 && missing_state.mDrawCalls == 0);
+               missing_state.mBindPipelineCalls == 0 && missing_state.mBindVertexBuffersCalls == 0 && missing_state.mDrawCalls == 0);
     missing_state.mAcquiredImageIndex = 1;
     const auto clear_without_pipeline = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(draw_clear);
     ensure("the existing render-pass clear route remains draw-free without a presentation pipeline",
            presentationSucceeded(clear_without_pipeline, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
                missing_state.mBeginRenderPassCalls == 1 && missing_state.mEndRenderPassCalls == 1 &&
-               missing_state.mBindPipelineCalls == 0 && missing_state.mSetViewportCalls == 0 && missing_state.mSetScissorCalls == 0 &&
-               missing_state.mDrawCalls == 0);
+               missing_state.mBindPipelineCalls == 0 && missing_state.mBindVertexBuffersCalls == 0 &&
+               missing_state.mSetViewportCalls == 0 && missing_state.mSetScissorCalls == 0 && missing_state.mDrawCalls == 0);
     ensure("the missing-pipeline fixture tears down child-first", missing_owner->reset());
 
     FakeState state;
@@ -3118,11 +3294,16 @@ void window_sdl_vulkan_object::test<24>()
     auto* owner  = acquiredWindow(result);
     ensure("diagnostic draw fixture acquires target, pipeline, then a fresh frame slot", owner && acquireCompleteFrameSlot(*owner));
     const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ResidentUploadDestination       retained_destination;
+    ensure("diagnostic draw fixture completes one upload and retires its source and terminal transfer",
+           owner && acquireResidentUploadDestination(*owner, retained_destination));
     ensure("complete-chain acquisition has no implicit draw hook",
            instance && owner->isGenerationCurrent(212) && instance->nativeWindowGeneration() == 212 &&
                instance->hasSwapchainPresentationTargetGeneration() && instance->hasSwapchainPresentationPipelineGeneration() &&
-               instance->hasSwapchainFrameSlotGeneration() && state.mBindPipelineCalls == 0 && state.mSetViewportCalls == 0 &&
-               state.mSetScissorCalls == 0 && state.mDrawCalls == 0);
+               instance->hasSwapchainFrameSlotGeneration() && instance->hasUploadDestinationGeneration() &&
+               instance->uploadDestinationIsResident() && !instance->hasUploadSourceGeneration() &&
+               !instance->hasUploadTransferGeneration() && state.mBindPipelineCalls == 0 && state.mBindVertexBuffersCalls == 0 &&
+               state.mSetViewportCalls == 0 && state.mSetScissorCalls == 0 && state.mDrawCalls == 0);
 
     const std::size_t drawable_queries_before_failures = state.mDrawableSizeCalls;
     state.mDrawableSizeSucceeds                        = false;
@@ -3131,7 +3312,7 @@ void window_sdl_vulkan_object::test<24>()
     ensure("diagnostic draw rejects a failed SDL backing-pixel sample before acquiring an image",
            failed_query && failed_query->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
                state.mDrawableSizeCalls == drawable_queries_before_failures + 1 && state.mAcquireNextImageCalls == 0 &&
-               state.mDrawCalls == 0);
+               state.mBindVertexBuffersCalls == 0 && state.mDrawCalls == 0);
 
     state.mDrawableSizeSucceeds       = true;
     state.mDrawableWidth              = 1600;
@@ -3141,7 +3322,7 @@ void window_sdl_vulkan_object::test<24>()
     ensure("diagnostic draw forwards freshly sampled positive pixels to exact parent authentication",
            changed_extent && changed_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch &&
                state.mDrawableSizeCalls == drawable_queries_before_failures + 2 && state.mAcquireNextImageCalls == 0 &&
-               state.mDrawCalls == 0);
+               state.mBindVertexBuffersCalls == 0 && state.mDrawCalls == 0);
 
     VulkanSwapchainFrameClearColor invalid_clear = draw_clear;
     invalid_clear.mRgba[2]                       = std::numeric_limits<float>::quiet_NaN();
@@ -3152,25 +3333,32 @@ void window_sdl_vulkan_object::test<24>()
     ensure("diagnostic draw preserves the core's typed normalized-color preflight",
            invalid_clear_error && invalid_clear_error->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor &&
                !invalid_clear_error->mOperationError && state.mDrawableSizeCalls == drawable_queries_before_failures + 3 &&
-               state.mAcquireNextImageCalls == 0 && state.mDrawCalls == 0);
+               state.mAcquireNextImageCalls == 0 && state.mBindVertexBuffersCalls == 0 && state.mDrawCalls == 0);
 
-    state.mAcquiredImageIndex                                              = 2;
-    const VkRenderPass                                expected_render_pass = instance->swapchainPresentationRenderPass();
-    const VkFramebuffer                               expected_framebuffer = instance->swapchainPresentationFramebuffer(2);
-    const VkPipeline                                  expected_pipeline    = instance->swapchainPresentationPipeline();
-    const VkExtent2D                                  expected_extent      = instance->swapchainImageExtent();
+    state.mAcquiredImageIndex                                                   = 2;
+    const VkRenderPass                                expected_render_pass      = instance->swapchainPresentationRenderPass();
+    const VkFramebuffer                               expected_framebuffer      = instance->swapchainPresentationFramebuffer(2);
+    const VkPipeline                                  expected_pipeline         = instance->swapchainPresentationPipeline();
+    const VkExtent2D                                  expected_extent           = instance->swapchainImageExtent();
+    const std::size_t                                 queue_submits_before_draw = state.mQueueSubmitCalls;
     const auto                                        draw_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
     const VulkanSwapchainFrameSlotPresentationSuccess expected_success{ VulkanSwapchainFrameSlotPresentationOutcome::Presented,
                                                                         std::uint32_t{ 2 } };
     ensure("diagnostic draw returns the exact parent success and reusable image disposition",
            draw_result == VulkanSwapchainFrameSlotParentPresentationResult{ expected_success } &&
                instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
-               !instance->swapchainFrameAcquiredImageIndex());
+               !instance->swapchainFrameAcquiredImageIndex() && instance->hasUploadDestinationGeneration() &&
+               instance->uploadDestinationResourceHandle() == retained_destination.mHandle &&
+               instance->uploadDestinationExpectedContentIdentity() == retained_destination.mExpectedIdentity &&
+               instance->uploadDestinationResidentContentIdentity() == retained_destination.mResidentIdentity &&
+               instance->uploadDestinationBuffer() == retained_destination.mBuffer &&
+               instance->uploadDestinationMemory() == retained_destination.mMemory);
     ensure("diagnostic draw samples backing pixels once and records one balanced submitted pass",
            state.mDrawableSizeCalls == drawable_queries_before_failures + 4 && state.mAcquireNextImageCalls == 1 &&
                state.mPipelineBarrierCalls == 2 && state.mBeginRenderPassCalls == 1 && state.mEndRenderPassCalls == 1 &&
-               state.mClearColorImageCalls == 0 && state.mBindPipelineCalls == 1 && state.mSetViewportCalls == 1 &&
-               state.mSetScissorCalls == 1 && state.mDrawCalls == 1 && state.mQueueSubmitCalls == 1 && state.mQueuePresentCalls == 1 &&
+               state.mClearColorImageCalls == 0 && state.mBindPipelineCalls == 1 && state.mBindVertexBuffersCalls == 1 &&
+               state.mSetViewportCalls == 1 && state.mSetScissorCalls == 1 && state.mDrawCalls == 1 &&
+               state.mQueueSubmitCalls == queue_submits_before_draw + 1 && state.mQueuePresentCalls == 1 &&
                state.mSubmitWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     ensure("diagnostic draw forwards the acquired framebuffer, pipeline, and exact clear value",
            state.mRenderPassCommandBuffer == state.mCommandBuffer && state.mRenderPass == expected_render_pass &&
@@ -3178,7 +3366,10 @@ void window_sdl_vulkan_object::test<24>()
                state.mRenderPassArea.offset.y == 0 && state.mRenderPassArea.extent.width == expected_extent.width &&
                state.mRenderPassArea.extent.height == expected_extent.height && state.mRenderPassContents == VK_SUBPASS_CONTENTS_INLINE &&
                state.mDrawCommandBuffer == state.mCommandBuffer && state.mPipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
-               state.mBoundPipeline == expected_pipeline && state.mRenderPassClear.color.float32[0] == draw_clear.mRgba[0] &&
+               state.mBoundPipeline == expected_pipeline && state.mFirstVertexBinding == 0 && state.mVertexBindingCount == 1 &&
+               state.mBoundVertexBuffer == retained_destination.mBuffer && state.mBoundVertexOffset == 0 &&
+               state.mBindPipelineOrder < state.mBindVertexBuffersOrder && state.mBindVertexBuffersOrder < state.mDrawOrder &&
+               state.mRenderPassClear.color.float32[0] == draw_clear.mRgba[0] &&
                state.mRenderPassClear.color.float32[1] == draw_clear.mRgba[1] &&
                state.mRenderPassClear.color.float32[2] == draw_clear.mRgba[2] &&
                state.mRenderPassClear.color.float32[3] == draw_clear.mRgba[3]);
@@ -3197,7 +3388,7 @@ void window_sdl_vulkan_object::test<24>()
     ensure("the existing render-pass clear wrapper remains independent from the explicit draw route",
            presentationSucceeded(clear_result, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
                state.mBeginRenderPassCalls == 2 && state.mEndRenderPassCalls == 2 && state.mBindPipelineCalls == 1 &&
-               state.mSetViewportCalls == 1 && state.mSetScissorCalls == 1 && state.mDrawCalls == 1);
+               state.mBindVertexBuffersCalls == 1 && state.mSetViewportCalls == 1 && state.mSetScissorCalls == 1 && state.mDrawCalls == 1);
 
     ensure("the diagnostic draw fixture tears down child-first", owner->reset());
 }
