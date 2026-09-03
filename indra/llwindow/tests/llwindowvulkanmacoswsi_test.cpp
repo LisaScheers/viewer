@@ -420,6 +420,117 @@ void window_vulkan_macos_wsi_object::test<1>()
                   std::uint32_t{ 0 });
 
     const LLRenderContract::TextureUploadFixture upload_fixture = LLRenderContract::makeTextureUploadFixture();
+    const LLRenderContract::TextureUploadCase    texture_upload_case = LLRenderContract::makeTextureUploadCase();
+    const auto decoded_texture_upload = LLRenderContract::decodeStreamingUploadFrame(texture_upload_case.mFrame);
+    ensure("the native texture source starts from the exact decoded replacement-image upload contract",
+           decoded_texture_upload &&
+               decoded_texture_upload->mHandles.mReplacementImage == LLRenderContract::StreamingUploadHandles{}.mReplacementImage &&
+               decoded_texture_upload->mRevision == LLRenderContract::TEXTURE_UPLOAD_REVISION &&
+               decoded_texture_upload->mExtent.mWidth == LLRenderContract::TEXTURE_UPLOAD_RESIDENT_WIDTH &&
+               decoded_texture_upload->mExtent.mHeight == LLRenderContract::TEXTURE_UPLOAD_RESIDENT_HEIGHT &&
+               decoded_texture_upload->mSourceFormat == LLRenderContract::PixelFormat::RGBA8Unorm &&
+               decoded_texture_upload->mRowPitch == LLRenderContract::TEXTURE_UPLOAD_ROW_PITCH &&
+               decoded_texture_upload->mRowOrigin == LLRenderContract::RowOrigin::TopLeft &&
+               decoded_texture_upload->mPixels.size() == LLRenderVulkan::VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT &&
+               std::equal(decoded_texture_upload->mPixels.begin(), decoded_texture_upload->mPixels.end(),
+                          upload_fixture.mSourceRGBA8.begin()));
+    LLRenderVulkan::VulkanTextureUploadSourceBytes texture_source_bytes{};
+    std::copy(decoded_texture_upload->mPixels.begin(), decoded_texture_upload->mPixels.end(), texture_source_bytes.begin());
+    bool         exact_poison_padding = true;
+    std::uint8_t expected_poison      = 0xf0;
+    for (std::size_t row = 0; row < LLRenderContract::TEXTURE_UPLOAD_RESIDENT_HEIGHT; ++row)
+    {
+        for (std::size_t byte = 32; byte < LLRenderContract::TEXTURE_UPLOAD_ROW_PITCH; ++byte)
+        {
+            exact_poison_padding =
+                exact_poison_padding && texture_source_bytes[row * LLRenderContract::TEXTURE_UPLOAD_ROW_PITCH + byte] == expected_poison++;
+        }
+    }
+    ensure("the decoded source bytes contain all sixteen diagnostic row-padding poison bytes", exact_poison_padding);
+
+    const LLRenderVulkan::VulkanTextureUploadSourceDescription texture_source_description =
+        LLRenderVulkan::vulkanTextureUploadSourceDescription(texture_source_bytes);
+    LLRenderVulkan::VulkanTextureUploadSourceRequest texture_source_request;
+    texture_source_request.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
+    texture_source_request.mDescription            = texture_source_description;
+    texture_source_request.mInstanceOwnerCheck     = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    texture_source_request.mWindowGenerationCheck  = { &operation_context, frameSlotWindowGenerationIsCurrent };
+    const F64  texture_source_backing_scale        = owner->backingScale();
+    const auto texture_source_error = mutable_instance_generation->acquireTextureUploadSourceGeneration(texture_source_request);
+    ensure("the exact texture destination acquires one native immutable 144-byte upload source", !texture_source_error.has_value());
+    ensure("the native texture source publishes its exact contract and host-visible allocation metadata",
+           instance_generation->hasTextureUploadSourceGeneration() &&
+               instance_generation->textureUploadSourceResourceHandle() == texture_source_description.mHandle &&
+               instance_generation->textureUploadSourceExpectedRevision() == texture_source_description.mExpectedRevision &&
+               instance_generation->textureUploadSourceResidentExtent().mWidth == LLRenderContract::TEXTURE_UPLOAD_RESIDENT_WIDTH &&
+               instance_generation->textureUploadSourceResidentExtent().mHeight == LLRenderContract::TEXTURE_UPLOAD_RESIDENT_HEIGHT &&
+               instance_generation->textureUploadSourcePixelFormat() == LLRenderContract::PixelFormat::RGBA8Unorm &&
+               instance_generation->textureUploadSourceRowPitch() == LLRenderContract::TEXTURE_UPLOAD_ROW_PITCH &&
+               instance_generation->textureUploadSourceRowOrigin() == LLRenderContract::RowOrigin::TopLeft &&
+               instance_generation->textureUploadSourceContentIdentity() ==
+                   LLRenderContract::stableByteContentIdentity(texture_source_description.mBytes) &&
+               instance_generation->textureUploadSourceFlags() == 0 &&
+               instance_generation->textureUploadSourceUsage() == VK_BUFFER_USAGE_TRANSFER_SRC_BIT &&
+               instance_generation->textureUploadSourceSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
+               instance_generation->textureUploadSourceBuffer() != VK_NULL_HANDLE &&
+               instance_generation->textureUploadSourceMemory() != VK_NULL_HANDLE &&
+               instance_generation->textureUploadSourceMemory() != retained_texture_memory &&
+               instance_generation->textureUploadSourceByteCount() == LLRenderVulkan::VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT &&
+               instance_generation->textureUploadSourceAllocationSize() >= instance_generation->textureUploadSourceByteCount() &&
+               (instance_generation->textureUploadSourceMemoryPropertyFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 &&
+               instance_generation->textureUploadSourceIsCoherent() ==
+                   ((instance_generation->textureUploadSourceMemoryPropertyFlags() & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0) &&
+               texture_destination_retained());
+    ensure_equals("texture-source acquisition emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("texture-source acquisition preserves the private Cocoa owner, scale, and exact backing-pixel geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == texture_source_backing_scale &&
+               owner->drawableWidth() == BACKING_WIDTH && owner->drawableHeight() == BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("texture-source acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("texture-source acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const LLRenderContract::ImageHandle retained_texture_source_handle      = instance_generation->textureUploadSourceResourceHandle();
+    const std::uint64_t                 retained_texture_source_revision    = instance_generation->textureUploadSourceExpectedRevision();
+    const LLRenderContract::Extent2D    retained_texture_source_extent      = instance_generation->textureUploadSourceResidentExtent();
+    const LLRenderContract::PixelFormat retained_texture_source_format      = instance_generation->textureUploadSourcePixelFormat();
+    const std::uint32_t                 retained_texture_source_row_pitch   = instance_generation->textureUploadSourceRowPitch();
+    const LLRenderContract::RowOrigin   retained_texture_source_row_origin  = instance_generation->textureUploadSourceRowOrigin();
+    const std::uint64_t                 retained_texture_source_identity    = instance_generation->textureUploadSourceContentIdentity();
+    const VkBufferCreateFlags           retained_texture_source_flags       = instance_generation->textureUploadSourceFlags();
+    const VkBufferUsageFlags            retained_texture_source_usage       = instance_generation->textureUploadSourceUsage();
+    const VkSharingMode                 retained_texture_source_sharing     = instance_generation->textureUploadSourceSharingMode();
+    const VkBuffer                      retained_texture_source_buffer      = instance_generation->textureUploadSourceBuffer();
+    const VkDeviceMemory                retained_texture_source_memory      = instance_generation->textureUploadSourceMemory();
+    const VkDeviceSize                  retained_texture_source_bytes       = instance_generation->textureUploadSourceByteCount();
+    const VkDeviceSize                  retained_texture_source_allocation  = instance_generation->textureUploadSourceAllocationSize();
+    const std::uint32_t                 retained_texture_source_memory_type = instance_generation->textureUploadSourceMemoryTypeIndex();
+    const VkMemoryPropertyFlags retained_texture_source_memory_flags        = instance_generation->textureUploadSourceMemoryPropertyFlags();
+    const bool                  retained_texture_source_coherent            = instance_generation->textureUploadSourceIsCoherent();
+    const auto                  texture_source_retained                     = [&]() noexcept
+    {
+        return instance_generation->hasTextureUploadSourceGeneration() && texture_destination_retained() &&
+               instance_generation->textureUploadSourceResourceHandle() == retained_texture_source_handle &&
+               instance_generation->textureUploadSourceExpectedRevision() == retained_texture_source_revision &&
+               instance_generation->textureUploadSourceResidentExtent().mWidth == retained_texture_source_extent.mWidth &&
+               instance_generation->textureUploadSourceResidentExtent().mHeight == retained_texture_source_extent.mHeight &&
+               instance_generation->textureUploadSourcePixelFormat() == retained_texture_source_format &&
+               instance_generation->textureUploadSourceRowPitch() == retained_texture_source_row_pitch &&
+               instance_generation->textureUploadSourceRowOrigin() == retained_texture_source_row_origin &&
+               instance_generation->textureUploadSourceContentIdentity() == retained_texture_source_identity &&
+               instance_generation->textureUploadSourceFlags() == retained_texture_source_flags &&
+               instance_generation->textureUploadSourceUsage() == retained_texture_source_usage &&
+               instance_generation->textureUploadSourceSharingMode() == retained_texture_source_sharing &&
+               instance_generation->textureUploadSourceBuffer() == retained_texture_source_buffer &&
+               instance_generation->textureUploadSourceMemory() == retained_texture_source_memory &&
+               instance_generation->textureUploadSourceByteCount() == retained_texture_source_bytes &&
+               instance_generation->textureUploadSourceAllocationSize() == retained_texture_source_allocation &&
+               instance_generation->textureUploadSourceMemoryTypeIndex() == retained_texture_source_memory_type &&
+               instance_generation->textureUploadSourceMemoryPropertyFlags() == retained_texture_source_memory_flags &&
+               instance_generation->textureUploadSourceIsCoherent() == retained_texture_source_coherent;
+    };
+
     static_assert(sizeof(upload_fixture.mScreenTriangle) == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT);
     LLRenderVulkan::VulkanUploadSourceDescription upload_source_description;
     upload_source_description.mHandle = LLRenderContract::StreamingUploadHandles{}.mScreenTriangle;
@@ -444,6 +555,11 @@ void window_vulkan_macos_wsi_object::test<1>()
                (instance_generation->uploadSourceMemoryPropertyFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 &&
                instance_generation->uploadSourceIsCoherent() ==
                    ((instance_generation->uploadSourceMemoryPropertyFlags() & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0));
+    ensure("the 144-byte texture and 48-byte vertex sources coexist with distinct buffers and allocations",
+           texture_source_retained() && instance_generation->textureUploadSourceBuffer() != instance_generation->uploadSourceBuffer() &&
+               instance_generation->textureUploadSourceMemory() != instance_generation->uploadSourceMemory() &&
+               instance_generation->textureUploadSourceByteCount() == LLRenderVulkan::VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT &&
+               instance_generation->uploadSourceByteCount() == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT);
     ensure_equals("upload-source acquisition emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
     ensure("upload-source acquisition preserves the private Cocoa owner and exact drawable geometry",
@@ -544,7 +660,7 @@ void window_vulkan_macos_wsi_object::test<1>()
            instance_generation->uploadDestinationIsResident() &&
                instance_generation->uploadDestinationExpectedContentIdentity() == retained_upload_source_identity &&
                instance_generation->uploadDestinationResidentContentIdentity() == retained_upload_source_identity &&
-               upload_source_retained());
+               upload_source_retained() && texture_source_retained());
 
     const auto  completed_retry       = mutable_instance_generation->retryUploadTransferCompletion(upload_transfer_operation);
     const auto* completed_retry_error = std::get_if<LLRenderVulkan::VulkanUploadTransferParentOperationError>(&completed_retry);
@@ -808,7 +924,7 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->uploadTransferCommandBuffer() == VK_NULL_HANDLE &&
                instance_generation->uploadTransferFence() == VK_NULL_HANDLE && instance_generation->uploadTransferSubmissionCount() == 0 &&
                instance_generation->uploadTransferCompletionWaitCount() == 0 && !instance_generation->uploadTransferDisposition() &&
-               resident_destination_only_retained());
+               resident_destination_only_retained() && texture_source_retained());
     ensure("pre-draw upload retirement leaves the complete presentation and observation chain live",
            instance_generation->hasSurfaceGeneration() && instance_generation->surface() != VK_NULL_HANDLE &&
                instance_generation->hasPresentationDeviceGeneration() && instance_generation->physicalDevice() != VK_NULL_HANDLE &&
@@ -851,7 +967,8 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->swapchainFramePresentationReadySemaphore() == initial_presentation_ready &&
                instance_generation->swapchainFrameSubmissionFence() == initial_submission_fence &&
                instance_generation->swapchainFramePresentCompletionFence() == initial_present_completion_fence);
-    ensure("the initial observed draw uses and preserves only the exact resident upload destination", resident_destination_only_retained());
+    ensure("the initial observed draw preserves the exact resident vertex destination and independent texture source",
+           resident_destination_only_retained() && texture_source_retained());
     ensure_equals("the initial observed draw emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
     ensure("the initial observed draw preserves the private Cocoa owner and exact Vulkan generation",
@@ -930,8 +1047,34 @@ void window_vulkan_macos_wsi_object::test<1>()
                                 initial_readback_extent));
     ensure_equals("changed-extent rebuild emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
-    ensure("same-surface rebuild preserves the exact native texture image, allocation, view, and contract metadata",
-           texture_destination_retained());
+    ensure("same-surface rebuild preserves the exact native texture source and destination independently of swapchain children",
+           texture_source_retained() && texture_destination_retained());
+    ensure("the native smoke directly resets the texture source before its image destination",
+           mutable_instance_generation->resetTextureUploadSourceGeneration() && !instance_generation->hasTextureUploadSourceGeneration() &&
+               instance_generation->textureUploadSourceResourceHandle() == LLRenderContract::ImageHandle{} &&
+               instance_generation->textureUploadSourceExpectedRevision() == 0 &&
+               instance_generation->textureUploadSourceResidentExtent().mWidth == 0 &&
+               instance_generation->textureUploadSourceResidentExtent().mHeight == 0 &&
+               instance_generation->textureUploadSourceRowPitch() == 0 && instance_generation->textureUploadSourceContentIdentity() == 0 &&
+               instance_generation->textureUploadSourceBuffer() == VK_NULL_HANDLE &&
+               instance_generation->textureUploadSourceMemory() == VK_NULL_HANDLE &&
+               instance_generation->textureUploadSourceByteCount() == 0 && instance_generation->textureUploadSourceAllocationSize() == 0 &&
+               instance_generation->textureUploadSourceMemoryTypeIndex() == 0 &&
+               instance_generation->textureUploadSourceMemoryPropertyFlags() == 0 &&
+               !instance_generation->textureUploadSourceIsCoherent() && texture_destination_retained() &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
+               instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->hasSwapchainPresentationPipelineGeneration() && instance_generation->hasSwapchainReadbackGeneration() &&
+               instance_generation->hasSwapchainFrameSlotGeneration());
+    ensure_equals("texture-source rebuild retention and direct reset emit no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
+    ensure("texture-source reset preserves the private Cocoa owner, scale, and exact changed backing-pixel geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == texture_source_backing_scale &&
+               owner->drawableWidth() == REBUILT_BACKING_WIDTH && owner->drawableHeight() == REBUILT_BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("texture-source reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("texture-source reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
     ensure("the native smoke directly resets the texture destination while all swapchain parents remain live",
            mutable_instance_generation->resetTextureUploadDestinationGeneration() &&
                !instance_generation->hasTextureUploadDestinationGeneration() &&

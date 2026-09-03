@@ -188,6 +188,10 @@ struct FakeState
     VkImage                          mTextureImage            = reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x87000));
     VkDeviceMemory                   mTextureMemory           = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x88000));
     VkImageView                      mTextureImageView        = reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x89000));
+
+    VkBuffer       mTextureUploadSourceBuffer = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x8a000));
+    VkDeviceMemory mTextureUploadSourceMemory = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x8b000));
+
     VkMemoryRequirements             mTextureMemoryRequirements{ 4096, 256, 1 };
     VkImageCreateInfo                mTextureImageCreateInfo{};
     VkImageViewCreateInfo            mTextureImageViewCreateInfo{};
@@ -203,6 +207,24 @@ struct FakeState
     std::size_t                      mTextureViewDestroyOrder      = 0;
     std::size_t                      mTextureImageDestroyOrder     = 0;
     std::size_t                      mTextureMemoryFreeOrder       = 0;
+
+    std::size_t mTextureUploadSourceBufferDestroyOrder = 0;
+    std::size_t mTextureUploadSourceMemoryFreeOrder    = 0;
+    std::size_t mDeviceDestroyOrder                    = 0;
+
+    std::array<std::uint8_t, LLRenderContract::TEXTURE_UPLOAD_SOURCE_BYTE_COUNT> mTextureUploadMappedBytes{};
+    VkBufferCreateInfo                                                           mTextureUploadSourceCreateInfo{};
+    std::size_t                                                                  mDestroyTextureUploadSourceBufferCalls = 0;
+    std::size_t                                                                  mFreeTextureUploadSourceMemoryCalls    = 0;
+    std::size_t                                                                  mMapTextureUploadSourceMemoryCalls     = 0;
+    std::size_t                                                                  mFlushTextureUploadSourceMemoryCalls   = 0;
+    std::size_t                                                                  mUnmapTextureUploadSourceMemoryCalls   = 0;
+    std::size_t                                                                  mTextureUploadSourceOperationSequence  = 0;
+    std::size_t                                                                  mTextureUploadSourceMapOrder           = 0;
+    std::size_t                                                                  mTextureUploadSourceFlushOrder         = 0;
+    std::size_t                                                                  mTextureUploadSourceUnmapOrder         = 0;
+    bool                                                                         mTextureUploadSourceMapped             = false;
+
     VkBuffer                         mLastCreatedBuffer       = VK_NULL_HANDLE;
     std::array<std::uint8_t, LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT> mUploadMappedBytes{};
     std::uint8_t                                                              mReadbackMappedByte  = 0;
@@ -582,8 +604,12 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice device,
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL fakeDestroyDevice(VkDevice, const VkAllocationCallbacks*) noexcept
+VKAPI_ATTR void VKAPI_CALL fakeDestroyDevice(VkDevice device, const VkAllocationCallbacks*) noexcept
 {
+    if (gVulkanState && device == gVulkanState->mDevice)
+    {
+        gVulkanState->mDeviceDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeGetDeviceQueue(VkDevice      device,
@@ -1273,9 +1299,19 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice,
     }
     ++gVulkanState->mCreateBufferCalls;
     gVulkanState->mReadbackBufferSize = create_info->size;
-    if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+    if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT && create_info->size == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT)
     {
         *buffer = gVulkanState->mUploadSourceBuffer;
+    }
+    else if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT &&
+             create_info->size == LLRenderContract::TEXTURE_UPLOAD_SOURCE_BYTE_COUNT)
+    {
+        *buffer                                      = gVulkanState->mTextureUploadSourceBuffer;
+        gVulkanState->mTextureUploadSourceCreateInfo = *create_info;
+    }
+    else if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
     }
     else if (create_info->usage == (VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
     {
@@ -1291,7 +1327,12 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice,
 
 VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice, VkBuffer buffer, const VkAllocationCallbacks*) noexcept
 {
-    if (gVulkanState && buffer == gVulkanState->mReadbackBuffer)
+    if (gVulkanState && buffer == gVulkanState->mTextureUploadSourceBuffer)
+    {
+        ++gVulkanState->mDestroyTextureUploadSourceBufferCalls;
+        gVulkanState->mTextureUploadSourceBufferDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+    else if (gVulkanState && buffer == gVulkanState->mReadbackBuffer)
     {
         ++gVulkanState->mDestroyBufferCalls;
     }
@@ -1301,7 +1342,7 @@ VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice, VkBuffer bu
 {
     if (gVulkanState &&
         (buffer == gVulkanState->mReadbackBuffer || buffer == gVulkanState->mUploadSourceBuffer ||
-         buffer == gVulkanState->mUploadDestinationBuffer) &&
+         buffer == gVulkanState->mUploadDestinationBuffer || buffer == gVulkanState->mTextureUploadSourceBuffer) &&
         requirements)
     {
         *requirements = { gVulkanState->mReadbackBufferSize, 256, 1 };
@@ -1333,14 +1374,22 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice,
     }
     *memory = gVulkanState->mLastCreatedBuffer == gVulkanState->mUploadSourceBuffer
                   ? gVulkanState->mUploadSourceMemory
-                  : (gVulkanState->mLastCreatedBuffer == gVulkanState->mUploadDestinationBuffer ? gVulkanState->mUploadDestinationMemory
-                                                                                                : gVulkanState->mReadbackMemory);
+                  : (gVulkanState->mLastCreatedBuffer == gVulkanState->mUploadDestinationBuffer
+                         ? gVulkanState->mUploadDestinationMemory
+                         : (gVulkanState->mLastCreatedBuffer == gVulkanState->mTextureUploadSourceBuffer
+                                ? gVulkanState->mTextureUploadSourceMemory
+                                : gVulkanState->mReadbackMemory));
     return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks*) noexcept
 {
-    if (gVulkanState && memory == gVulkanState->mTextureMemory)
+    if (gVulkanState && memory == gVulkanState->mTextureUploadSourceMemory)
+    {
+        ++gVulkanState->mFreeTextureUploadSourceMemoryCalls;
+        gVulkanState->mTextureUploadSourceMemoryFreeOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+    else if (gVulkanState && memory == gVulkanState->mTextureMemory)
     {
         ++gVulkanState->mFreeTextureMemoryCalls;
         gVulkanState->mTextureMemoryFreeOrder = ++gVulkanState->mTextureDestroySequence;
@@ -1356,39 +1405,69 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice, VkBuffer buffer, V
     const bool matching_pair =
         gVulkanState && ((buffer == gVulkanState->mReadbackBuffer && memory == gVulkanState->mReadbackMemory) ||
                          (buffer == gVulkanState->mUploadSourceBuffer && memory == gVulkanState->mUploadSourceMemory) ||
-                         (buffer == gVulkanState->mUploadDestinationBuffer && memory == gVulkanState->mUploadDestinationMemory));
+                         (buffer == gVulkanState->mUploadDestinationBuffer && memory == gVulkanState->mUploadDestinationMemory) ||
+                         (buffer == gVulkanState->mTextureUploadSourceBuffer && memory == gVulkanState->mTextureUploadSourceMemory));
     return matching_pair && offset == 0 ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size,
                                              VkMemoryMapFlags flags, void** data) noexcept
 {
-    if (!gVulkanState || (memory != gVulkanState->mReadbackMemory && memory != gVulkanState->mUploadSourceMemory) || offset != 0 ||
-        size != VK_WHOLE_SIZE || flags != 0 || !data)
+    if (!gVulkanState ||
+        (memory != gVulkanState->mReadbackMemory && memory != gVulkanState->mUploadSourceMemory &&
+         memory != gVulkanState->mTextureUploadSourceMemory) ||
+        offset != 0 || size != VK_WHOLE_SIZE || flags != 0 || !data)
     {
         return VK_ERROR_MEMORY_MAP_FAILED;
     }
     ++gVulkanState->mMapMemoryCalls;
-    *data = memory == gVulkanState->mUploadSourceMemory ? static_cast<void*>(gVulkanState->mUploadMappedBytes.data())
-                                                        : static_cast<void*>(&gVulkanState->mReadbackMappedByte);
+    if (memory == gVulkanState->mTextureUploadSourceMemory)
+    {
+        ++gVulkanState->mMapTextureUploadSourceMemoryCalls;
+        gVulkanState->mTextureUploadSourceMapOrder = ++gVulkanState->mTextureUploadSourceOperationSequence;
+        gVulkanState->mTextureUploadSourceMapped   = true;
+        *data                                      = static_cast<void*>(gVulkanState->mTextureUploadMappedBytes.data());
+    }
+    else
+    {
+        *data = memory == gVulkanState->mUploadSourceMemory ? static_cast<void*>(gVulkanState->mUploadMappedBytes.data())
+                                                            : static_cast<void*>(&gVulkanState->mReadbackMappedByte);
+    }
     return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL fakeFlushMappedMemoryRanges(VkDevice device, std::uint32_t range_count,
                                                            const VkMappedMemoryRange* ranges) noexcept
 {
-    return gVulkanState && device == gVulkanState->mDevice && range_count == 1 && ranges &&
-                   ranges[0].sType == VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE && ranges[0].memory == gVulkanState->mUploadSourceMemory &&
-                   ranges[0].offset == 0 && ranges[0].size == VK_WHOLE_SIZE
-               ? VK_SUCCESS
-               : VK_ERROR_INITIALIZATION_FAILED;
+    const bool valid =
+        gVulkanState && device == gVulkanState->mDevice && range_count == 1 && ranges &&
+        ranges[0].sType == VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE &&
+        (ranges[0].memory == gVulkanState->mUploadSourceMemory || ranges[0].memory == gVulkanState->mTextureUploadSourceMemory) &&
+        ranges[0].offset == 0 && ranges[0].size == VK_WHOLE_SIZE;
+    if (valid && ranges[0].memory == gVulkanState->mTextureUploadSourceMemory)
+    {
+        if (!gVulkanState->mTextureUploadSourceMapped)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        ++gVulkanState->mFlushTextureUploadSourceMemoryCalls;
+        gVulkanState->mTextureUploadSourceFlushOrder = ++gVulkanState->mTextureUploadSourceOperationSequence;
+    }
+    return valid ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice, VkDeviceMemory memory) noexcept
 {
-    if (gVulkanState && (memory == gVulkanState->mReadbackMemory || memory == gVulkanState->mUploadSourceMemory))
+    if (gVulkanState && (memory == gVulkanState->mReadbackMemory || memory == gVulkanState->mUploadSourceMemory ||
+                         memory == gVulkanState->mTextureUploadSourceMemory))
     {
         ++gVulkanState->mUnmapMemoryCalls;
+        if (memory == gVulkanState->mTextureUploadSourceMemory)
+        {
+            ++gVulkanState->mUnmapTextureUploadSourceMemoryCalls;
+            gVulkanState->mTextureUploadSourceUnmapOrder = ++gVulkanState->mTextureUploadSourceOperationSequence;
+            gVulkanState->mTextureUploadSourceMapped     = false;
+        }
     }
 }
 
@@ -3718,6 +3797,139 @@ void window_sdl_vulkan_object::test<26>()
                !generation->hasLogicalDeviceGeneration() && !generation->hasPresentationDeviceGeneration() &&
                state.mDestroyTextureImageViewCalls == 2 && state.mDestroyTextureImageCalls == 2 && state.mFreeTextureMemoryCalls == 2);
     ensure("texture destination fixture tears down its retained instance", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<27>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 233, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("texture source fixture acquires the complete SDL owner chain", owner && acquireCompleteFrameSlot(*owner));
+
+    auto* generation = const_cast<VulkanInstanceGeneration*>(owner->instanceGeneration());
+    ensure("texture source fixture publishes its mutable aggregate", generation != nullptr);
+    UploadOperationContext context{ owner, generation };
+
+    const VulkanTextureUploadDestinationDescription destination_description = vulkanTextureUploadDestinationDescription();
+    const VulkanTextureUploadDestinationRequest     destination_request{ generation->nativeWindowGeneration(),
+                                                                     destination_description,
+                                                                         { &context, uploadInstanceOwnerIsCurrent },
+                                                                         { &context, uploadWindowGenerationIsCurrent } };
+    ensure("texture source fixture first acquires its exact Stage 57 destination",
+           !generation->acquireTextureUploadDestinationGeneration(destination_request));
+    const VkImage        retained_image        = generation->textureUploadDestinationImage();
+    const VkDeviceMemory retained_image_memory = generation->textureUploadDestinationMemory();
+    const VkImageView    retained_image_view   = generation->textureUploadDestinationImageView();
+
+    const VulkanUploadSourceDescription vertex_description = vulkanScreenTriangleUploadSourceDescription();
+    const VulkanUploadSourceRequest     vertex_request{ generation->nativeWindowGeneration(),
+                                                    vertex_description,
+                                                        { &context, uploadInstanceOwnerIsCurrent },
+                                                        { &context, uploadWindowGenerationIsCurrent } };
+    state.mMemoryProperties.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    ensure("texture source fixture also acquires the existing noncoherent 48-byte vertex source",
+           !generation->acquireUploadSourceGeneration(vertex_request));
+    const VkBuffer       retained_vertex_buffer = generation->uploadSourceBuffer();
+    const VkDeviceMemory retained_vertex_memory = generation->uploadSourceMemory();
+
+    const LLRenderContract::TextureUploadFixture fixture = LLRenderContract::makeTextureUploadFixture();
+    static_assert(fixture.mSourceRGBA8.size() == VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT);
+    const VulkanTextureUploadSourceDescription description = vulkanTextureUploadSourceDescription(fixture.mSourceRGBA8);
+    const VulkanTextureUploadSourceRequest     request{ generation->nativeWindowGeneration(),
+                                                    description,
+                                                        { &context, uploadInstanceOwnerIsCurrent },
+                                                        { &context, uploadWindowGenerationIsCurrent } };
+    ensure("the SDL aggregate acquires the exact 144-byte texture source after its image destination",
+           !generation->acquireTextureUploadSourceGeneration(request) && generation->hasTextureUploadSourceGeneration());
+
+    const VkBuffer       retained_source_buffer   = generation->textureUploadSourceBuffer();
+    const VkDeviceMemory retained_source_memory   = generation->textureUploadSourceMemory();
+    const std::uint64_t  retained_source_identity = generation->textureUploadSourceContentIdentity();
+    ensure("the SDL aggregate publishes exact immutable texture-source metadata",
+           generation->textureUploadSourceResourceHandle() == description.mHandle &&
+               generation->textureUploadSourceExpectedRevision() == description.mExpectedRevision &&
+               generation->textureUploadSourceResidentExtent().mWidth == LLRenderContract::TEXTURE_UPLOAD_RESIDENT_WIDTH &&
+               generation->textureUploadSourceResidentExtent().mHeight == LLRenderContract::TEXTURE_UPLOAD_RESIDENT_HEIGHT &&
+               generation->textureUploadSourcePixelFormat() == LLRenderContract::PixelFormat::RGBA8Unorm &&
+               generation->textureUploadSourceRowPitch() == LLRenderContract::TEXTURE_UPLOAD_ROW_PITCH &&
+               generation->textureUploadSourceRowOrigin() == LLRenderContract::RowOrigin::TopLeft && retained_source_identity != 0 &&
+               generation->textureUploadSourceByteCount() == VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT &&
+               generation->textureUploadSourceAllocationSize() == VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT &&
+               generation->textureUploadSourceMemoryTypeIndex() == 0 &&
+               (generation->textureUploadSourceMemoryPropertyFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 &&
+               !generation->textureUploadSourceIsCoherent());
+    ensure("the 144-byte source has native buffer and memory identities distinct from the vertex source and image destination",
+           retained_source_buffer == state.mTextureUploadSourceBuffer && retained_source_buffer != VK_NULL_HANDLE &&
+               retained_source_buffer != retained_vertex_buffer && retained_source_memory == state.mTextureUploadSourceMemory &&
+               retained_source_memory != VK_NULL_HANDLE && retained_source_memory != retained_vertex_memory &&
+               retained_source_memory != retained_image_memory);
+    ensure("the fake receives one exact exclusive transfer-source buffer description",
+           state.mTextureUploadSourceCreateInfo.sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &&
+               state.mTextureUploadSourceCreateInfo.pNext == nullptr && state.mTextureUploadSourceCreateInfo.flags == 0 &&
+               state.mTextureUploadSourceCreateInfo.size == VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT &&
+               state.mTextureUploadSourceCreateInfo.usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT &&
+               state.mTextureUploadSourceCreateInfo.sharingMode == VK_SHARING_MODE_EXCLUSIVE &&
+               state.mTextureUploadSourceCreateInfo.queueFamilyIndexCount == 0 &&
+               state.mTextureUploadSourceCreateInfo.pQueueFamilyIndices == nullptr);
+    ensure("the noncoherent source copies all 144 bytes, flushes the whole allocation, and unmaps before publication",
+           state.mTextureUploadMappedBytes == fixture.mSourceRGBA8 && state.mMapTextureUploadSourceMemoryCalls == 1 &&
+               state.mFlushTextureUploadSourceMemoryCalls == 1 && state.mUnmapTextureUploadSourceMemoryCalls == 1 &&
+               state.mTextureUploadSourceMapOrder < state.mTextureUploadSourceFlushOrder &&
+               state.mTextureUploadSourceFlushOrder < state.mTextureUploadSourceUnmapOrder && !state.mTextureUploadSourceMapped);
+    ensure("texture-source acquisition records no queue work and leaves the image in its immutable creation state",
+           state.mQueueSubmitCalls == 0 && state.mPipelineBarrierCalls == 0 &&
+               generation->textureUploadDestinationInitialLayout() == VK_IMAGE_LAYOUT_UNDEFINED);
+
+    state.mMemoryProperties.memoryTypes[0].propertyFlags =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    state.mDrawableWidth        = 1600;
+    state.mDrawableHeight       = 900;
+    const auto  rebuild         = owner->rebuildSwapchainChain();
+    const auto* rebuild_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuild);
+    ensure("changed-extent rebuild preserves the exact texture source, destination, and vertex-source siblings",
+           rebuild_outcome && *rebuild_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               generation->hasTextureUploadSourceGeneration() && generation->textureUploadSourceBuffer() == retained_source_buffer &&
+               generation->textureUploadSourceMemory() == retained_source_memory &&
+               generation->textureUploadSourceContentIdentity() == retained_source_identity &&
+               generation->textureUploadDestinationImage() == retained_image &&
+               generation->textureUploadDestinationMemory() == retained_image_memory &&
+               generation->textureUploadDestinationImageView() == retained_image_view &&
+               generation->uploadSourceBuffer() == retained_vertex_buffer && generation->uploadSourceMemory() == retained_vertex_memory);
+
+    ensure("direct texture-source reset preserves its exact destination and rebuilt swapchain chain",
+           generation->resetTextureUploadSourceGeneration() && !generation->hasTextureUploadSourceGeneration() &&
+               generation->textureUploadSourceBuffer() == VK_NULL_HANDLE && generation->textureUploadSourceMemory() == VK_NULL_HANDLE &&
+               generation->textureUploadSourceByteCount() == 0 && generation->textureUploadSourceContentIdentity() == 0 &&
+               generation->textureUploadDestinationImage() == retained_image &&
+               generation->textureUploadDestinationMemory() == retained_image_memory &&
+               generation->textureUploadDestinationImageView() == retained_image_view && generation->hasSwapchainGeneration() &&
+               generation->hasSwapchainImagesGeneration() && generation->hasSwapchainPresentationTargetGeneration() &&
+               generation->hasSwapchainPresentationPipelineGeneration() && generation->hasSwapchainFrameSlotGeneration() &&
+               state.mDestroyTextureUploadSourceBufferCalls == 1 && state.mFreeTextureUploadSourceMemoryCalls == 1);
+
+    state.mTextureUploadMappedBytes.fill(0xcd);
+    ensure("the retained destination reacquires an independent coherent texture source and rewrites every byte",
+           !generation->acquireTextureUploadSourceGeneration(request) &&
+               generation->textureUploadSourceBuffer() == retained_source_buffer &&
+               generation->textureUploadSourceMemory() == retained_source_memory && state.mMapTextureUploadSourceMemoryCalls == 2 &&
+               state.mFlushTextureUploadSourceMemoryCalls == 1 && state.mUnmapTextureUploadSourceMemoryCalls == 2 &&
+               state.mTextureUploadMappedBytes == fixture.mSourceRGBA8 && generation->textureUploadSourceIsCoherent() &&
+               !state.mTextureUploadSourceMapped);
+    ensure("surface retirement destroys the texture source before its image destination and logical device",
+           owner->resetSurfaceGeneration() && !generation->hasTextureUploadSourceGeneration() &&
+               !generation->hasTextureUploadDestinationGeneration() && !generation->hasLogicalDeviceGeneration() &&
+               state.mDestroyTextureUploadSourceBufferCalls == 2 && state.mFreeTextureUploadSourceMemoryCalls == 2 &&
+               state.mTextureUploadSourceBufferDestroyOrder < state.mTextureUploadSourceMemoryFreeOrder &&
+               state.mTextureUploadSourceMemoryFreeOrder < state.mTextureViewDestroyOrder &&
+               state.mTextureViewDestroyOrder < state.mTextureImageDestroyOrder &&
+               state.mTextureImageDestroyOrder < state.mTextureMemoryFreeOrder &&
+               state.mTextureMemoryFreeOrder < state.mDeviceDestroyOrder);
+    ensure("texture source fixture tears down its retained instance", owner->reset());
 }
 
 } // namespace tut
