@@ -217,6 +217,7 @@ struct FakeState
     std::size_t                mDestroyImageViewCount      = 0;
     std::size_t                mCreateRenderPassCount      = 0;
     std::size_t                mDestroyRenderPassCount     = 0;
+    std::size_t                      mPresentationRenderPassDestroyOrder = 0;
     std::size_t                mCreateFramebufferCount     = 0;
     std::size_t                mDestroyFramebufferCount    = 0;
     std::size_t                mCreateShaderModuleCount    = 0;
@@ -286,6 +287,9 @@ struct FakeState
     VkPipelineLayout mTextureUploadSampleBindingPipelineLayout = reinterpret_cast<VkPipelineLayout>(static_cast<std::uintptr_t>(0x8e000));
     VkDescriptorPool mTextureUploadSampleBindingDescriptorPool = reinterpret_cast<VkDescriptorPool>(static_cast<std::uintptr_t>(0x8f000));
     VkDescriptorSet  mTextureUploadSampleBindingDescriptorSet  = reinterpret_cast<VkDescriptorSet>(static_cast<std::uintptr_t>(0x90000));
+    VkPipeline       mTextureUploadSamplePipeline              = VK_NULL_HANDLE;
+    VkPipelineLayout mTextureUploadSamplePipelineLayout        = VK_NULL_HANDLE;
+    VkRenderPass     mTextureUploadSamplePipelineRenderPass    = VK_NULL_HANDLE;
     VkSamplerCreateInfo             mTextureUploadSampleBindingSamplerCreateInfo{};
     VkDescriptorSetLayoutCreateInfo mTextureUploadSampleBindingDescriptorSetLayoutCreateInfo{};
     VkDescriptorSetLayoutBinding    mTextureUploadSampleBindingDescriptorSetLayoutBinding{};
@@ -311,6 +315,9 @@ struct FakeState
     std::size_t                     mTextureUploadSampleBindingPipelineLayoutDestroyOrder                            = 0;
     std::size_t                     mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder                       = 0;
     std::size_t                     mTextureUploadSampleBindingSamplerDestroyOrder                                   = 0;
+    std::size_t                     mTextureUploadSamplePipelineCreateCount                                          = 0;
+    std::size_t                     mTextureUploadSamplePipelineDestroyCount                                         = 0;
+    std::size_t                     mTextureUploadSamplePipelineDestroyOrder                                         = 0;
     std::size_t                                                                  mLogicalDeviceDestroyOrder          = 0;
     std::size_t                                                               mUploadDestinationDestroyCount = 0;
     std::size_t                                                               mUploadDestinationFreeCount    = 0;
@@ -942,6 +949,7 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyRenderPass(VkDevice device,
     if (gState && device == gState->mDevice && render_pass != VK_NULL_HANDLE)
     {
         ++gState->mDestroyRenderPassCount;
+        gState->mPresentationRenderPassDestroyOrder = ++gState->mTextureUploadDestinationDestroySequence;
     }
 }
 
@@ -1202,8 +1210,23 @@ VKAPI_ATTR VkResult VKAPI_CALL fakeCreateGraphicsPipelines(VkDevice device,
 {
     if (!gState || device != gState->mDevice || pipeline_cache != VK_NULL_HANDLE || create_info_count != 1 || !create_infos || !pipelines ||
         create_infos[0].sType != VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO || create_infos[0].stageCount != 2 ||
-        create_infos[0].layout != gState->mLastPipelineLayout || create_infos[0].renderPass == VK_NULL_HANDLE ||
-        create_infos[0].subpass != 0)
+        create_infos[0].renderPass == VK_NULL_HANDLE || create_infos[0].subpass != 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    if (create_infos[0].layout == gState->mTextureUploadSampleBindingPipelineLayout)
+    {
+        ++gState->mCreatePipelineCount;
+        ++gState->mTextureUploadSamplePipelineCreateCount;
+        gState->mTextureUploadSamplePipelineLayout     = create_infos[0].layout;
+        gState->mTextureUploadSamplePipelineRenderPass = create_infos[0].renderPass;
+        gState->mTextureUploadSamplePipeline =
+            reinterpret_cast<VkPipeline>(static_cast<std::uintptr_t>(0x91000 + gState->mTextureUploadSamplePipelineCreateCount));
+        *pipelines = gState->mTextureUploadSamplePipeline;
+        return VK_SUCCESS;
+    }
+    if (create_infos[0].layout != gState->mLastPipelineLayout)
     {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -1220,6 +1243,11 @@ VKAPI_ATTR void VKAPI_CALL fakeDestroyPipeline(VkDevice device,
     if (gState && device == gState->mDevice && pipeline != VK_NULL_HANDLE)
     {
         ++gState->mDestroyPipelineCount;
+        if (pipeline == gState->mTextureUploadSamplePipeline)
+        {
+            ++gState->mTextureUploadSamplePipelineDestroyCount;
+            gState->mTextureUploadSamplePipelineDestroyOrder = ++gState->mTextureUploadDestinationDestroySequence;
+        }
     }
 }
 
@@ -4729,6 +4757,7 @@ void window_macosx_vulkan_object::test<26>()
     const VulkanTextureUploadSourceDescription        source_description      = vulkanTextureUploadSourceDescription(fixture.mSourceRGBA8);
     const VulkanTextureUploadDestinationDescription   destination_description = vulkanTextureUploadDestinationDescription();
     const VulkanTextureUploadSampleBindingDescription binding_description     = vulkanTextureUploadSampleBindingDescription();
+    const VulkanTextureUploadSamplePipelineDescription pipeline_description    = vulkanTextureUploadSamplePipelineDescription();
     const VulkanTextureUploadSourceRequest            source_request{ generation->nativeWindowGeneration(),
                                                            source_description,
                                                                       { &context, uploadInstanceOwnerIsCurrent },
@@ -4753,6 +4782,14 @@ void window_macosx_vulkan_object::test<26>()
                                                                    binding_description,
                                                                        { &context, uploadInstanceOwnerIsCurrent },
                                                                        { &context, uploadWindowGenerationIsCurrent } };
+    VulkanTextureUploadSamplePipelineRequest           pipeline_request;
+    pipeline_request.mNativeWindowGeneration   = generation->nativeWindowGeneration();
+    pipeline_request.mDrawableExtent           = generation->swapchainDrawableExtent();
+    pipeline_request.mDestinationDescription   = destination_description;
+    pipeline_request.mSampleBindingDescription = binding_description;
+    pipeline_request.mDescription              = pipeline_description;
+    pipeline_request.mInstanceOwnerCheck       = { &context, uploadInstanceOwnerIsCurrent };
+    pipeline_request.mWindowGenerationCheck    = { &context, uploadWindowGenerationIsCurrent };
 
     state.mMemoryProperties.memoryTypes[0].propertyFlags =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -4770,9 +4807,8 @@ void window_macosx_vulkan_object::test<26>()
                generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead &&
                state.mTextureUploadCopyCalls == 1 && state.mTextureUploadBlitCalls == 2 && state.mTextureUploadImageBarrierCount == 5);
     const std::uint64_t resident_identity = generation->textureUploadDestinationResidentContentIdentity();
-    ensure("the completed resident destination outlives its transfer and source",
-           generation->resetTextureUploadTransferGeneration() && generation->resetTextureUploadSourceGeneration() &&
-               !generation->hasTextureUploadTransferGeneration() && !generation->hasTextureUploadSourceGeneration() &&
+    ensure("the completed resident destination keeps its terminal transfer and source live for pipeline lifetime checks",
+           generation->hasTextureUploadTransferGeneration() && generation->hasTextureUploadSourceGeneration() &&
                generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationIsResident());
 
     const std::size_t shader_module_creates_before_binding        = state.mCreateShaderModuleCount;
@@ -4869,12 +4905,50 @@ void window_macosx_vulkan_object::test<26>()
     const VkPipelineLayout      retained_pipeline_layout = generation->textureUploadSampleBindingPipelineLayout();
     const VkDescriptorPool      retained_pool            = generation->textureUploadSampleBindingDescriptorPool();
     const VkDescriptorSet       retained_set             = generation->textureUploadSampleBindingDescriptorSet();
+
+    const VkRenderPass initial_sample_render_pass = generation->swapchainPresentationRenderPass();
+    ensure("the Cocoa aggregate acquires one sampled pipeline against the exact borrowed binding layout",
+           !generation->acquireTextureUploadSamplePipelineGeneration(pipeline_request) &&
+               generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineResourceHandle() == pipeline_description.mHandle &&
+               generation->textureUploadSamplePipelineLayout() == retained_pipeline_layout &&
+               generation->textureUploadSamplePipeline() == state.mTextureUploadSamplePipeline &&
+               state.mTextureUploadSamplePipelineLayout == retained_pipeline_layout &&
+               state.mTextureUploadSamplePipelineRenderPass == initial_sample_render_pass);
+    ensure("sampled pipeline acquisition creates only two transient shader modules and one pipeline occurrence",
+           state.mTextureUploadSamplePipelineCreateCount == 1 && state.mTextureUploadSamplePipelineDestroyCount == 0 &&
+               state.mCreateShaderModuleCount == shader_module_creates_before_binding + 2 &&
+               state.mDestroyShaderModuleCount == shader_module_destroys_before_binding + 2 &&
+               state.mCreatePipelineLayoutCount == presentation_layout_creates_before_binding &&
+               state.mDestroyPipelineLayoutCount == presentation_layout_destroys_before_binding &&
+               state.mCreatePipelineCount == graphics_pipeline_creates_before_binding + 1 &&
+               state.mDestroyPipelineCount == graphics_pipeline_destroys_before_binding && state.mDrawCount == draw_count_before_binding &&
+               state.mQueueSubmitCount == queue_submits_before_binding);
+    const VkPipeline initial_sample_pipeline = generation->textureUploadSamplePipeline();
+
+    ensure("completed texture-transfer reset preserves the initial sampled pipeline and its borrowed layout",
+           generation->resetTextureUploadTransferGeneration() && !generation->hasTextureUploadTransferGeneration() &&
+               generation->hasTextureUploadSourceGeneration() && generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineLayout() == retained_pipeline_layout &&
+               generation->textureUploadSamplePipeline() == initial_sample_pipeline && state.mTextureUploadSamplePipelineDestroyCount == 0);
+    ensure("texture-source reset preserves the initial sampled pipeline and resident destination",
+           generation->resetTextureUploadSourceGeneration() && !generation->hasTextureUploadSourceGeneration() &&
+               generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineLayout() == retained_pipeline_layout &&
+               generation->textureUploadSamplePipeline() == initial_sample_pipeline &&
+               generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationIsResident() &&
+               state.mTextureUploadSamplePipelineDestroyCount == 0);
+
     state.mRefreshWidth                                  = 1600;
     state.mRefreshHeight                                 = 900;
     const auto  rebuild                                  = owner->rebuildSwapchainChain();
     const auto* rebuild_outcome                          = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuild);
-    ensure("changed-extent rebuild preserves the sampled binding without duplicate native creation or update",
+    ensure("changed-extent rebuild retires the target-bound sampled pipeline while preserving the exact sampled binding",
            rebuild_outcome && *rebuild_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               !generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineResourceHandle() == LLRenderContract::PipelineHandle{} &&
+               generation->textureUploadSamplePipelineLayout() == VK_NULL_HANDLE &&
+               generation->textureUploadSamplePipeline() == VK_NULL_HANDLE &&
                generation->textureUploadSampleBindingSamplerResourceHandle() == binding_description.mSampler.mHandle &&
                generation->textureUploadSampleBindingDestinationResourceHandle() == destination_description.mHandle &&
                generation->textureUploadSampleBindingExpectedRevision() == destination_description.mExpectedRevision &&
@@ -4894,8 +4968,43 @@ void window_macosx_vulkan_object::test<26>()
                state.mTextureUploadSampleBindingPipelineLayoutCreateCount == 1 &&
                state.mTextureUploadSampleBindingDescriptorPoolCreateCount == 1 &&
                state.mTextureUploadSampleBindingDescriptorSetAllocateCount == 1 &&
-               state.mTextureUploadSampleBindingDescriptorUpdateCount == 1 && owner->backingScale() == 2.0 &&
-               owner->drawableWidth() == 1600 && owner->drawableHeight() == 900);
+               state.mTextureUploadSampleBindingDescriptorUpdateCount == 1 && state.mTextureUploadSamplePipelineCreateCount == 1 &&
+               state.mTextureUploadSamplePipelineDestroyCount == 1 && !generation->hasTextureUploadTransferGeneration() &&
+               !generation->hasTextureUploadSourceGeneration() && owner->backingScale() == 2.0 && owner->drawableWidth() == 1600 &&
+               owner->drawableHeight() == 900 &&
+               state.mTextureUploadSamplePipelineDestroyOrder < state.mPresentationRenderPassDestroyOrder);
+
+    pipeline_request.mDrawableExtent                      = generation->swapchainDrawableExtent();
+    const std::size_t  shader_creates_before_reacquire    = state.mCreateShaderModuleCount;
+    const std::size_t  shader_destroys_before_reacquire   = state.mDestroyShaderModuleCount;
+    const std::size_t  pipeline_creates_before_reacquire  = state.mCreatePipelineCount;
+    const std::size_t  pipeline_destroys_before_reacquire = state.mDestroyPipelineCount;
+    const VkRenderPass rebuilt_sample_render_pass         = generation->swapchainPresentationRenderPass();
+    ensure("the preserved binding explicitly acquires one sampled pipeline for the rebuilt target",
+           !generation->acquireTextureUploadSamplePipelineGeneration(pipeline_request) &&
+               generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineResourceHandle() == pipeline_description.mHandle &&
+               generation->textureUploadSamplePipelineLayout() == retained_pipeline_layout &&
+               generation->textureUploadSamplePipeline() == state.mTextureUploadSamplePipeline &&
+               generation->textureUploadSamplePipeline() != initial_sample_pipeline &&
+               state.mTextureUploadSamplePipelineLayout == retained_pipeline_layout &&
+               state.mTextureUploadSamplePipelineRenderPass == rebuilt_sample_render_pass &&
+               state.mTextureUploadSamplePipelineCreateCount == 2 && state.mTextureUploadSamplePipelineDestroyCount == 1 &&
+               state.mCreateShaderModuleCount == shader_creates_before_reacquire + 2 &&
+               state.mDestroyShaderModuleCount == shader_destroys_before_reacquire + 2 &&
+               state.mCreatePipelineCount == pipeline_creates_before_reacquire + 1 &&
+               state.mDestroyPipelineCount == pipeline_destroys_before_reacquire && state.mDrawCount == draw_count_before_binding &&
+               state.mQueueSubmitCount == queue_submits_before_binding);
+    ensure("direct sampled pipeline reset clears only the pipeline before its borrowed binding and presentation target",
+           generation->resetTextureUploadSamplePipelineGeneration() && !generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineResourceHandle() == LLRenderContract::PipelineHandle{} &&
+               generation->textureUploadSamplePipelineLayout() == VK_NULL_HANDLE &&
+               generation->textureUploadSamplePipeline() == VK_NULL_HANDLE && generation->hasTextureUploadSampleBindingGeneration() &&
+               generation->textureUploadSampleBindingPipelineLayout() == retained_pipeline_layout &&
+               generation->hasSwapchainPresentationTargetGeneration() &&
+               generation->swapchainPresentationRenderPass() == rebuilt_sample_render_pass &&
+               state.mTextureUploadSamplePipelineDestroyCount == 2 && state.mDrawCount == draw_count_before_binding &&
+               state.mQueueSubmitCount == queue_submits_before_binding);
 
     ensure("direct sampled binding reset clears its complete public state while preserving destination and frame slot",
            generation->resetTextureUploadSampleBindingGeneration() && !generation->hasTextureUploadSampleBindingGeneration() &&
@@ -4935,12 +5044,20 @@ void window_macosx_vulkan_object::test<26>()
                state.mTextureUploadSampleBindingDescriptorPoolCreateCount == 2 &&
                state.mTextureUploadSampleBindingDescriptorSetAllocateCount == 2 &&
                state.mTextureUploadSampleBindingDescriptorUpdateCount == 2);
-    ensure("sampled binding fixture tears down its complete Cocoa owner chain", owner->reset());
-    ensure("parent teardown balances sampled binding occurrences in reverse dependency order before destination and device",
-           state.mTextureUploadSampleBindingDescriptorPoolDestroyCount == 2 &&
+    ensure("the reacquired binding owns one sampled pipeline for full parent-teardown ordering",
+           !generation->acquireTextureUploadSamplePipelineGeneration(pipeline_request) &&
+               generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineLayout() == generation->textureUploadSampleBindingPipelineLayout() &&
+               generation->textureUploadSamplePipeline() == state.mTextureUploadSamplePipeline &&
+               state.mTextureUploadSamplePipelineCreateCount == 3 && state.mTextureUploadSamplePipelineDestroyCount == 2);
+    ensure("sampled pipeline fixture tears down its complete Cocoa owner chain", owner->reset());
+    ensure("parent teardown retires the sampled pipeline before its binding, destination, and device",
+           state.mTextureUploadSamplePipelineDestroyCount == 3 && state.mTextureUploadSampleBindingDescriptorPoolDestroyCount == 2 &&
                state.mTextureUploadSampleBindingPipelineLayoutDestroyCount == 2 &&
                state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyCount == 2 &&
                state.mTextureUploadSampleBindingSamplerDestroyCount == 2 &&
+               state.mTextureUploadSamplePipelineDestroyOrder < state.mTextureUploadSampleBindingDescriptorPoolDestroyOrder &&
+               state.mTextureUploadSamplePipelineDestroyOrder < state.mPresentationRenderPassDestroyOrder &&
                state.mTextureUploadSampleBindingDescriptorPoolDestroyOrder < state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder &&
                state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder <
                    state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder &&

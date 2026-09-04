@@ -605,6 +605,8 @@ void window_vulkan_macos_wsi_object::test<1>()
 
     const LLRenderVulkan::VulkanTextureUploadSampleBindingDescription texture_sample_binding_description =
         LLRenderVulkan::vulkanTextureUploadSampleBindingDescription();
+    const LLRenderVulkan::VulkanTextureUploadSamplePipelineDescription texture_sample_pipeline_description =
+        LLRenderVulkan::vulkanTextureUploadSamplePipelineDescription();
     LLRenderVulkan::VulkanTextureUploadSampleBindingRequest texture_sample_binding_request;
     texture_sample_binding_request.mNativeWindowGeneration = NATIVE_WINDOW_GENERATION;
     texture_sample_binding_request.mDestinationDescription = texture_destination_request.mDescription;
@@ -965,6 +967,44 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("presentation-pipeline acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("presentation-pipeline acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    LLRenderVulkan::VulkanTextureUploadSamplePipelineRequest texture_sample_pipeline_request;
+    texture_sample_pipeline_request.mNativeWindowGeneration   = NATIVE_WINDOW_GENERATION;
+    texture_sample_pipeline_request.mDrawableExtent           = drawable_extent;
+    texture_sample_pipeline_request.mDestinationDescription   = texture_destination_request.mDescription;
+    texture_sample_pipeline_request.mSampleBindingDescription = texture_sample_binding_description;
+    texture_sample_pipeline_request.mDescription              = texture_sample_pipeline_description;
+    texture_sample_pipeline_request.mInstanceOwnerCheck       = { &operation_context, frameSlotInstanceOwnerIsCurrent };
+    texture_sample_pipeline_request.mWindowGenerationCheck    = { &operation_context, frameSlotWindowGenerationIsCurrent };
+    const auto texture_sample_pipeline_error =
+        mutable_instance_generation->acquireTextureUploadSamplePipelineGeneration(texture_sample_pipeline_request);
+    ensure("the completed texture upload and current presentation target acquire one native sampled pipeline",
+           !texture_sample_pipeline_error.has_value() && instance_generation->hasTextureUploadSamplePipelineGeneration() &&
+               instance_generation->textureUploadSamplePipelineResourceHandle() == texture_sample_pipeline_description.mHandle &&
+               instance_generation->textureUploadSamplePipelineLayout() == retained_texture_sample_pipeline_layout &&
+               instance_generation->textureUploadSamplePipeline() != VK_NULL_HANDLE && texture_sample_binding_retained() &&
+               texture_transfer_retained());
+    ensure_equals("texture sample-pipeline acquisition emits no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("texture sample-pipeline acquisition preserves the Cocoa owner and exact backing-pixel geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == texture_source_backing_scale &&
+               owner->drawableWidth() == BACKING_WIDTH && owner->drawableHeight() == BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("texture sample-pipeline acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("texture sample-pipeline acquisition leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
+    const VkPipeline initial_texture_sample_pipeline  = instance_generation->textureUploadSamplePipeline();
+    const auto       texture_sample_pipeline_retained = [&](VkPipeline pipeline) noexcept
+    {
+        return texture_sample_binding_retained() && instance_generation->hasTextureUploadSamplePipelineGeneration() &&
+               instance_generation->textureUploadSamplePipelineResourceHandle() == texture_sample_pipeline_description.mHandle &&
+               instance_generation->textureUploadSamplePipelineLayout() == retained_texture_sample_pipeline_layout &&
+               instance_generation->textureUploadSamplePipeline() == pipeline && pipeline != VK_NULL_HANDLE;
+    };
+    ensure("the native sampled pipeline retains its exact binding layout before any frame operation",
+           texture_sample_pipeline_retained(initial_texture_sample_pipeline));
+
     const auto readback_error = owner->acquireSwapchainReadbackGeneration();
     ensure("the exact swapchain-image chain creates one coherent mapped readback destination", !readback_error.has_value());
     ensure("the instance parent owns one readback generation with exact swapchain-image metadata",
@@ -1127,6 +1167,46 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure("the initial observed draw creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("the initial observed draw leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
 
+    ensure("the native smoke directly resets the completed texture transfer while the initial sampled pipeline remains live",
+           mutable_instance_generation->resetTextureUploadTransferGeneration() &&
+               !instance_generation->hasTextureUploadTransferGeneration() && texture_source_retained() &&
+               instance_generation->textureUploadDestinationIsResident() &&
+               instance_generation->textureUploadDestinationResidentRevision() == retained_texture_revision &&
+               instance_generation->textureUploadDestinationResidentContentIdentity() == retained_texture_source_identity &&
+               instance_generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead &&
+               texture_sample_pipeline_retained(initial_texture_sample_pipeline));
+    ensure_equals("texture-transfer reset with a live sampled pipeline emits no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("the native smoke directly resets the texture source while the initial sampled pipeline remains live",
+           mutable_instance_generation->resetTextureUploadSourceGeneration() && !instance_generation->hasTextureUploadSourceGeneration() &&
+               instance_generation->textureUploadSourceResourceHandle() == LLRenderContract::ImageHandle{} &&
+               instance_generation->textureUploadSourceExpectedRevision() == 0 &&
+               instance_generation->textureUploadSourceResidentExtent().mWidth == 0 &&
+               instance_generation->textureUploadSourceResidentExtent().mHeight == 0 &&
+               instance_generation->textureUploadSourceRowPitch() == 0 && instance_generation->textureUploadSourceContentIdentity() == 0 &&
+               instance_generation->textureUploadSourceBuffer() == VK_NULL_HANDLE &&
+               instance_generation->textureUploadSourceMemory() == VK_NULL_HANDLE &&
+               instance_generation->textureUploadSourceByteCount() == 0 && instance_generation->textureUploadSourceAllocationSize() == 0 &&
+               instance_generation->textureUploadSourceMemoryTypeIndex() == 0 &&
+               instance_generation->textureUploadSourceMemoryPropertyFlags() == 0 &&
+               !instance_generation->textureUploadSourceIsCoherent() && texture_destination_retained() &&
+               texture_sample_pipeline_retained(initial_texture_sample_pipeline) &&
+               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
+               instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->hasSwapchainPresentationPipelineGeneration() && instance_generation->hasSwapchainReadbackGeneration() &&
+               instance_generation->hasSwapchainFrameSlotGeneration());
+    ensure_equals("texture-source reset with a live sampled pipeline emits no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("texture source and transfer resets preserve the private Cocoa owner and exact initial backing-pixel geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == texture_source_backing_scale &&
+               owner->drawableWidth() == BACKING_WIDTH && owner->drawableHeight() == BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("texture source and transfer resets create no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("texture source and transfer resets leave the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+
     const VkSurfaceKHR     retained_surface         = instance_generation->surface();
     const VkPhysicalDevice retained_physical_device = instance_generation->physicalDevice();
     const VkDevice         retained_logical_device  = instance_generation->logicalDevice();
@@ -1143,7 +1223,7 @@ void window_vulkan_macos_wsi_object::test<1>()
                instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
                instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainPresentationTargetGeneration() &&
                instance_generation->hasSwapchainPresentationPipelineGeneration() && instance_generation->hasSwapchainReadbackGeneration() &&
-               instance_generation->hasSwapchainFrameSlotGeneration());
+               instance_generation->hasSwapchainFrameSlotGeneration() && !instance_generation->hasTextureUploadSamplePipelineGeneration());
     const VkExtent2D rebuilt_drawable_extent = instance_generation->swapchainDrawableExtent();
     ensure("the rebuilt configuration authenticates the changed Cocoa backing extent",
            rebuilt_drawable_extent.width == REBUILT_BACKING_WIDTH && rebuilt_drawable_extent.height == REBUILT_BACKING_HEIGHT &&
@@ -1195,47 +1275,52 @@ void window_vulkan_macos_wsi_object::test<1>()
                                 initial_readback_extent));
     ensure_equals("changed-extent rebuild emits no validation messages", instance_generation->validationSnapshot().mMessageCount,
                   std::uint32_t{ 0 });
-    ensure("same-surface rebuild preserves the completed texture transfer and published destination independently of swapchain children",
-           texture_transfer_retained());
-    ensure("same-surface rebuild preserves the exact texture sample binding independently of swapchain children",
-           texture_sample_binding_retained());
-    ensure("the native smoke directly resets the completed texture transfer before its retained source and destination",
-           mutable_instance_generation->resetTextureUploadTransferGeneration() &&
-               !instance_generation->hasTextureUploadTransferGeneration() && texture_source_retained() &&
-               instance_generation->textureUploadDestinationIsResident() &&
-               instance_generation->textureUploadDestinationResidentRevision() == retained_texture_revision &&
-               instance_generation->textureUploadDestinationResidentContentIdentity() == retained_texture_source_identity &&
-               instance_generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead);
-    ensure("completed texture-transfer reset preserves the exact texture sample binding", texture_sample_binding_retained());
-    ensure_equals("texture-transfer rebuild retention and direct reset emit no validation messages",
-                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
-    ensure("the native smoke directly resets the texture source before its image destination",
-           mutable_instance_generation->resetTextureUploadSourceGeneration() && !instance_generation->hasTextureUploadSourceGeneration() &&
-               instance_generation->textureUploadSourceResourceHandle() == LLRenderContract::ImageHandle{} &&
-               instance_generation->textureUploadSourceExpectedRevision() == 0 &&
-               instance_generation->textureUploadSourceResidentExtent().mWidth == 0 &&
-               instance_generation->textureUploadSourceResidentExtent().mHeight == 0 &&
-               instance_generation->textureUploadSourceRowPitch() == 0 && instance_generation->textureUploadSourceContentIdentity() == 0 &&
-               instance_generation->textureUploadSourceBuffer() == VK_NULL_HANDLE &&
-               instance_generation->textureUploadSourceMemory() == VK_NULL_HANDLE &&
-               instance_generation->textureUploadSourceByteCount() == 0 && instance_generation->textureUploadSourceAllocationSize() == 0 &&
-               instance_generation->textureUploadSourceMemoryTypeIndex() == 0 &&
-               instance_generation->textureUploadSourceMemoryPropertyFlags() == 0 &&
-               !instance_generation->textureUploadSourceIsCoherent() && texture_destination_retained() &&
-               instance_generation->hasSwapchainConfigurationGeneration() && instance_generation->hasSwapchainGeneration() &&
-               instance_generation->hasSwapchainImagesGeneration() && instance_generation->hasSwapchainPresentationTargetGeneration() &&
-               instance_generation->hasSwapchainPresentationPipelineGeneration() && instance_generation->hasSwapchainReadbackGeneration() &&
-               instance_generation->hasSwapchainFrameSlotGeneration());
-    ensure("texture-source reset preserves the exact texture sample binding", texture_sample_binding_retained());
-    ensure_equals("texture-source rebuild retention and direct reset emit no validation messages",
-                  instance_generation->validationSnapshot().mMessageCount, std::uint32_t{ 0 });
-    ensure("texture-source reset preserves the private Cocoa owner, scale, and exact changed backing-pixel geometry",
+    ensure("same-surface rebuild preserves the published destination after texture source and transfer retirement",
+           !instance_generation->hasTextureUploadTransferGeneration() && !instance_generation->hasTextureUploadSourceGeneration() &&
+               texture_destination_retained());
+    ensure("same-surface rebuild retires the target-bound sampled pipeline but preserves its exact binding",
+           !instance_generation->hasTextureUploadSamplePipelineGeneration() &&
+               instance_generation->textureUploadSamplePipelineResourceHandle() == LLRenderContract::PipelineHandle{} &&
+               instance_generation->textureUploadSamplePipelineLayout() == VK_NULL_HANDLE &&
+               instance_generation->textureUploadSamplePipeline() == VK_NULL_HANDLE && texture_sample_binding_retained());
+
+    texture_sample_pipeline_request.mDrawableExtent = rebuilt_drawable_extent;
+    const auto rebuilt_texture_sample_pipeline_error =
+        mutable_instance_generation->acquireTextureUploadSamplePipelineGeneration(texture_sample_pipeline_request);
+    const VkPipeline rebuilt_texture_sample_pipeline = instance_generation->textureUploadSamplePipeline();
+    ensure("the preserved sampled binding explicitly acquires a pipeline for the rebuilt presentation target",
+           !rebuilt_texture_sample_pipeline_error.has_value() && texture_sample_pipeline_retained(rebuilt_texture_sample_pipeline) &&
+               !instance_generation->hasTextureUploadTransferGeneration() && !instance_generation->hasTextureUploadSourceGeneration());
+    ensure_equals("rebuilt texture sample-pipeline acquisition emits no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("rebuilt texture sample-pipeline acquisition preserves the Cocoa owner and changed backing-pixel geometry",
            owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
                owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == texture_source_backing_scale &&
                owner->drawableWidth() == REBUILT_BACKING_WIDTH && owner->drawableHeight() == REBUILT_BACKING_HEIGHT &&
                LLWindow::instanceCount() == initial_window_count);
-    ensure("texture-source reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
-    ensure_equals("texture-source reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    ensure("rebuilt texture sample-pipeline acquisition creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("rebuilt texture sample-pipeline acquisition leaves the OpenGL manager unchanged",
+                  gGLManager.mInited,
+                  initial_gl_manager);
+    ensure("the native smoke directly resets the sampled pipeline before its borrowed binding and presentation target",
+           mutable_instance_generation->resetTextureUploadSamplePipelineGeneration() &&
+               !instance_generation->hasTextureUploadSamplePipelineGeneration() &&
+               instance_generation->textureUploadSamplePipelineResourceHandle() == LLRenderContract::PipelineHandle{} &&
+               instance_generation->textureUploadSamplePipelineLayout() == VK_NULL_HANDLE &&
+               instance_generation->textureUploadSamplePipeline() == VK_NULL_HANDLE && texture_sample_binding_retained() &&
+               instance_generation->hasSwapchainPresentationTargetGeneration() &&
+               instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE);
+    ensure_equals("texture sample-pipeline destruction emits no validation messages",
+                  instance_generation->validationSnapshot().mMessageCount,
+                  std::uint32_t{ 0 });
+    ensure("texture sample-pipeline reset preserves the private Cocoa owner and changed backing-pixel geometry",
+           owner->hasNativeWindow() && owner->requirements() == requirements && owner->instanceGeneration() == instance_generation &&
+               owner->isGenerationCurrent(NATIVE_WINDOW_GENERATION) && owner->backingScale() == texture_source_backing_scale &&
+               owner->drawableWidth() == REBUILT_BACKING_WIDTH && owner->drawableHeight() == REBUILT_BACKING_HEIGHT &&
+               LLWindow::instanceCount() == initial_window_count);
+    ensure("texture sample-pipeline reset creates no current CGL context", CGLGetCurrentContext() == initial_cgl_context);
+    ensure_equals("texture sample-pipeline reset leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
     ensure("the native smoke directly resets the texture sample binding before its resident destination",
            mutable_instance_generation->resetTextureUploadSampleBindingGeneration() &&
                !instance_generation->hasTextureUploadSampleBindingGeneration() &&

@@ -378,7 +378,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool texture_source_acquired                             = false;
     bool texture_source_metadata_exact                       = false;
     bool texture_source_native_distinct                      = false;
-    bool texture_source_rebuild_retained                     = false;
+    bool texture_source_rebuild_absent                       = false;
     bool texture_source_explicitly_reset                     = false;
     bool texture_source_removed                              = false;
     bool texture_source_destination_retained                 = false;
@@ -387,7 +387,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool texture_transfer_acquired                           = false;
     bool texture_transfer_complete_exact                     = false;
     bool texture_destination_resident_exact                  = false;
-    bool texture_transfer_rebuild_retained                   = false;
+    bool texture_transfer_rebuild_absent                     = false;
     bool texture_transfer_explicitly_reset                   = false;
     bool texture_transfer_validation_clean                   = false;
     bool texture_sample_binding_acquired                     = false;
@@ -400,6 +400,19 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool texture_sample_binding_destination_retained         = false;
     bool texture_sample_binding_chain_retained               = false;
     bool texture_sample_binding_validation_clean             = false;
+    bool texture_sample_pipeline_acquired                    = false;
+    bool texture_sample_pipeline_metadata_exact              = false;
+    bool texture_sample_pipeline_rebuild_retired             = false;
+    bool texture_sample_pipeline_reacquired                  = false;
+    bool texture_sample_pipeline_reacquired_exact            = false;
+    bool texture_sample_pipeline_transfer_reset_retained     = false;
+    bool texture_sample_pipeline_source_reset_retained       = false;
+    bool texture_sample_pipeline_pre_rebuild_retained        = false;
+    bool texture_sample_pipeline_explicitly_reset            = false;
+    bool texture_sample_pipeline_removed                     = false;
+    bool texture_sample_pipeline_binding_target_retained     = false;
+    bool texture_sample_pipeline_platform_state_preserved    = false;
+    bool texture_sample_pipeline_validation_clean            = false;
     bool upload_source_acquired                              = false;
     bool upload_source_metadata_exact                        = false;
     bool upload_destination_acquired                         = false;
@@ -978,6 +991,34 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 presentation_pipeline_handles_nonnull = presentation_pipeline_acquired &&
                                                         instance_generation->swapchainPresentationPipelineLayout() != VK_NULL_HANDLE &&
                                                         instance_generation->swapchainPresentationPipeline() != VK_NULL_HANDLE;
+                const LLRenderVulkan::VulkanTextureUploadSamplePipelineDescription texture_sample_pipeline_description =
+                    LLRenderVulkan::vulkanTextureUploadSamplePipelineDescription();
+                LLRenderVulkan::VulkanTextureUploadSamplePipelineRequest texture_sample_pipeline_request;
+                texture_sample_pipeline_request.mNativeWindowGeneration   = requirements->nativeWindowGeneration();
+                texture_sample_pipeline_request.mDrawableExtent           = instance_generation->swapchainDrawableExtent();
+                texture_sample_pipeline_request.mDestinationDescription   = texture_description;
+                texture_sample_pipeline_request.mSampleBindingDescription = texture_sample_binding_description;
+                texture_sample_pipeline_request.mDescription              = texture_sample_pipeline_description;
+                texture_sample_pipeline_request.mInstanceOwnerCheck       = { &upload_source_context, frameSlotInstanceOwnerIsCurrent };
+                texture_sample_pipeline_request.mWindowGenerationCheck    = { &upload_source_context, frameSlotWindowGenerationIsCurrent };
+                texture_sample_pipeline_acquired =
+                    texture_sample_binding_metadata_exact && presentation_pipeline_handles_nonnull &&
+                    !mutable_generation->acquireTextureUploadSamplePipelineGeneration(texture_sample_pipeline_request) &&
+                    instance_generation->hasTextureUploadSamplePipelineGeneration();
+                const VkPipeline retained_texture_sample_pipeline = instance_generation->textureUploadSamplePipeline();
+                const auto       texture_sample_pipeline_retained = [&](VkPipeline expected_pipeline) noexcept
+                {
+                    return instance_generation->hasTextureUploadSamplePipelineGeneration() &&
+                           instance_generation->textureUploadSamplePipelineResourceHandle() ==
+                               texture_sample_pipeline_description.mHandle &&
+                           instance_generation->textureUploadSamplePipelineLayout() == retained_texture_sample_binding_pipeline_layout &&
+                           expected_pipeline != VK_NULL_HANDLE && instance_generation->textureUploadSamplePipeline() == expected_pipeline &&
+                           texture_sample_binding_retained() && instance_generation->hasSwapchainPresentationTargetGeneration() &&
+                           instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE;
+                };
+                texture_sample_pipeline_metadata_exact = texture_sample_pipeline_acquired &&
+                                                         texture_sample_pipeline_retained(retained_texture_sample_pipeline) &&
+                                                         instance_generation->validationSnapshot().mMessageCount == 0;
                 const LLRenderVulkan::VulkanSwapchainReadbackRequest readback_request{
                     instance_generation->nativeWindowGeneration(),
                     retained_drawable,
@@ -1050,6 +1091,52 @@ void window_vulkan_sdl_wsi_object::test<1>()
                                LLRenderVulkan::VulkanSwapchainFrameSlotDisposition::Reusable &&
                            !instance_generation->swapchainFrameAcquiredImageIndex();
                 };
+
+                texture_transfer_explicitly_reset =
+                    texture_transfer_complete_exact && mutable_generation->resetTextureUploadTransferGeneration() &&
+                    !instance_generation->hasTextureUploadTransferGeneration() && instance_generation->hasTextureUploadSourceGeneration() &&
+                    texture_source_retained() &&
+                    textureDestinationMatches(*instance_generation, texture_description, retained_texture_destination) &&
+                    instance_generation->textureUploadDestinationIsResident() &&
+                    instance_generation->textureUploadDestinationResidentContentIdentity() == retained_texture_source_identity;
+                texture_transfer_validation_clean =
+                    texture_transfer_explicitly_reset && instance_generation->validationSnapshot().mMessageCount == 0;
+                texture_sample_pipeline_transfer_reset_retained = texture_transfer_validation_clean &&
+                                                                  texture_sample_pipeline_metadata_exact &&
+                                                                  texture_sample_pipeline_retained(retained_texture_sample_pipeline);
+                texture_sample_binding_transfer_reset_retained =
+                    texture_sample_pipeline_transfer_reset_retained && texture_sample_binding_retained();
+                texture_source_explicitly_reset =
+                    texture_sample_binding_transfer_reset_retained && mutable_generation->resetTextureUploadSourceGeneration();
+                texture_source_removed = texture_source_explicitly_reset && !instance_generation->hasTextureUploadSourceGeneration() &&
+                                         !instance_generation->textureUploadSourceResourceHandle() &&
+                                         instance_generation->textureUploadSourceExpectedRevision() == 0 &&
+                                         instance_generation->textureUploadSourceResidentExtent().mWidth == 0 &&
+                                         instance_generation->textureUploadSourceResidentExtent().mHeight == 0 &&
+                                         instance_generation->textureUploadSourceRowPitch() == 0 &&
+                                         instance_generation->textureUploadSourceContentIdentity() == 0 &&
+                                         instance_generation->textureUploadSourceFlags() == VK_BUFFER_CREATE_FLAG_BITS_MAX_ENUM &&
+                                         instance_generation->textureUploadSourceUsage() == 0 &&
+                                         instance_generation->textureUploadSourceSharingMode() == VK_SHARING_MODE_MAX_ENUM &&
+                                         instance_generation->textureUploadSourceBuffer() == VK_NULL_HANDLE &&
+                                         instance_generation->textureUploadSourceMemory() == VK_NULL_HANDLE &&
+                                         instance_generation->textureUploadSourceByteCount() == 0 &&
+                                         instance_generation->textureUploadSourceAllocationSize() == 0 &&
+                                         instance_generation->textureUploadSourceMemoryTypeIndex() == 0 &&
+                                         instance_generation->textureUploadSourceMemoryPropertyFlags() == 0 &&
+                                         !instance_generation->textureUploadSourceIsCoherent();
+                texture_source_destination_retained =
+                    texture_source_removed &&
+                    textureDestinationMatches(*instance_generation, texture_description, retained_texture_destination);
+                texture_source_chain_retained = texture_source_destination_retained && presentation_chain_retained();
+                texture_source_validation_clean =
+                    texture_source_chain_retained && instance_generation->validationSnapshot().mMessageCount == 0;
+                texture_sample_pipeline_source_reset_retained = texture_source_validation_clean &&
+                                                                texture_sample_pipeline_transfer_reset_retained &&
+                                                                texture_sample_pipeline_retained(retained_texture_sample_pipeline);
+                texture_sample_binding_source_reset_retained = texture_sample_pipeline_source_reset_retained &&
+                                                               texture_sample_binding_transfer_reset_retained &&
+                                                               texture_sample_binding_retained();
 
                 if (frame_slot_provenance_exact && drawable_queried)
                 {
@@ -1140,6 +1227,9 @@ void window_vulkan_sdl_wsi_object::test<1>()
                     upload_destination_draw_retained = frame_slot_render_pass_draw_readback_before_rebuild &&
                                                        upload_destination_resident_exact && upload_destination_source_retirement_retained &&
                                                        upload_destination_retained();
+                    texture_sample_pipeline_pre_rebuild_retained = texture_sample_pipeline_source_reset_retained &&
+                                                                   texture_sample_pipeline_retained(retained_texture_sample_pipeline) &&
+                                                                   instance_generation->validationSnapshot().mMessageCount == 0;
 
                     const LLCoordScreen requested_size(current_drawable.mX + 32, current_drawable.mY + 24);
                     swapchain_resize_requested    = window->setSize(requested_size);
@@ -1214,14 +1304,30 @@ void window_vulkan_sdl_wsi_object::test<1>()
                     texture_destination_rebuild_retained =
                         swapchain_rebuild_ready && swapchain_rebuild_chain_complete && texture_destination_metadata_exact &&
                         textureDestinationMatches(*instance_generation, texture_description, retained_texture_destination);
-                    texture_source_rebuild_retained = swapchain_rebuild_ready && swapchain_rebuild_chain_complete &&
-                                                      texture_source_native_distinct && texture_source_retained();
-                    texture_transfer_rebuild_retained =
-                        swapchain_rebuild_ready && swapchain_rebuild_chain_complete && texture_destination_resident_exact &&
-                        texture_transfer_retained() && instance_generation->textureUploadDestinationIsResident() &&
-                        instance_generation->textureUploadDestinationResidentContentIdentity() == retained_texture_source_identity;
+                    texture_source_rebuild_absent = swapchain_rebuild_ready && swapchain_rebuild_chain_complete && texture_source_removed &&
+                                                    !instance_generation->hasTextureUploadSourceGeneration();
+                    texture_transfer_rebuild_absent = swapchain_rebuild_ready && swapchain_rebuild_chain_complete &&
+                                                      texture_transfer_explicitly_reset &&
+                                                      !instance_generation->hasTextureUploadTransferGeneration();
                     texture_sample_binding_rebuild_retained = swapchain_rebuild_ready && swapchain_rebuild_chain_complete &&
-                                                              texture_sample_binding_metadata_exact && texture_sample_binding_retained();
+                                                              texture_sample_binding_source_reset_retained &&
+                                                              texture_sample_binding_retained();
+                    texture_sample_pipeline_rebuild_retired = texture_sample_binding_rebuild_retained &&
+                                                              texture_sample_pipeline_pre_rebuild_retained &&
+                                                              !instance_generation->hasTextureUploadSamplePipelineGeneration() &&
+                                                              !instance_generation->textureUploadSamplePipelineResourceHandle() &&
+                                                              instance_generation->textureUploadSamplePipelineLayout() == VK_NULL_HANDLE &&
+                                                              instance_generation->textureUploadSamplePipeline() == VK_NULL_HANDLE &&
+                                                              instance_generation->validationSnapshot().mMessageCount == 0;
+                    texture_sample_pipeline_request.mDrawableExtent = rebuilt_drawable;
+                    texture_sample_pipeline_reacquired =
+                        texture_sample_pipeline_rebuild_retired &&
+                        !mutable_generation->acquireTextureUploadSamplePipelineGeneration(texture_sample_pipeline_request) &&
+                        instance_generation->hasTextureUploadSamplePipelineGeneration();
+                    const VkPipeline retained_rebuilt_texture_sample_pipeline = instance_generation->textureUploadSamplePipeline();
+                    texture_sample_pipeline_reacquired_exact =
+                        texture_sample_pipeline_reacquired && texture_sample_pipeline_retained(retained_rebuilt_texture_sample_pipeline) &&
+                        texture_sample_binding_retained() && instance_generation->validationSnapshot().mMessageCount == 0;
                     frame_slot_initial_observation_detached = presentationObserved(draw_readback_before_rebuild,
                                                                                    initial_image_count,
                                                                                    initial_image_format,
@@ -1291,46 +1397,28 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 upload_destination_chain_retained = upload_destination_removed && presentation_chain_retained();
                 upload_destination_validation_clean =
                     upload_destination_chain_retained && instance_generation->validationSnapshot().mMessageCount == 0;
-                texture_transfer_explicitly_reset =
-                    texture_transfer_rebuild_retained && mutable_generation->resetTextureUploadTransferGeneration() &&
-                    !instance_generation->hasTextureUploadTransferGeneration() && instance_generation->hasTextureUploadSourceGeneration() &&
-                    texture_source_retained() &&
-                    textureDestinationMatches(*instance_generation, texture_description, retained_texture_destination) &&
-                    instance_generation->textureUploadDestinationIsResident() &&
-                    instance_generation->textureUploadDestinationResidentContentIdentity() == retained_texture_source_identity;
-                texture_transfer_validation_clean =
-                    texture_transfer_explicitly_reset && instance_generation->validationSnapshot().mMessageCount == 0;
-                texture_sample_binding_transfer_reset_retained =
-                    texture_transfer_validation_clean && texture_sample_binding_rebuild_retained && texture_sample_binding_retained();
-                texture_source_explicitly_reset =
-                    texture_sample_binding_transfer_reset_retained && mutable_generation->resetTextureUploadSourceGeneration();
-                texture_source_removed = texture_source_explicitly_reset && !instance_generation->hasTextureUploadSourceGeneration() &&
-                                         !instance_generation->textureUploadSourceResourceHandle() &&
-                                         instance_generation->textureUploadSourceExpectedRevision() == 0 &&
-                                         instance_generation->textureUploadSourceResidentExtent().mWidth == 0 &&
-                                         instance_generation->textureUploadSourceResidentExtent().mHeight == 0 &&
-                                         instance_generation->textureUploadSourceRowPitch() == 0 &&
-                                         instance_generation->textureUploadSourceContentIdentity() == 0 &&
-                                         instance_generation->textureUploadSourceFlags() == VK_BUFFER_CREATE_FLAG_BITS_MAX_ENUM &&
-                                         instance_generation->textureUploadSourceUsage() == 0 &&
-                                         instance_generation->textureUploadSourceSharingMode() == VK_SHARING_MODE_MAX_ENUM &&
-                                         instance_generation->textureUploadSourceBuffer() == VK_NULL_HANDLE &&
-                                         instance_generation->textureUploadSourceMemory() == VK_NULL_HANDLE &&
-                                         instance_generation->textureUploadSourceByteCount() == 0 &&
-                                         instance_generation->textureUploadSourceAllocationSize() == 0 &&
-                                         instance_generation->textureUploadSourceMemoryTypeIndex() == 0 &&
-                                         instance_generation->textureUploadSourceMemoryPropertyFlags() == 0 &&
-                                         !instance_generation->textureUploadSourceIsCoherent();
-                texture_source_destination_retained =
-                    texture_source_removed &&
-                    textureDestinationMatches(*instance_generation, texture_description, retained_texture_destination);
-                texture_source_chain_retained = texture_source_destination_retained && presentation_chain_retained();
-                texture_source_validation_clean =
-                    texture_source_chain_retained && instance_generation->validationSnapshot().mMessageCount == 0;
-                texture_sample_binding_source_reset_retained =
-                    texture_source_validation_clean && texture_sample_binding_transfer_reset_retained && texture_sample_binding_retained();
-                texture_sample_binding_explicitly_reset =
-                    texture_sample_binding_source_reset_retained && mutable_generation->resetTextureUploadSampleBindingGeneration();
+                texture_sample_pipeline_explicitly_reset = texture_sample_pipeline_reacquired_exact &&
+                                                           texture_sample_pipeline_source_reset_retained &&
+                                                           mutable_generation->resetTextureUploadSamplePipelineGeneration();
+                texture_sample_pipeline_removed = texture_sample_pipeline_explicitly_reset &&
+                                                  !instance_generation->hasTextureUploadSamplePipelineGeneration() &&
+                                                  !instance_generation->textureUploadSamplePipelineResourceHandle() &&
+                                                  instance_generation->textureUploadSamplePipelineLayout() == VK_NULL_HANDLE &&
+                                                  instance_generation->textureUploadSamplePipeline() == VK_NULL_HANDLE;
+                texture_sample_pipeline_binding_target_retained = texture_sample_pipeline_removed && texture_sample_binding_retained() &&
+                                                                  instance_generation->hasSwapchainPresentationTargetGeneration() &&
+                                                                  instance_generation->swapchainPresentationRenderPass() != VK_NULL_HANDLE;
+                texture_sample_pipeline_platform_state_preserved =
+                    texture_sample_pipeline_binding_target_retained && swapchain_rebuild_extent_exact &&
+                    LLWindowManager::isWindowValid(window) && window->getGraphicsAPI() == LLWindow::GraphicsAPI::Vulkan &&
+                    static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == instance_generation &&
+                    findNativeSmokeWindow() == native_sdl_window && SDL_GL_GetCurrentContext() == nullptr &&
+                    gGLManager.mInited == initial_gl_manager;
+                texture_sample_pipeline_validation_clean =
+                    texture_sample_pipeline_platform_state_preserved && instance_generation->validationSnapshot().mMessageCount == 0;
+                texture_sample_binding_explicitly_reset = texture_sample_pipeline_validation_clean &&
+                                                          texture_sample_binding_source_reset_retained &&
+                                                          mutable_generation->resetTextureUploadSampleBindingGeneration();
                 texture_sample_binding_removed =
                     texture_sample_binding_explicitly_reset && !instance_generation->hasTextureUploadSampleBindingGeneration() &&
                     !instance_generation->textureUploadSampleBindingSamplerResourceHandle() &&
@@ -1528,6 +1616,9 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the resident texture acquires one canonical sampled binding", texture_sample_binding_acquired);
     ensure("the sampled binding publishes exact lineage, view, layout, set, binding, and five native handles",
            texture_sample_binding_metadata_exact);
+    ensure("the completed upload and exact sampled binding acquire one non-null sampled pipeline", texture_sample_pipeline_acquired);
+    ensure("the sampled pipeline publishes its typed handle, exact borrowed Stage 60 layout, and no validation messages",
+           texture_sample_pipeline_metadata_exact);
     ensure("the native smoke acquires one device-local destination for the exact upload source", upload_destination_acquired);
     ensure("the upload destination publishes exact identity, allocation, usage, locality, and unmapped metadata",
            upload_destination_metadata_exact);
@@ -1580,20 +1671,27 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the rebuilt configuration retains the resized X11 backing-pixel extent", swapchain_rebuild_extent_exact);
     ensure("the native SDL owner completes one legacy transfer clear before rebuild", frame_slot_transfer_clear_before_rebuild);
     ensure("the native SDL owner completes one render-pass clear before rebuild", frame_slot_render_pass_clear_before_rebuild);
-    ensure("the complete initial target-pipeline-slot chain authenticates one detached green draw-readback observation before rebuild",
+    ensure("the independent presentation control authenticates one detached green draw-readback observation before rebuild",
            frame_slot_render_pass_draw_readback_before_rebuild);
     ensure("the initial observed draw preserves the resident upload destination identity and native allocation",
            upload_destination_draw_retained);
+    ensure("the initial sampled pipeline remains exact through the independent presentation control",
+           texture_sample_pipeline_pre_rebuild_retained);
     ensure("the initial draw-readback observation remains detached after changed-extent rebuild", frame_slot_initial_observation_detached);
     ensure("the rebuilt native SDL owner completes one legacy transfer clear", frame_slot_transfer_clear_after_rebuild);
     ensure("the rebuilt native SDL owner completes one render-pass clear", frame_slot_render_pass_clear_after_rebuild);
-    ensure("the rebuilt target-pipeline-slot chain authenticates one green draw-readback observation at the changed extent",
+    ensure("the rebuilt independent presentation control authenticates one green draw-readback observation at the changed extent",
            frame_slot_render_pass_draw_readback_after_rebuild);
     ensure("changed-extent rebuild preserves the resident device-local upload destination", upload_destination_rebuild_retained);
     ensure("changed-extent rebuild preserves the exact texture image, memory, view, and metadata", texture_destination_rebuild_retained);
-    ensure("changed-extent rebuild preserves the exact immutable texture source", texture_source_rebuild_retained);
-    ensure("changed-extent rebuild preserves the completed texture transfer and resident image", texture_transfer_rebuild_retained);
+    ensure("changed-extent rebuild leaves the already retired texture source absent", texture_source_rebuild_absent);
+    ensure("changed-extent rebuild leaves the already retired terminal texture transfer absent", texture_transfer_rebuild_absent);
     ensure("changed-extent rebuild preserves the exact sampled binding", texture_sample_binding_rebuild_retained);
+    ensure("changed-extent rebuild retires the old sampled pipeline while preserving its exact binding",
+           texture_sample_pipeline_rebuild_retired);
+    ensure("the changed target accepts an explicit sampled-pipeline reacquire", texture_sample_pipeline_reacquired);
+    ensure("the reacquired sampled pipeline borrows the same Stage 60 layout and emits no validation messages",
+           texture_sample_pipeline_reacquired_exact);
     ensure("the rebuilt observed draw preserves the resident destination identity and native allocation",
            upload_destination_rebuilt_draw_retained);
     ensure("a completion retry after Complete is rejected at the transfer state boundary", upload_transfer_complete_retry_rejected);
@@ -1610,17 +1708,28 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("explicit upload-destination reset removes every published handle and metadata value", upload_destination_removed);
     ensure("explicit upload-destination reset preserves the complete swapchain chain", upload_destination_chain_retained);
     ensure("upload-destination retirement emits no validation messages", upload_destination_validation_clean);
-    ensure("the native smoke directly resets the completed texture transfer after changed-extent rebuild",
+    ensure("the native smoke directly resets the completed texture transfer before changed-extent rebuild",
            texture_transfer_explicitly_reset);
-    ensure("texture transfer acquisition, execution, residency publication, rebuild, and reset emit no validation messages",
+    ensure("texture transfer acquisition, execution, residency publication, and reset emit no validation messages",
            texture_transfer_validation_clean);
+    ensure("direct texture-transfer reset preserves the initial sampled pipeline", texture_sample_pipeline_transfer_reset_retained);
     ensure("direct texture-transfer reset preserves the sampled binding", texture_sample_binding_transfer_reset_retained);
-    ensure("the native smoke directly resets the texture source after changed-extent rebuild", texture_source_explicitly_reset);
+    ensure("the native smoke directly resets the texture source before changed-extent rebuild", texture_source_explicitly_reset);
     ensure("direct texture-source reset removes every owned handle and zeroable metadata value", texture_source_removed);
     ensure("direct texture-source reset preserves the exact texture destination", texture_source_destination_retained);
     ensure("direct texture-source reset preserves the complete swapchain and presentation chain", texture_source_chain_retained);
-    ensure("texture-source acquisition, rebuild retention, and retirement emit no validation messages", texture_source_validation_clean);
+    ensure("texture-source acquisition and retirement emit no validation messages", texture_source_validation_clean);
+    ensure("direct texture-source reset preserves the initial sampled pipeline", texture_sample_pipeline_source_reset_retained);
     ensure("direct texture-source reset preserves the sampled binding", texture_sample_binding_source_reset_retained);
+    ensure("the native smoke directly resets the sampled pipeline before its binding and target", texture_sample_pipeline_explicitly_reset);
+    ensure("direct sampled-pipeline reset clears its typed handle, borrowed layout publication, and native pipeline",
+           texture_sample_pipeline_removed);
+    ensure("direct sampled-pipeline reset preserves the exact binding and live presentation target",
+           texture_sample_pipeline_binding_target_retained);
+    ensure("sampled-pipeline ownership preserves the SDL window, Vulkan owner, and OpenGL state",
+           texture_sample_pipeline_platform_state_preserved);
+    ensure("sampled-pipeline acquire, dependency resets, rebuild retirement, reacquire, and direct reset emit no validation messages",
+           texture_sample_pipeline_validation_clean);
     ensure("the native smoke directly resets the sampled binding before its destination", texture_sample_binding_explicitly_reset);
     ensure("direct sampled-binding reset clears every published identity and native handle", texture_sample_binding_removed);
     ensure("direct sampled-binding reset preserves the resident texture destination", texture_sample_binding_destination_retained);

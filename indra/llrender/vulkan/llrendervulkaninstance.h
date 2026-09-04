@@ -21,6 +21,7 @@
 #include "llrendervulkanphysicaldevice.h"
 #include "llrendervulkantextureuploaddestination.h"
 #include "llrendervulkantextureuploadsamplebinding.h"
+#include "llrendervulkantextureuploadsamplepipeline.h"
 #include "llrendervulkantextureuploadsource.h"
 #include "llrendervulkantextureuploadtransfer.h"
 #include "llrendervulkanuploaddestination.h"
@@ -509,6 +510,56 @@ struct VulkanTextureUploadSampleBindingAcquireError
 
 using VulkanTextureUploadSampleBindingAcquireResult = std::optional<VulkanTextureUploadSampleBindingAcquireError>;
 
+struct VulkanTextureUploadSamplePipelineRequest
+{
+    // These callbacks are synchronous and are not retained. The caller must
+    // serialize parent, native-window, and drawable-geometry changes.
+    std::uint64_t                                mNativeWindowGeneration = 0;
+    VkExtent2D                                   mDrawableExtent{};
+    VulkanTextureUploadDestinationDescription    mDestinationDescription;
+    VulkanTextureUploadSampleBindingDescription  mSampleBindingDescription;
+    VulkanTextureUploadSamplePipelineDescription mDescription;
+    VulkanInstanceOwnerCheck                     mInstanceOwnerCheck;
+    VulkanWindowGenerationCheck                  mWindowGenerationCheck;
+};
+
+enum class VulkanTextureUploadSamplePipelineAcquireCode : std::uint8_t
+{
+    InvalidInstanceOwnerCheck,
+    InvalidWindowGenerationCheck,
+    InvalidNativeWindowGeneration,
+    InvalidDrawableExtent,
+    NativeTeardownInProgress,
+    InstanceNotLive,
+    SurfaceNotLive,
+    PresentationDeviceNotLive,
+    LogicalDeviceNotLive,
+    TextureUploadDestinationNotLive,
+    TextureUploadSampleBindingNotLive,
+    SwapchainConfigurationNotLive,
+    SwapchainNotLive,
+    SwapchainImagesNotLive,
+    SwapchainPresentationTargetNotLive,
+    TextureUploadSamplePipelineAlreadyOwned,
+    NativeWindowGenerationMismatch,
+    DrawableExtentMismatch,
+    StaleInstanceOwner,
+    StaleWindowGeneration,
+    ResolutionFailure,
+    AllocationFailure
+};
+
+struct VulkanTextureUploadSamplePipelineAcquireError
+{
+    VulkanTextureUploadSamplePipelineAcquireCode mCode = VulkanTextureUploadSamplePipelineAcquireCode::InvalidInstanceOwnerCheck;
+    std::optional<VulkanTextureUploadSamplePipelineResolutionError> mResolutionError;
+
+    friend constexpr bool operator==(const VulkanTextureUploadSamplePipelineAcquireError&,
+                                     const VulkanTextureUploadSamplePipelineAcquireError&) = default;
+};
+
+using VulkanTextureUploadSamplePipelineAcquireResult = std::optional<VulkanTextureUploadSamplePipelineAcquireError>;
+
 struct VulkanUploadDestinationRequest
 {
     // These callbacks are synchronous and are not retained. The caller must
@@ -763,6 +814,7 @@ enum class VulkanSwapchainPresentationTargetAcquireCode : std::uint8_t
     InvalidWindowGenerationCheck,
     InvalidNativeWindowGeneration,
     InvalidDrawableExtent,
+    NativeTeardownInProgress,
     InstanceNotLive,
     SurfaceNotLive,
     PresentationDeviceNotLive,
@@ -807,6 +859,7 @@ enum class VulkanSwapchainPresentationPipelineAcquireCode : std::uint8_t
     InvalidWindowGenerationCheck,
     InvalidNativeWindowGeneration,
     InvalidDrawableExtent,
+    NativeTeardownInProgress,
     InstanceNotLive,
     SurfaceNotLive,
     PresentationDeviceNotLive,
@@ -851,6 +904,7 @@ enum class VulkanSwapchainReadbackAcquireCode : std::uint8_t
     InvalidWindowGenerationCheck,
     InvalidNativeWindowGeneration,
     InvalidDrawableExtent,
+    NativeTeardownInProgress,
     InstanceNotLive,
     SurfaceNotLive,
     PresentationDeviceNotLive,
@@ -893,6 +947,7 @@ enum class VulkanSwapchainFrameSlotAcquireCode : std::uint8_t
     InvalidWindowGenerationCheck,
     InvalidNativeWindowGeneration,
     InvalidDrawableExtent,
+    NativeTeardownInProgress,
     InstanceNotLive,
     SurfaceNotLive,
     PresentationDeviceNotLive,
@@ -1199,6 +1254,10 @@ public:
     VkPipelineLayout                                      textureUploadSampleBindingPipelineLayout() const noexcept;
     VkDescriptorPool                                      textureUploadSampleBindingDescriptorPool() const noexcept;
     VkDescriptorSet                                       textureUploadSampleBindingDescriptorSet() const noexcept;
+    bool                                                  hasTextureUploadSamplePipelineGeneration() const noexcept;
+    LLRenderContract::PipelineHandle                      textureUploadSamplePipelineResourceHandle() const noexcept;
+    VkPipelineLayout                                      textureUploadSamplePipelineLayout() const noexcept;
+    VkPipeline                                            textureUploadSamplePipeline() const noexcept;
     bool                                                  hasUploadDestinationGeneration() const noexcept;
     LLRenderContract::BufferHandle                        uploadDestinationResourceHandle() const noexcept;
     std::uint64_t                                         uploadDestinationExpectedContentIdentity() const noexcept;
@@ -1293,6 +1352,8 @@ public:
         const VulkanTextureUploadTransferOperationRequest& request) noexcept;
     VulkanTextureUploadSampleBindingAcquireResult acquireTextureUploadSampleBindingGeneration(
         const VulkanTextureUploadSampleBindingRequest& request) noexcept;
+    VulkanTextureUploadSamplePipelineAcquireResult acquireTextureUploadSamplePipelineGeneration(
+        const VulkanTextureUploadSamplePipelineRequest& request) noexcept;
     VulkanUploadDestinationAcquireResult      acquireUploadDestinationGeneration(const VulkanUploadDestinationRequest& request) noexcept;
     VulkanUploadTransferAcquireResult         acquireUploadTransferGeneration(const VulkanUploadTransferRequest& request) noexcept;
     VulkanUploadTransferParentOperationResult executeUploadTransfer(const VulkanUploadTransferOperationRequest& request) noexcept;
@@ -1363,6 +1424,7 @@ public:
     bool resetUploadSourceGeneration() noexcept;
     bool resetTextureUploadSourceGeneration() noexcept;
     bool resetTextureUploadTransferGeneration() noexcept;
+    bool resetTextureUploadSamplePipelineGeneration() noexcept;
     bool resetTextureUploadSampleBindingGeneration() noexcept;
     bool resetTextureUploadDestinationGeneration() noexcept;
     bool resetLogicalDeviceGeneration() noexcept;
@@ -1380,6 +1442,8 @@ private:
     class TextureUploadSourceTeardownGuard;
     class TextureUploadTransferTeardownGuard;
     class TextureUploadSampleBindingTeardownGuard;
+    class TextureUploadSamplePipelineTeardownGuard;
+    class SwapchainPresentationTargetTeardownGuard;
     class VulkanSurfaceGeneration;
 
     VulkanInstanceGeneration(VulkanGlobalDispatchGeneration&&    global_dispatch,
@@ -1417,6 +1481,11 @@ private:
     void noteTextureUploadSampleBindingTransition() noexcept
     {
         ++mTextureUploadSampleBindingEpoch;
+        noteOwnershipTransition();
+    }
+    void noteTextureUploadSamplePipelineTransition() noexcept
+    {
+        ++mTextureUploadSamplePipelineEpoch;
         noteOwnershipTransition();
     }
     void noteUploadDestinationTransition() noexcept
@@ -1467,6 +1536,7 @@ private:
     std::unique_ptr<VulkanTextureUploadSourceGeneration>           mTextureUploadSourceGeneration;
     std::unique_ptr<VulkanTextureUploadTransferGeneration>         mTextureUploadTransferGeneration;
     std::unique_ptr<VulkanTextureUploadSampleBindingGeneration>    mTextureUploadSampleBindingGeneration;
+    std::unique_ptr<VulkanTextureUploadSamplePipelineGeneration>   mTextureUploadSamplePipelineGeneration;
     std::unique_ptr<VulkanUploadSourceGeneration>                  mUploadSourceGeneration;
     std::unique_ptr<VulkanUploadDestinationGeneration>             mUploadDestinationGeneration;
     std::unique_ptr<VulkanUploadTransferGeneration>                mUploadTransferGeneration;
@@ -1481,6 +1551,7 @@ private:
     std::uint64_t                                                  mTextureUploadSourceEpoch                = 0;
     std::uint64_t                                                  mTextureUploadTransferEpoch              = 0;
     std::uint64_t                                                  mTextureUploadSampleBindingEpoch         = 0;
+    std::uint64_t                                                  mTextureUploadSamplePipelineEpoch         = 0;
     std::uint64_t                                                  mUploadSourceEpoch                       = 0;
     std::uint64_t                                                  mUploadDestinationEpoch                  = 0;
     std::uint64_t                                                  mUploadTransferEpoch                     = 0;
@@ -1494,6 +1565,8 @@ private:
     std::size_t                                                    mTextureUploadSourceTeardownDepth        = 0;
     std::size_t                                                    mTextureUploadTransferTeardownDepth      = 0;
     std::size_t                                                    mTextureUploadSampleBindingTeardownDepth = 0;
+    std::size_t                                                    mTextureUploadSamplePipelineTeardownDepth = 0;
+    std::size_t                                                    mSwapchainPresentationTargetTeardownDepth = 0;
 };
 
 using VulkanInstanceAcquireResult = std::variant<VulkanInstanceAcquireError, VulkanInstanceGeneration>;
@@ -1540,6 +1613,11 @@ namespace VulkanInstanceDetail
     VulkanTextureUploadSampleBindingAcquireResult acquireTextureUploadSampleBinding(VulkanInstanceGeneration& instance_generation,
                                                                                     const VulkanTextureUploadSampleBindingRequest& request,
                                                                                     AllocationCheckpoint allocation_checkpoint) noexcept;
+
+    VulkanTextureUploadSamplePipelineAcquireResult acquireTextureUploadSamplePipeline(
+        VulkanInstanceGeneration&                       instance_generation,
+        const VulkanTextureUploadSamplePipelineRequest& request,
+        AllocationCheckpoint                            allocation_checkpoint) noexcept;
 
     VulkanUploadDestinationAcquireResult acquireUploadDestination(VulkanInstanceGeneration&             instance_generation,
                                                                   const VulkanUploadDestinationRequest& request,

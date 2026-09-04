@@ -616,6 +616,38 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       INTEGRATION_TEST_llrendervulkanswapchainpresentationpipeline
       PRIVATE VK_NO_PROTOTYPES)
 
+  add_library(llrendervulkantextureuploadsamplepipeline STATIC
+      vulkan/llrendervulkantextureuploadsamplepipeline.cpp
+      vulkan/llrendervulkantextureuploadsamplepipeline.h
+      vulkan/shaders/textureupload.vert.glsl
+      vulkan/shaders/textureupload.frag.glsl)
+  set_source_files_properties(
+      vulkan/shaders/textureupload.vert.glsl
+      vulkan/shaders/textureupload.frag.glsl
+      PROPERTIES HEADER_FILE_ONLY TRUE)
+  target_include_directories(llrendervulkantextureuploadsamplepipeline
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkantextureuploadsamplepipeline SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkantextureuploadsamplepipeline
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkantextureuploadsamplepipeline
+      PUBLIC
+          llrendervulkanswapchainpresentationtarget
+          llrendervulkantextureuploadsamplebinding)
+  set_target_properties(llrendervulkantextureuploadsamplepipeline PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkantextureuploadsamplepipeline_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkantextureuploadsamplepipeline
+      ""
+      "llrendervulkantextureuploadsamplepipeline;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkantextureuploadsamplepipeline
+      PRIVATE VK_NO_PROTOTYPES)
+
   add_library(llrendervulkanswapchainframeslot STATIC
       vulkan/llrendervulkanswapchainframeslot.cpp
       vulkan/llrendervulkanswapchainframeslot.h)
@@ -658,6 +690,7 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
           llrendervulkanlogicaldevice
           llrendervulkantextureuploaddestination
           llrendervulkantextureuploadsamplebinding
+          llrendervulkantextureuploadsamplepipeline
           llrendervulkantextureuploadsource
           llrendervulkantextureuploadtransfer
           llrendervulkanuploadsource
