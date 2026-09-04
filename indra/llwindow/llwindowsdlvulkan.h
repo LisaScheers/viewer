@@ -121,6 +121,7 @@ public:
     LLRenderVulkan::VulkanSwapchainReadbackAcquireResult      acquireSwapchainReadbackGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult     acquireSwapchainFrameSlotGeneration() noexcept;
     LLRenderVulkan::VulkanSwapchainChainRebuildResult         rebuildSwapchainChain() noexcept;
+    LLRenderVulkan::VulkanSwapchainChainRebuildResult         rebuildSwapchainChain(VkExtent2D drawable_extent) noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult roundTripEmptySwapchainFrameSlot() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult retryEmptySwapchainFrameSlotCompletion() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult acquireToPresentSwapchainFrameSlot() noexcept;
@@ -130,10 +131,13 @@ public:
         const LLRenderVulkan::VulkanSwapchainFrameClearColor& clear_color) noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassDrawToPresentSwapchainFrameSlot(
         const LLRenderVulkan::VulkanSwapchainFrameClearColor& clear_color) noexcept;
+    LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult
+    acquireRenderPassSampleDrawToPresentSwapchainFrameSlot() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentationCompletion() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult    cancelSwapchainFrameSlotPresentation() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult    retrySwapchainFrameSlotCancellationCompletion() noexcept;
+    LLRenderVulkan::VulkanInstanceGeneration*                 instanceGeneration() noexcept { return mInstanceGeneration.get(); }
     const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
     bool                                                      resetSwapchainFrameSlotGeneration() noexcept;
     bool                                                      resetSwapchainReadbackGeneration() noexcept;

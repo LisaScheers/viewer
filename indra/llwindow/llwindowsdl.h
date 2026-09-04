@@ -178,6 +178,8 @@ public:
 #if defined(LL_VULKAN_SDL_WSI)
     const LLWindowVulkanRequirements* getVulkanRequirements() const noexcept override;
     bool isVulkanWindowGenerationCurrent(U64 generation) const noexcept override;
+    LLWindowSDLVulkan* getVulkanOwner() noexcept;
+    const LLWindowSDLVulkan* getVulkanOwner() const noexcept;
     const LLRenderVulkan::VulkanInstanceGeneration* getVulkanInstanceGeneration() const noexcept;
     bool resetVulkanSurfaceGeneration() noexcept;
 #endif

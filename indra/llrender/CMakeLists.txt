@@ -660,6 +660,9 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
   target_link_libraries(llrendervulkanswapchainframeslot
       PUBLIC
           llrendervulkanuploaddestination
+          llrendervulkantextureuploadsamplepipeline
+          llrendervulkantextureuploadsamplebinding
+          llrendervulkantextureuploaddestination
           llrendervulkanswapchainpresentationpipeline
           llrendervulkanswapchainreadback)
   set_target_properties(llrendervulkanswapchainframeslot PROPERTIES FOLDER "Tests")

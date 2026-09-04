@@ -684,6 +684,7 @@ set(viewer_SOURCE_FILES
     llviewerfoldertype.cpp
     llviewergenericmessage.cpp
     llviewergesture.cpp
+    llviewergraphicsapi.cpp
     llviewerhelp.cpp
     llviewerhelputil.cpp
     llviewerhome.cpp
@@ -759,6 +760,10 @@ set(viewer_SOURCE_FILES
     noise.cpp
     pipeline.cpp
     )
+
+if (LL_VULKAN_SDL_WSI)
+  list(APPEND viewer_SOURCE_FILES llviewervulkanruntime.cpp)
+endif ()
 
 set(VIEWER_BINARY_NAME "secondlife-bin" CACHE STRING
     "The name of the viewer executable to create.")
@@ -1369,6 +1374,7 @@ set(viewer_HEADER_FILES
     llviewerfoldertype.h
     llviewergenericmessage.h
     llviewergesture.h
+    llviewergraphicsapi.h
     llviewerhelp.h
     llviewerhome.h
     llviewerinventory.h
@@ -1444,6 +1450,10 @@ set(viewer_HEADER_FILES
     pipeline.h
     roles_constants.h
     )
+
+if (LL_VULKAN_SDL_WSI)
+  list(APPEND viewer_HEADER_FILES llviewervulkanruntime.h)
+endif ()
 
 source_group("CMake Rules" FILES ViewerInstall.cmake)
 
@@ -2658,6 +2668,18 @@ if (LL_TESTS)
     llviewernetwork.cpp
     "${test_libs}"
   )
+
+  LL_ADD_INTEGRATION_TEST(llviewergraphicsapi
+    llviewergraphicsapi.cpp
+    "${test_libs};llwindow"
+  )
+
+  if (LL_VULKAN_SDL_WSI)
+    LL_ADD_INTEGRATION_TEST(llviewervulkanruntime
+      llviewervulkanruntime.cpp
+      "${test_libs};llwindow;llrender;llrendervulkaninstance"
+    )
+  endif ()
 
   LL_ADD_INTEGRATION_TEST(llviewerassetstats
     llviewerassetstats.cpp

@@ -1007,7 +1007,10 @@ enum class VulkanSwapchainFrameSlotParentOperationCode : std::uint8_t
     SwapchainPresentationTargetNotLive,
     SwapchainPresentationPipelineNotLive,
     SwapchainReadbackNotLive,
-    UploadDestinationNotLive
+    UploadDestinationNotLive,
+    TextureUploadDestinationNotLive,
+    TextureUploadSampleBindingNotLive,
+    TextureUploadSamplePipelineNotLive
 };
 
 struct VulkanSwapchainFrameSlotParentOperationError
@@ -1385,6 +1388,8 @@ public:
         const VulkanSwapchainFrameSlotOperationRequest& request,
         const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+    VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
     VulkanSwapchainFrameSlotParentPresentationResult retrySwapchainFrameSlotPresentation(
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;

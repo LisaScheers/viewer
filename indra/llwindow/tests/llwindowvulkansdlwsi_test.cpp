@@ -21,6 +21,7 @@
 #include "lltextureuploaddiagnostic.h"
 #include "llwindow.h"
 #include "llwindowsdl.h"
+#include "llwindowsdlvulkan.h"
 #include "llwindowvulkanrequirements.h"
 #include "lltut.h"
 
@@ -312,6 +313,10 @@ void window_vulkan_sdl_wsi_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<const LLWindow&>().getVulkanRequirements()), const LLWindowVulkanRequirements*>);
     static_assert(noexcept(std::declval<const LLWindow&>().getVulkanRequirements()));
     static_assert(noexcept(std::declval<const LLWindow&>().isVulkanWindowGenerationCurrent(U64{})));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDL&>().getVulkanOwner()), LLWindowSDLVulkan*>);
+    static_assert(std::is_same_v<decltype(std::declval<const LLWindowSDL&>().getVulkanOwner()), const LLWindowSDLVulkan*>);
+    static_assert(noexcept(std::declval<LLWindowSDL&>().getVulkanOwner()));
+    static_assert(noexcept(std::declval<const LLWindowSDL&>().getVulkanOwner()));
 
     if (!nativeSmokeRequested())
     {
@@ -335,6 +340,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     SDL_Window* native_sdl_window        = created ? findNativeSmokeWindow() : nullptr;
     bool        native_sdl_window_exact  = native_sdl_window != nullptr;
     bool        requirements_published   = false;
+    bool        mutable_owner_published  = false;
     bool        generation_current       = false;
     bool        resolver_identity        = false;
     bool        extensions_identical     = false;
@@ -500,6 +506,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     bool vulkan_context_switch_fails                         = false;
     bool vulkan_shared_context_fails                         = false;
 
+    LLWindowSDLVulkan*                              owned_vulkan_owner       = nullptr;
     const LLRenderVulkan::VulkanInstanceGeneration* owned_instance_generation = nullptr;
 
     if (created)
@@ -525,7 +532,11 @@ void window_vulkan_sdl_wsi_object::test<1>()
                 reinterpret_cast<PFN_vkGetInstanceProcAddr>(requirements->resolver()));
             global_dispatch_resolved = std::holds_alternative<LLRenderVulkan::VulkanGlobalDispatchGeneration>(dispatch_result);
 
-            const auto* instance_generation = static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration();
+            owned_vulkan_owner = static_cast<LLWindowSDL*>(window)->getVulkanOwner();
+            const auto* const_owner = static_cast<const LLWindowSDL*>(window)->getVulkanOwner();
+            auto* instance_generation = owned_vulkan_owner ? owned_vulkan_owner->instanceGeneration() : nullptr;
+            mutable_owner_published = owned_vulkan_owner && const_owner == owned_vulkan_owner &&
+                                      static_cast<const LLWindowSDL*>(window)->getVulkanInstanceGeneration() == instance_generation;
             if (instance_generation)
             {
                 owned_instance_generation = instance_generation;
@@ -1238,22 +1249,16 @@ void window_vulkan_sdl_wsi_object::test<1>()
                     swapchain_resize_observed = window->getSize(&resized_drawable) && resized_drawable.mX > 0 && resized_drawable.mY > 0 &&
                                                 resized_drawable.mX != current_drawable.mX && resized_drawable.mY != current_drawable.mY;
 
-                    LLRenderVulkan::VulkanSwapchainChainRebuildRequest rebuild_request;
-                    rebuild_request.mNativeWindowGeneration = requirements->nativeWindowGeneration();
                     if (swapchain_resize_observed)
                     {
-                        rebuild_request.mDrawableExtent =
-                            VkExtent2D{ static_cast<std::uint32_t>(resized_drawable.mX), static_cast<std::uint32_t>(resized_drawable.mY) };
+                        const VkExtent2D resized_extent{ static_cast<std::uint32_t>(resized_drawable.mX),
+                                                         static_cast<std::uint32_t>(resized_drawable.mY) };
+                        const auto rebuild_result = owned_vulkan_owner->rebuildSwapchainChain(resized_extent);
+                        const auto* rebuild_outcome =
+                            std::get_if<LLRenderVulkan::VulkanSwapchainChainRebuildOutcome>(&rebuild_result);
+                        swapchain_rebuild_ready =
+                            rebuild_outcome && *rebuild_outcome == LLRenderVulkan::VulkanSwapchainChainRebuildOutcome::Ready;
                     }
-                    rebuild_request.mInstanceOwnerCheck    = { &operation_context, frameSlotInstanceOwnerIsCurrent };
-                    rebuild_request.mWindowGenerationCheck = { &operation_context, frameSlotWindowGenerationIsCurrent };
-
-                    // The native proof calls the diagnostic core operation directly.
-                    // LLWindowSDL keeps its production forwarding API unchanged.
-                    const auto  rebuild_result  = mutable_generation->rebuildSwapchainChain(rebuild_request);
-                    const auto* rebuild_outcome = std::get_if<LLRenderVulkan::VulkanSwapchainChainRebuildOutcome>(&rebuild_result);
-                    swapchain_rebuild_ready =
-                        rebuild_outcome && *rebuild_outcome == LLRenderVulkan::VulkanSwapchainChainRebuildOutcome::Ready;
                     swapchain_rebuild_parent_exact = instance_generation->instance() == retained_instance &&
                                                      instance_generation->surface() == retained_surface &&
                                                      instance_generation->physicalDevice() == retained_physical_device &&
@@ -1571,6 +1576,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the Vulkan path does not initialize the OpenGL manager", no_gl_manager);
     ensure("the native proof identifies the exact Vulkan-only SDL window", native_sdl_window_exact);
     ensure("the window publishes immutable Vulkan instance requirements", requirements_published);
+    ensure("the SDL window publishes matching mutable and const Vulkan-owner bridges", mutable_owner_published);
     ensure("the window accepts only its current nonzero native generation", generation_current);
     ensure("the requirements retain SDL's exact resolver", resolver_identity);
     ensure("the requirements deep-copy SDL's exact extension sequence", extensions_identical);
@@ -1661,7 +1667,7 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure("the native X11 diagnostic requests a nonzero window resize", swapchain_resize_requested);
     ensure("SDL applies the asynchronous X11 resize before the drawable query", swapchain_resize_synchronized);
     ensure("SDL reports a different nonzero backing-pixel extent after the resize", swapchain_resize_observed);
-    ensure("the explicit diagnostic core call rebuilds the swapchain chain", swapchain_rebuild_ready);
+    ensure("the SDL owner bridge rebuilds the swapchain chain for an explicit extent", swapchain_rebuild_ready);
     ensure("swapchain rebuild preserves the exact instance, surface, physical device, logical device, and queue",
            swapchain_rebuild_parent_exact);
     ensure("swapchain rebuild publishes a fresh complete configuration, swapchain, image, target, pipeline, readback, and frame-slot chain",

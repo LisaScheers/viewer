@@ -32,6 +32,9 @@ namespace LLRenderVulkan
 
 class VulkanSwapchainPresentationTargetGeneration;
 class VulkanSwapchainPresentationPipelineGeneration;
+class VulkanTextureUploadDestinationGeneration;
+class VulkanTextureUploadSampleBindingGeneration;
+class VulkanTextureUploadSamplePipelineGeneration;
 
 inline constexpr std::uint64_t VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS = 1'000'000'000;
 
@@ -63,7 +66,8 @@ enum class VulkanSwapchainFrameSlotCommand : std::uint8_t
     CmdSetScissor,
     CmdDraw,
     CmdCopyImageToBuffer,
-    CmdBindVertexBuffers
+    CmdBindVertexBuffers,
+    CmdBindDescriptorSets
 };
 
 enum class VulkanSwapchainFrameSlotResolutionCode : std::uint8_t
@@ -130,7 +134,10 @@ enum class VulkanSwapchainFrameSlotOperationCode : std::uint8_t
     InvalidSwapchainPresentationTargetGeneration,
     InvalidSwapchainPresentationPipelineGeneration,
     InvalidSwapchainReadbackGeneration,
-    InvalidUploadDestinationGeneration
+    InvalidUploadDestinationGeneration,
+    InvalidTextureUploadDestinationGeneration,
+    InvalidTextureUploadSampleBindingGeneration,
+    InvalidTextureUploadSamplePipelineGeneration
 };
 
 struct VulkanSwapchainFrameClearColor
@@ -265,6 +272,18 @@ public:
         const VulkanUploadDestinationGeneration&             upload_destination_generation,
         const VulkanSwapchainReadbackGeneration&             readback_generation) noexcept;
 
+    VulkanSwapchainFrameSlotOperationResult resolveRenderPassSampleDrawPresentationDispatch(
+        const VulkanPhysicalDeviceGeneration&              physical_device_generation,
+        const VulkanLogicalDeviceGeneration&               logical_device_generation,
+        const VulkanSwapchainConfigurationGeneration&      configuration_generation,
+        const VulkanSwapchainGeneration&                   swapchain_generation,
+        const VulkanSwapchainImagesGeneration&             images_generation,
+        const VulkanSwapchainPresentationTargetGeneration& presentation_target_generation,
+        const VulkanTextureUploadDestinationGeneration&    texture_destination_generation,
+        const VulkanTextureUploadSampleBindingGeneration&  sample_binding_generation,
+        const VulkanTextureUploadSamplePipelineGeneration& sample_pipeline_generation,
+        const VulkanUploadDestinationGeneration&           upload_destination_generation) noexcept;
+
     // Acquires one image with VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS,
     // transitions it from undefined to present source, submits, presents, and
     // retires both fences. A post-acquire error retains the exact image and
@@ -287,6 +306,13 @@ public:
         const VulkanSwapchainPresentationPipelineGeneration& presentation_pipeline_generation,
         const VulkanUploadDestinationGeneration&             upload_destination_generation,
         VulkanSwapchainReadbackGeneration&                   readback_generation) noexcept;
+    VulkanSwapchainFrameSlotPresentationResult executeAcquireRenderPassSampleDrawToPresent(
+        const VulkanPhysicalDeviceGeneration&              physical_device_generation,
+        const VulkanSwapchainPresentationTargetGeneration& presentation_target_generation,
+        const VulkanTextureUploadDestinationGeneration&    texture_destination_generation,
+        const VulkanTextureUploadSampleBindingGeneration&  sample_binding_generation,
+        const VulkanTextureUploadSamplePipelineGeneration& sample_pipeline_generation,
+        const VulkanUploadDestinationGeneration&           upload_destination_generation) noexcept;
     VulkanSwapchainFrameSlotPresentationResult retryPresentation() noexcept;
     VulkanSwapchainFrameSlotPresentationResult retryPresentationCompletion() noexcept;
 
@@ -301,6 +327,17 @@ public:
         return mActiveUploadDestinationGeneration == &upload_destination_generation;
     }
     bool activeUploadDestinationMatchesSnapshot() const noexcept;
+
+    bool hasRetainedTextureUploadSamplePipelineGeneration() const noexcept
+    {
+        return mActiveTextureUploadSamplePipelineGeneration != nullptr;
+    }
+    bool retainsTextureUploadSamplePipelineGeneration(
+        const VulkanTextureUploadSamplePipelineGeneration& sample_pipeline_generation) const noexcept
+    {
+        return mActiveTextureUploadSamplePipelineGeneration == &sample_pipeline_generation;
+    }
+    bool activeTextureUploadSamplePipelineMatchesSnapshot() const noexcept;
 
     // Cancellation consumes the outstanding binary-semaphore payload with a
     // fence-backed empty submission, retires every reset fence, then releases
@@ -337,7 +374,8 @@ private:
         TransferClear,
         RenderPassClear,
         RenderPassDraw,
-        RenderPassDrawReadback
+        RenderPassDrawReadback,
+        RenderPassSampleDraw
     };
 
     VulkanSwapchainFrameSlotOperationResult resolvePresentationDispatch(
@@ -349,6 +387,9 @@ private:
         const VulkanPhysicalDeviceGeneration*                physical_device_generation,
         const VulkanSwapchainPresentationTargetGeneration*   presentation_target_generation,
         const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation,
+        const VulkanTextureUploadDestinationGeneration*      texture_destination_generation,
+        const VulkanTextureUploadSampleBindingGeneration*    sample_binding_generation,
+        const VulkanTextureUploadSamplePipelineGeneration*   sample_pipeline_generation,
         const VulkanUploadDestinationGeneration*             upload_destination_generation,
         const VulkanSwapchainReadbackGeneration*             readback_generation) noexcept;
     VulkanSwapchainFrameSlotPresentationResult executeAcquireToPresent(
@@ -357,12 +398,16 @@ private:
         const VulkanPhysicalDeviceGeneration*                physical_device_generation,
         const VulkanSwapchainPresentationTargetGeneration*   presentation_target_generation,
         const VulkanSwapchainPresentationPipelineGeneration* presentation_pipeline_generation,
+        const VulkanTextureUploadDestinationGeneration*      texture_destination_generation,
+        const VulkanTextureUploadSampleBindingGeneration*    sample_binding_generation,
+        const VulkanTextureUploadSamplePipelineGeneration*   sample_pipeline_generation,
         const VulkanUploadDestinationGeneration*             upload_destination_generation,
         VulkanSwapchainReadbackGeneration*                   readback_generation) noexcept;
 
     bool activeReadbackMatchesSnapshot() const noexcept;
     void clearActiveReadback() noexcept;
     void clearActiveUploadDestination() noexcept;
+    void clearActiveTextureUploadSamplePipeline() noexcept;
 
     const VulkanLogicalDeviceGeneration*                 mLogicalDeviceGeneration = nullptr;
     const VulkanSwapchainConfigurationGeneration*        mConfigurationGeneration = nullptr;
@@ -407,7 +452,8 @@ private:
     PFN_vkCmdBeginRenderPass                             mCmdBeginRenderPass               = nullptr;
     PFN_vkCmdEndRenderPass                               mCmdEndRenderPass                 = nullptr;
     PFN_vkCmdBindPipeline                                mCmdBindPipeline                  = nullptr;
-    PFN_vkCmdBindVertexBuffers                           mCmdBindVertexBuffers                      = nullptr;
+    PFN_vkCmdBindDescriptorSets                          mCmdBindDescriptorSets            = nullptr;
+    PFN_vkCmdBindVertexBuffers                           mCmdBindVertexBuffers             = nullptr;
     PFN_vkCmdSetViewport                                 mCmdSetViewport                   = nullptr;
     PFN_vkCmdSetScissor                                  mCmdSetScissor                    = nullptr;
     PFN_vkCmdDraw                                        mCmdDraw                          = nullptr;
@@ -426,6 +472,23 @@ private:
     VkDeviceSize                                         mActiveUploadDestinationAllocationSize      = 0;
     std::uint32_t                                        mActiveUploadDestinationMemoryTypeIndex     = 0;
     VkMemoryPropertyFlags                                mActiveUploadDestinationMemoryPropertyFlags = 0;
+    const VulkanTextureUploadDestinationGeneration*      mResolvedTextureUploadDestinationGeneration = nullptr;
+    const VulkanTextureUploadSampleBindingGeneration*    mResolvedTextureUploadSampleBindingGeneration = nullptr;
+    const VulkanTextureUploadSamplePipelineGeneration*   mResolvedTextureUploadSamplePipelineGeneration = nullptr;
+    const VulkanTextureUploadDestinationGeneration*      mActiveTextureUploadDestinationGeneration = nullptr;
+    const VulkanTextureUploadSampleBindingGeneration*    mActiveTextureUploadSampleBindingGeneration = nullptr;
+    const VulkanTextureUploadSamplePipelineGeneration*   mActiveTextureUploadSamplePipelineGeneration = nullptr;
+    VkImage                                              mActiveTextureUploadImage = VK_NULL_HANDLE;
+    VkDeviceMemory                                       mActiveTextureUploadMemory = VK_NULL_HANDLE;
+    VkImageView                                          mActiveTextureUploadImageView = VK_NULL_HANDLE;
+    std::uint64_t                                        mActiveTextureUploadResidentRevision = 0;
+    std::uint64_t                                        mActiveTextureUploadResidentContentIdentity = 0;
+    VkSampler                                            mActiveTextureUploadSampler = VK_NULL_HANDLE;
+    VkDescriptorSetLayout                                mActiveTextureUploadDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout                                     mActiveTextureUploadPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorPool                                     mActiveTextureUploadDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet                                      mActiveTextureUploadDescriptorSet = VK_NULL_HANDLE;
+    VkPipeline                                           mActiveTextureUploadPipeline = VK_NULL_HANDLE;
     const VulkanPhysicalDeviceGeneration*                mReadbackPhysicalDeviceGeneration = nullptr;
     const VulkanSwapchainReadbackGeneration*             mResolvedReadbackGeneration       = nullptr;
     VulkanSwapchainReadbackGeneration*                   mActiveReadbackGeneration         = nullptr;

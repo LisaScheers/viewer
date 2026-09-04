@@ -171,7 +171,8 @@ enum class MissingCommand : std::uint8_t
     CreateDescriptorPool,
     DestroyDescriptorPool,
     AllocateDescriptorSets,
-    UpdateDescriptorSets
+    UpdateDescriptorSets,
+    CmdBindDescriptorSets
 };
 
 enum class Event : std::uint8_t
@@ -252,7 +253,8 @@ enum class Event : std::uint8_t
     DestroyTextureSampleDescriptorSetLayout,
     DestroyTextureSampleSampler,
     CreateTextureSampleGraphicsPipeline,
-    DestroyTextureSampleGraphicsPipeline
+    DestroyTextureSampleGraphicsPipeline,
+    BindTextureSampleDescriptorSet
 };
 
 enum class ReadbackResetReentryPoint : std::uint8_t
@@ -862,6 +864,7 @@ struct FakeState
     std::size_t           mBeginRenderPassCalls         = 0;
     std::size_t           mEndRenderPassCalls           = 0;
     std::size_t             mBindPipelineCalls            = 0;
+    std::size_t             mBindDescriptorSetCalls       = 0;
     std::size_t                                                        mBindVertexBufferCalls        = 0;
     std::size_t             mSetViewportCalls             = 0;
     std::size_t             mSetScissorCalls              = 0;
@@ -885,6 +888,8 @@ struct FakeState
     VkSubpassContents     mOperationSubpassContents     = VK_SUBPASS_CONTENTS_MAX_ENUM;
     VkPipelineBindPoint     mOperationPipelineBindPoint   = VK_PIPELINE_BIND_POINT_MAX_ENUM;
     VkPipeline              mOperationPipeline            = VK_NULL_HANDLE;
+    VkPipelineLayout        mOperationDescriptorPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSet         mOperationDescriptorSet            = VK_NULL_HANDLE;
     std::uint32_t           mOperationFirstVertexBinding = std::numeric_limits<std::uint32_t>::max();
     std::uint32_t           mOperationVertexBindingCount = 0;
     VkBuffer                mOperationVertexBuffer       = VK_NULL_HANDLE;
@@ -2634,6 +2639,28 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer     command_buffe
     gFakeState->mEvents.push_back(Event::BindPipeline);
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindDescriptorSets(VkCommandBuffer        command_buffer,
+                                                      VkPipelineBindPoint    pipeline_bind_point,
+                                                      VkPipelineLayout       layout,
+                                                      std::uint32_t          first_set,
+                                                      std::uint32_t          descriptor_set_count,
+                                                      const VkDescriptorSet* descriptor_sets,
+                                                      std::uint32_t          dynamic_offset_count,
+                                                      const std::uint32_t*   dynamic_offsets) noexcept
+{
+    if (!gFakeState || command_buffer != gFakeState->mCommandBuffer ||
+        pipeline_bind_point != VK_PIPELINE_BIND_POINT_GRAPHICS || layout == VK_NULL_HANDLE || first_set != 0 ||
+        descriptor_set_count != 1 || !descriptor_sets || descriptor_sets[0] == VK_NULL_HANDLE || dynamic_offset_count != 0 ||
+        dynamic_offsets)
+    {
+        return;
+    }
+    ++gFakeState->mBindDescriptorSetCalls;
+    gFakeState->mOperationDescriptorPipelineLayout = layout;
+    gFakeState->mOperationDescriptorSet            = descriptor_sets[0];
+    gFakeState->mEvents.push_back(Event::BindTextureSampleDescriptorSet);
+}
+
 VKAPI_ATTR void VKAPI_CALL fakeCmdBindVertexBuffers(VkCommandBuffer     command_buffer,
                                                     std::uint32_t       first_binding,
                                                     std::uint32_t       binding_count,
@@ -3315,6 +3342,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     {
         return gFakeState->mMissing == MissingCommand::CmdBindPipeline ? nullptr : eraseFunctionType(fakeCmdBindPipeline);
     }
+    if (std::strcmp(name, "vkCmdBindDescriptorSets") == 0)
+    {
+        return gFakeState->mMissing == MissingCommand::CmdBindDescriptorSets ? nullptr : eraseFunctionType(fakeCmdBindDescriptorSets);
+    }
     if (std::strcmp(name, "vkCmdBindVertexBuffers") == 0)
     {
         return gFakeState->mMissing == MissingCommand::CmdBindVertexBuffers ? nullptr : eraseFunctionType(fakeCmdBindVertexBuffers);
@@ -3846,6 +3877,23 @@ VulkanSwapchainFrameSlotOperationRequest makeSwapchainFrameSlotOperationRequest(
 {
     state.mExpectedInstanceOwner = &owner;
     return { 42, drawable_extent, { &state, instanceOwnerIsCurrent }, { &state, surfaceWindowIsCurrent } };
+}
+
+struct SampleFrameStaleContext
+{
+    VulkanInstanceGeneration* mOwner  = nullptr;
+    std::size_t                mChecks = 0;
+};
+
+bool sampleFrameStaleOwnerIsCurrent(void* opaque, const VulkanInstanceGeneration&) noexcept
+{
+    auto& context = *static_cast<SampleFrameStaleContext*>(opaque);
+    ++context.mChecks;
+    if (context.mChecks == 2)
+    {
+        VulkanInstanceGenerationTestAccess::noteTextureUploadSamplePipelineTransition(*context.mOwner);
+    }
+    return true;
 }
 
 VulkanSwapchainChainRebuildRequest makeSwapchainChainRebuildRequest(
@@ -6895,7 +6943,7 @@ struct render_vulkan_instance_test
 {
 };
 
-using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 154>;
+using render_vulkan_instance_test_group  = test_group<render_vulkan_instance_test, 155>;
 using render_vulkan_instance_test_object = render_vulkan_instance_test_group::object;
 render_vulkan_instance_test_group render_vulkan_instance_tests("render Vulkan instance");
 
@@ -12578,6 +12626,23 @@ void render_vulkan_instance_test_object::test<104>()
 {
     constexpr VkExtent2D extent{ 64, 64 };
     {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireSwapchainPresentationTargetChain(state, owner, extent);
+        acquireResidentUploadDestination(state, owner);
+        ensure("the missing-texture sampled-frame slot fixture succeeds",
+               !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, extent)));
+        const auto result = owner.acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(
+            makeSwapchainFrameSlotOperationRequest(state, owner, extent));
+        const auto& error = requireSwapchainFrameSlotPresentationError(result);
+        ensure("sampled presentation reports its missing resident texture before dispatch or frame work",
+               error.mCode == VulkanSwapchainFrameSlotParentOperationCode::TextureUploadDestinationNotLive &&
+                   !error.mOperationError && state.mAcquireNextImageCalls == 0 && state.mBindPipelineCalls == 0 &&
+                   state.mBindDescriptorSetCalls == 0 && state.mDrawCalls == 0 && owner.reset());
+    }
+
+    {
         FakeState state;
         prepareReadbackObservationStorage(state, extent);
         ScopedFakeState          scope(state);
@@ -15774,6 +15839,92 @@ void render_vulkan_instance_test_object::test<154>()
                    sample_destroy != state.mEvents.end() && presentation_destroy != state.mEvents.end() &&
                    target_destroy != state.mEvents.end() && sample_destroy < presentation_destroy &&
                    presentation_destroy < target_destroy && owner.reset());
+    }
+}
+
+template<>
+template<>
+void render_vulkan_instance_test_object::test<155>()
+{
+    static_assert(noexcept(std::declval<VulkanInstanceGeneration&>().acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(
+        std::declval<const VulkanSwapchainFrameSlotOperationRequest&>())));
+
+    constexpr VkExtent2D extent{ 64, 64 };
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireTextureUploadSamplePipelineChain(state, owner, extent);
+        acquireResidentUploadDestination(state, owner);
+        ensure("the sampled-frame slot fixture succeeds",
+               !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, extent)));
+        state.mEvents.clear();
+
+        const auto result = owner.acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(
+            makeSwapchainFrameSlotOperationRequest(state, owner, extent));
+        const auto& success = requireSwapchainFrameSlotPresentationSuccess(result);
+        const auto bind_pipeline = std::find(state.mEvents.begin(), state.mEvents.end(), Event::BindPipeline);
+        const auto bind_descriptor =
+            std::find(state.mEvents.begin(), state.mEvents.end(), Event::BindTextureSampleDescriptorSet);
+        const auto bind_vertex = std::find(state.mEvents.begin(), state.mEvents.end(), Event::BindVertexBuffer);
+        const auto draw = std::find(state.mEvents.begin(), state.mEvents.end(), Event::Draw);
+        ensure("the aggregate sampled frame presents one three-vertex draw",
+               success.mOutcome == VulkanSwapchainFrameSlotPresentationOutcome::Presented &&
+                   state.mBindPipelineCalls == 1 && state.mBindDescriptorSetCalls == 1 &&
+                   state.mBindVertexBufferCalls == 1 && state.mDrawCalls == 1 && state.mDrawVertexCount == 3 &&
+                   state.mOperationPipeline == owner.textureUploadSamplePipeline() &&
+                   state.mOperationDescriptorPipelineLayout == owner.textureUploadSampleBindingPipelineLayout() &&
+                   state.mOperationDescriptorSet == owner.textureUploadSampleBindingDescriptorSet());
+        ensure("pipeline, sampled set, vertex input, and draw are recorded in dependency order",
+               bind_pipeline != state.mEvents.end() && bind_descriptor != state.mEvents.end() &&
+                   bind_vertex != state.mEvents.end() && draw != state.mEvents.end() && bind_pipeline < bind_descriptor &&
+                   bind_descriptor < bind_vertex && bind_vertex < draw && owner.reset());
+    }
+
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireTextureUploadSamplePipelineChain(state, owner, extent);
+        acquireResidentUploadDestination(state, owner);
+        ensure("the stale sampled-frame slot fixture succeeds",
+               !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, extent)));
+        SampleFrameStaleContext context{ &owner };
+        auto request                 = makeSwapchainFrameSlotOperationRequest(state, owner, extent);
+        request.mInstanceOwnerCheck = VulkanInstanceOwnerCheck{ &context, sampleFrameStaleOwnerIsCurrent };
+        const auto result = owner.acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(request);
+        const auto& error = requireSwapchainFrameSlotPresentationError(result);
+        ensure("a sampled-pipeline epoch change after dispatch resolution is rejected before image acquisition",
+               context.mChecks == 2 &&
+                   error.mCode == VulkanSwapchainFrameSlotParentOperationCode::TextureUploadSamplePipelineNotLive &&
+                   !error.mOperationError && state.mAcquireNextImageCalls == 0 && state.mBindDescriptorSetCalls == 0 &&
+                   state.mDrawCalls == 0 && owner.reset());
+    }
+
+    {
+        FakeState                state;
+        ScopedFakeState          scope(state);
+        VulkanInstanceGeneration owner = takeGeneration(acquireVulkanInstanceGeneration(makeRequest(state)));
+        acquireTextureUploadSamplePipelineChain(state, owner, extent);
+        acquireResidentUploadDestination(state, owner);
+        ensure("the retained sampled-frame slot fixture succeeds",
+               !owner.acquireSwapchainFrameSlotGeneration(makeSwapchainFrameSlotRequest(state, owner, extent)));
+        state.mWaitForFencesResults     = { VK_SUCCESS, VK_TIMEOUT, VK_SUCCESS };
+        state.mWaitForFencesResultIndex = 0;
+
+        const auto result = owner.acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(
+            makeSwapchainFrameSlotOperationRequest(state, owner, extent));
+        const auto& pending = requireSwapchainFrameSlotPresentationError(result);
+        ensure("a pending sampled frame retains its pipeline and refuses direct teardown",
+               pending.mOperationError &&
+                   pending.mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::PresentPending &&
+                   owner.hasTextureUploadSamplePipelineGeneration() &&
+                   !owner.resetTextureUploadSamplePipelineGeneration());
+        requireSwapchainFrameSlotPresentationSuccess(
+            owner.retrySwapchainFrameSlotPresentationCompletion(makeExactFrameSlotOperationRequest(owner)));
+        ensure("fence retirement releases sampled-pipeline retention",
+               owner.resetTextureUploadSamplePipelineGeneration() &&
+                   !owner.hasTextureUploadSamplePipelineGeneration() && owner.reset());
     }
 }
 

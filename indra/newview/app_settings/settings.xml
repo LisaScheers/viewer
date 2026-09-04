@@ -10128,6 +10128,17 @@
       <key>Value</key>
       <real>1.0</real>
     </map>
+    <key>RenderVulkanDeveloper</key>
+    <map>
+      <key>Comment</key>
+      <string>Use the experimental Vulkan vertical slice for this session. OpenGL is a temporary fallback; feature parity is not claimed.</string>
+      <key>Persist</key>
+      <integer>0</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>0</integer>
+    </map>
     <key>RenderWater</key>
     <map>
       <key>Comment</key>

@@ -468,6 +468,14 @@
       <!-- Special case. Mapped to settings procedurally. -->
     </map>
 
+    <key>vulkan</key>
+    <map>
+      <key>desc</key>
+      <string>Run the experimental Vulkan vertical slice. OpenGL is a temporary fallback; feature parity is not claimed.</string>
+      <key>map-to</key>
+      <string>RenderVulkanDeveloper</string>
+    </map>
+
     <key>skipupdatecheck</key>
     <map>
       <key>desc</key>

@@ -305,6 +305,16 @@ bool LLWindowSDL::isVulkanWindowGenerationCurrent(U64 generation) const noexcept
     return mVulkanWindow && mVulkanWindow->isGenerationCurrent(generation);
 }
 
+LLWindowSDLVulkan* LLWindowSDL::getVulkanOwner() noexcept
+{
+    return mVulkanWindow.get();
+}
+
+const LLWindowSDLVulkan* LLWindowSDL::getVulkanOwner() const noexcept
+{
+    return mVulkanWindow.get();
+}
+
 const LLRenderVulkan::VulkanInstanceGeneration* LLWindowSDL::getVulkanInstanceGeneration() const noexcept
 {
     return mVulkanWindow ? mVulkanWindow->instanceGeneration() : nullptr;
@@ -1657,6 +1667,16 @@ SDL_AppResult LLWindowSDL::handleEvent(const SDL_Event& event)
             mCallbacks->handleResize(this, width, height);
             break;
         }
+#if defined(LL_VULKAN_SDL_WSI)
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        {
+            if (mGraphicsAPI == GraphicsAPI::Vulkan)
+            {
+                mCallbacks->handleResize(this, event.window.data1, event.window.data2);
+            }
+            break;
+        }
+#endif
         case SDL_EVENT_WINDOW_MOUSE_ENTER:
             break;
         case SDL_EVENT_WINDOW_MOUSE_LEAVE:

@@ -2079,6 +2079,23 @@ void render_vulkan_swapchain_frame_slot_object::test<1>()
         std::declval<const VulkanSwapchainPresentationPipelineGeneration&>(),
         std::declval<const VulkanUploadDestinationGeneration&>(),
         std::declval<const VulkanSwapchainFrameClearColor&>())));
+    static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().resolveRenderPassSampleDrawPresentationDispatch(
+        std::declval<const VulkanPhysicalDeviceGeneration&>(), std::declval<const VulkanLogicalDeviceGeneration&>(),
+        std::declval<const VulkanSwapchainConfigurationGeneration&>(), std::declval<const VulkanSwapchainGeneration&>(),
+        std::declval<const VulkanSwapchainImagesGeneration&>(), std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
+        std::declval<const VulkanTextureUploadDestinationGeneration&>(),
+        std::declval<const VulkanTextureUploadSampleBindingGeneration&>(),
+        std::declval<const VulkanTextureUploadSamplePipelineGeneration&>(),
+        std::declval<const VulkanUploadDestinationGeneration&>())));
+    static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().executeAcquireRenderPassSampleDrawToPresent(
+        std::declval<const VulkanPhysicalDeviceGeneration&>(),
+        std::declval<const VulkanSwapchainPresentationTargetGeneration&>(),
+        std::declval<const VulkanTextureUploadDestinationGeneration&>(),
+        std::declval<const VulkanTextureUploadSampleBindingGeneration&>(),
+        std::declval<const VulkanTextureUploadSamplePipelineGeneration&>(),
+        std::declval<const VulkanUploadDestinationGeneration&>())));
+    static_assert(noexcept(std::declval<const VulkanSwapchainFrameSlotGeneration&>()
+                               .hasRetainedTextureUploadSamplePipelineGeneration()));
     static_assert(noexcept(std::declval<VulkanSwapchainFrameSlotGeneration&>().retryEmptySubmissionCompletion()));
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::ReleaseSwapchainImages) == 17);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdClearColorImage) == 18);
@@ -2089,12 +2106,16 @@ void render_vulkan_swapchain_frame_slot_object::test<1>()
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdSetScissor) == 23);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdDraw) == 24);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdBindVertexBuffers) == 26);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotCommand::CmdBindDescriptorSets) == 27);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::CommandFailure) == 8);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidClearColor) == 9);
     static_assert(static_cast<std::uint8_t>(
                       VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationTargetGeneration) == 10);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidSwapchainPresentationPipelineGeneration) == 11);
     static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidUploadDestinationGeneration) == 13);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidTextureUploadDestinationGeneration) == 14);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidTextureUploadSampleBindingGeneration) == 15);
+    static_assert(static_cast<std::uint8_t>(VulkanSwapchainFrameSlotOperationCode::InvalidTextureUploadSamplePipelineGeneration) == 16);
 
     const VulkanSwapchainFrameSlotResolutionError value{ VulkanSwapchainFrameSlotResolutionCode::SubmissionFenceCreationFailure,
                                                          VulkanSwapchainFrameSlotCommand::CreateFence, VK_ERROR_OUT_OF_DEVICE_MEMORY };

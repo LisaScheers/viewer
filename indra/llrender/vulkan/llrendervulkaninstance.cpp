@@ -50,7 +50,8 @@ namespace
         ExecuteAcquireClearToPresent,
         ExecuteAcquireRenderPassClearToPresent,
         ExecuteAcquireRenderPassDrawToPresent,
-        ExecuteAcquireRenderPassDrawReadbackToPresent
+        ExecuteAcquireRenderPassDrawReadbackToPresent,
+        ExecuteAcquireRenderPassSampleDrawToPresent
     };
 
     enum class UploadTransferParentOperation : std::uint8_t
@@ -75,7 +76,8 @@ namespace
                operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent ||
                operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassClearToPresent ||
                operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent ||
-               operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent;
+               operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent ||
+               operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassSampleDrawToPresent;
     }
 
     bool validClearColor(const VulkanSwapchainFrameClearColor& clear_color) noexcept
@@ -1425,6 +1427,10 @@ struct VulkanInstanceGenerationFactory
         const VulkanSwapchainFrameClearColor&           clear_color) noexcept;
 
     static VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(
+        VulkanInstanceGeneration&                       instance_generation,
+        const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
+
+    static VulkanSwapchainFrameSlotParentPresentationResult acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(
         VulkanInstanceGeneration&                       instance_generation,
         const VulkanSwapchainFrameSlotOperationRequest& request) noexcept;
 
@@ -2901,6 +2907,12 @@ VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGeneration::acqui
     return VulkanInstanceGenerationFactory::acquireRenderPassDrawReadbackToPresentSwapchainFrameSlot(*this, request);
 }
 
+VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGeneration::acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(
+    const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
+{
+    return VulkanInstanceGenerationFactory::acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(*this, request);
+}
+
 VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGeneration::retrySwapchainFrameSlotPresentation(
     const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
 {
@@ -3252,7 +3264,9 @@ bool VulkanInstanceGeneration::resetTextureUploadSampleBindingGeneration() noexc
 
 bool VulkanInstanceGeneration::resetTextureUploadSamplePipelineGeneration() noexcept
 {
-    if (mNativeAcquisitionDepth != 0)
+    if (mNativeAcquisitionDepth != 0 ||
+        (mSwapchainFrameSlotGeneration &&
+         mSwapchainFrameSlotGeneration->hasRetainedTextureUploadSamplePipelineGeneration()))
     {
         return false;
     }
@@ -7682,12 +7696,17 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
 {
     const bool render_pass_clear         = operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassClearToPresent;
     const bool render_pass_draw_readback = operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent;
+    const bool render_pass_sample_draw   = operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassSampleDrawToPresent;
     const bool render_pass_draw =
         operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent || render_pass_draw_readback;
-    const bool render_pass_operation       = render_pass_clear || render_pass_draw;
     const auto* current_frame_slot          = instance_generation.mSwapchainFrameSlotGeneration.get();
+    const bool sample_pipeline_required =
+        render_pass_sample_draw ||
+        (current_frame_slot && current_frame_slot->hasRetainedTextureUploadSamplePipelineGeneration());
+    const bool render_pass_operation = render_pass_clear || render_pass_draw || sample_pipeline_required;
     const bool  upload_destination_required =
-        render_pass_draw || (current_frame_slot && current_frame_slot->hasRetainedUploadDestinationGeneration());
+        render_pass_draw || render_pass_sample_draw ||
+        (current_frame_slot && current_frame_slot->hasRetainedUploadDestinationGeneration());
     const bool caller_clear_color_required = operation == SwapchainFrameSlotParentOperation::ExecuteAcquireClearToPresent ||
                                              render_pass_clear ||
                                              operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent;
@@ -7800,6 +7819,53 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
                     VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive);
             }
         }
+        if (sample_pipeline_required)
+        {
+            constexpr auto destination_description = vulkanTextureUploadDestinationDescription();
+            const auto* destination = instance_generation.mTextureUploadDestinationGeneration.get();
+            if (!destination || !destination->createdFor(*instance_generation.mPresentationDeviceGeneration,
+                                                          *instance_generation.mLogicalDeviceGeneration) ||
+                !destination->matchesDescription(destination_description) || !destination->isResident() ||
+                destination->residentRevision() != destination_description.mExpectedRevision ||
+                destination->residentContentIdentity() == 0 ||
+                destination->currentState() != LLRenderContract::ImageState::ShaderRead ||
+                destination->image() == VK_NULL_HANDLE || destination->memory() == VK_NULL_HANDLE ||
+                destination->imageView() == VK_NULL_HANDLE)
+            {
+                return swapchainFrameSlotOperationFailure(
+                    VulkanSwapchainFrameSlotParentOperationCode::TextureUploadDestinationNotLive);
+            }
+            constexpr auto binding_description = vulkanTextureUploadSampleBindingDescription();
+            const auto* binding = instance_generation.mTextureUploadSampleBindingGeneration.get();
+            if (!binding || !binding->createdFor(*instance_generation.mPresentationDeviceGeneration,
+                                                  *instance_generation.mLogicalDeviceGeneration, *destination) ||
+                !binding->matchesDescription(binding_description) ||
+                !binding->retainsTextureUploadDestinationGeneration(*destination) ||
+                binding->residentRevision() != destination->residentRevision() ||
+                binding->residentContentIdentity() != destination->residentContentIdentity() ||
+                binding->destinationImageView() != destination->imageView() || binding->sampler() == VK_NULL_HANDLE ||
+                binding->descriptorSetLayout() == VK_NULL_HANDLE || binding->pipelineLayout() == VK_NULL_HANDLE ||
+                binding->descriptorPool() == VK_NULL_HANDLE || binding->descriptorSet() == VK_NULL_HANDLE)
+            {
+                return swapchainFrameSlotOperationFailure(
+                    VulkanSwapchainFrameSlotParentOperationCode::TextureUploadSampleBindingNotLive);
+            }
+            constexpr auto pipeline_description = vulkanTextureUploadSamplePipelineDescription();
+            const auto* pipeline = instance_generation.mTextureUploadSamplePipelineGeneration.get();
+            if (!pipeline || !pipeline->matchesDescription(pipeline_description) ||
+                !pipeline->retainsTextureUploadSampleBindingGeneration(*binding) ||
+                pipeline->pipelineLayout() != binding->pipelineLayout() || pipeline->pipeline() == VK_NULL_HANDLE ||
+                !pipeline->createdFor(*instance_generation.mPresentationDeviceGeneration,
+                                      *instance_generation.mLogicalDeviceGeneration, *destination, *binding,
+                                      *instance_generation.mSwapchainConfigurationGeneration,
+                                      *instance_generation.mSwapchainGeneration,
+                                      *instance_generation.mSwapchainImagesGeneration,
+                                      *instance_generation.mSwapchainPresentationTargetGeneration))
+            {
+                return swapchainFrameSlotOperationFailure(
+                    VulkanSwapchainFrameSlotParentOperationCode::TextureUploadSamplePipelineNotLive);
+            }
+        }
         if (!instance_generation.mSwapchainFrameSlotGeneration ||
             instance_generation.mSwapchainFrameSlotGeneration->commandPool() == VK_NULL_HANDLE ||
             instance_generation.mSwapchainFrameSlotGeneration->commandBuffer() == VK_NULL_HANDLE ||
@@ -7832,6 +7898,20 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
             {
                 return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive);
             }
+        }
+        if (sample_pipeline_required &&
+            (!instance_generation.mSwapchainFrameSlotGeneration->retainsTextureUploadSamplePipelineGeneration(
+                 *instance_generation.mTextureUploadSamplePipelineGeneration) &&
+             instance_generation.mSwapchainFrameSlotGeneration->hasRetainedTextureUploadSamplePipelineGeneration()))
+        {
+            return swapchainFrameSlotOperationFailure(
+                VulkanSwapchainFrameSlotParentOperationCode::TextureUploadSamplePipelineNotLive);
+        }
+        if (instance_generation.mSwapchainFrameSlotGeneration->hasRetainedTextureUploadSamplePipelineGeneration() &&
+            !instance_generation.mSwapchainFrameSlotGeneration->activeTextureUploadSamplePipelineMatchesSnapshot())
+        {
+            return swapchainFrameSlotOperationFailure(
+                VulkanSwapchainFrameSlotParentOperationCode::TextureUploadSamplePipelineNotLive);
         }
         if (request.mNativeWindowGeneration != instance_generation.mNativeWindowGeneration ||
             request.mNativeWindowGeneration != instance_generation.surfaceNativeWindowGeneration())
@@ -7869,6 +7949,12 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     const auto* images_generation    = instance_generation.mSwapchainImagesGeneration.get();
     const auto* presentation_target   = render_pass_operation ? instance_generation.mSwapchainPresentationTargetGeneration.get() : nullptr;
     const auto* presentation_pipeline = render_pass_draw ? instance_generation.mSwapchainPresentationPipelineGeneration.get() : nullptr;
+    const auto* texture_destination =
+        sample_pipeline_required ? instance_generation.mTextureUploadDestinationGeneration.get() : nullptr;
+    const auto* sample_binding =
+        sample_pipeline_required ? instance_generation.mTextureUploadSampleBindingGeneration.get() : nullptr;
+    const auto* sample_pipeline =
+        sample_pipeline_required ? instance_generation.mTextureUploadSamplePipelineGeneration.get() : nullptr;
     const auto* upload_destination    = upload_destination_required ? instance_generation.mUploadDestinationGeneration.get() : nullptr;
     auto*       readback            = instance_generation.mSwapchainReadbackGeneration.get();
     auto*       frame_slot          = instance_generation.mSwapchainFrameSlotGeneration.get();
@@ -7891,6 +7977,9 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     const VkFormat                  image_format                     = images_generation->imageFormat();
     const std::uint64_t             presentation_target_epoch        = instance_generation.mSwapchainPresentationTargetEpoch;
     const std::uint64_t             presentation_pipeline_epoch      = instance_generation.mSwapchainPresentationPipelineEpoch;
+    const std::uint64_t texture_destination_epoch = instance_generation.mTextureUploadDestinationEpoch;
+    const std::uint64_t sample_binding_epoch       = instance_generation.mTextureUploadSampleBindingEpoch;
+    const std::uint64_t sample_pipeline_epoch      = instance_generation.mTextureUploadSamplePipelineEpoch;
     const std::uint64_t                  upload_destination_epoch         = instance_generation.mUploadDestinationEpoch;
     const std::uint64_t             readback_epoch                   = instance_generation.mSwapchainReadbackEpoch;
     const std::uint64_t             frame_slot_epoch                 = instance_generation.mSwapchainFrameSlotEpoch;
@@ -7900,6 +7989,18 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     const VkExtent2D                target_image_extent = presentation_target ? presentation_target->imageExtent() : VkExtent2D{};
     const VkPipelineLayout          pipeline_layout     = presentation_pipeline ? presentation_pipeline->pipelineLayout() : VK_NULL_HANDLE;
     const VkPipeline                pipeline            = presentation_pipeline ? presentation_pipeline->pipeline() : VK_NULL_HANDLE;
+    const VkImage texture_image = texture_destination ? texture_destination->image() : VK_NULL_HANDLE;
+    const VkDeviceMemory texture_memory = texture_destination ? texture_destination->memory() : VK_NULL_HANDLE;
+    const VkImageView texture_image_view = texture_destination ? texture_destination->imageView() : VK_NULL_HANDLE;
+    const std::uint64_t texture_resident_revision = texture_destination ? texture_destination->residentRevision() : 0;
+    const std::uint64_t texture_resident_identity = texture_destination ? texture_destination->residentContentIdentity() : 0;
+    const VkSampler sample_sampler = sample_binding ? sample_binding->sampler() : VK_NULL_HANDLE;
+    const VkDescriptorSetLayout sample_descriptor_set_layout =
+        sample_binding ? sample_binding->descriptorSetLayout() : VK_NULL_HANDLE;
+    const VkPipelineLayout sample_pipeline_layout = sample_binding ? sample_binding->pipelineLayout() : VK_NULL_HANDLE;
+    const VkDescriptorPool sample_descriptor_pool = sample_binding ? sample_binding->descriptorPool() : VK_NULL_HANDLE;
+    const VkDescriptorSet sample_descriptor_set = sample_binding ? sample_binding->descriptorSet() : VK_NULL_HANDLE;
+    const VkPipeline sampled_pipeline = sample_pipeline ? sample_pipeline->pipeline() : VK_NULL_HANDLE;
     const LLRenderContract::BufferHandle upload_destination_handle =
         upload_destination_required ? upload_destination->resourceHandle() : LLRenderContract::BufferHandle{};
     const std::uint64_t upload_destination_expected_identity =
@@ -8016,6 +8117,49 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     {
         return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive);
     }
+    const auto exact_sample_pipeline = [&]() noexcept
+    {
+        if (!sample_pipeline_required)
+        {
+            return true;
+        }
+        constexpr auto destination_description = vulkanTextureUploadDestinationDescription();
+        constexpr auto binding_description     = vulkanTextureUploadSampleBindingDescription();
+        constexpr auto pipeline_description    = vulkanTextureUploadSamplePipelineDescription();
+        return instance_generation.mTextureUploadDestinationEpoch == texture_destination_epoch &&
+               instance_generation.mTextureUploadSampleBindingEpoch == sample_binding_epoch &&
+               instance_generation.mTextureUploadSamplePipelineEpoch == sample_pipeline_epoch &&
+               instance_generation.mTextureUploadDestinationGeneration.get() == texture_destination && texture_destination &&
+               instance_generation.mTextureUploadSampleBindingGeneration.get() == sample_binding && sample_binding &&
+               instance_generation.mTextureUploadSamplePipelineGeneration.get() == sample_pipeline && sample_pipeline &&
+               texture_destination->matchesDescription(destination_description) && texture_destination->isResident() &&
+               texture_destination->image() == texture_image && texture_image != VK_NULL_HANDLE &&
+               texture_destination->memory() == texture_memory && texture_memory != VK_NULL_HANDLE &&
+               texture_destination->imageView() == texture_image_view && texture_image_view != VK_NULL_HANDLE &&
+               texture_destination->residentRevision() == texture_resident_revision &&
+               texture_destination->residentContentIdentity() == texture_resident_identity && texture_resident_identity != 0 &&
+               texture_destination->currentState() == LLRenderContract::ImageState::ShaderRead &&
+               texture_destination->createdFor(*selection, *logical_device) &&
+               sample_binding->matchesDescription(binding_description) &&
+               sample_binding->retainsTextureUploadDestinationGeneration(*texture_destination) &&
+               sample_binding->sampler() == sample_sampler && sample_sampler != VK_NULL_HANDLE &&
+               sample_binding->descriptorSetLayout() == sample_descriptor_set_layout &&
+               sample_descriptor_set_layout != VK_NULL_HANDLE && sample_binding->pipelineLayout() == sample_pipeline_layout &&
+               sample_pipeline_layout != VK_NULL_HANDLE && sample_binding->descriptorPool() == sample_descriptor_pool &&
+               sample_descriptor_pool != VK_NULL_HANDLE && sample_binding->descriptorSet() == sample_descriptor_set &&
+               sample_descriptor_set != VK_NULL_HANDLE &&
+               sample_binding->createdFor(*selection, *logical_device, *texture_destination) &&
+               sample_pipeline->matchesDescription(pipeline_description) &&
+               sample_pipeline->retainsTextureUploadSampleBindingGeneration(*sample_binding) &&
+               sample_pipeline->pipelineLayout() == sample_pipeline_layout && sample_pipeline->pipeline() == sampled_pipeline &&
+               sampled_pipeline != VK_NULL_HANDLE &&
+               sample_pipeline->createdFor(*selection, *logical_device, *texture_destination, *sample_binding, *configuration,
+                                           *swapchain_generation, *images_generation, *presentation_target);
+    };
+    if (!exact_sample_pipeline())
+    {
+        return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::TextureUploadSamplePipelineNotLive);
+    }
     const auto exact_upload_destination = [&]() noexcept
     {
         if (!upload_destination_required)
@@ -8102,7 +8246,13 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
     if (startsNewSwapchainFrameSlotWork(operation))
     {
         VulkanSwapchainFrameSlotOperationResult resolution;
-        if (render_pass_draw_readback)
+        if (render_pass_sample_draw)
+        {
+            resolution = frame_slot->resolveRenderPassSampleDrawPresentationDispatch(
+                *selection, *logical_device, *configuration, *swapchain_generation, *images_generation,
+                *presentation_target, *texture_destination, *sample_binding, *sample_pipeline, *upload_destination);
+        }
+        else if (render_pass_draw_readback)
         {
             resolution = frame_slot->resolveRenderPassDrawReadbackPresentationDispatch(*selection,
                                                                                        *logical_device,
@@ -8218,6 +8368,11 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
         {
             return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive);
         }
+        if (!exact_sample_pipeline())
+        {
+            return swapchainFrameSlotOperationFailure(
+                VulkanSwapchainFrameSlotParentOperationCode::TextureUploadSamplePipelineNotLive);
+        }
         if (!exact_upload_destination())
         {
             return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive);
@@ -8234,6 +8389,13 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
         {
             return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive);
         }
+        if (sample_pipeline_required && frame_slot->hasRetainedTextureUploadSamplePipelineGeneration() &&
+            (!frame_slot->retainsTextureUploadSamplePipelineGeneration(*sample_pipeline) ||
+             !frame_slot->activeTextureUploadSamplePipelineMatchesSnapshot()))
+        {
+            return swapchainFrameSlotOperationFailure(
+                VulkanSwapchainFrameSlotParentOperationCode::TextureUploadSamplePipelineNotLive);
+        }
         if (auto error = validate_live_chain())
         {
             return *error;
@@ -8241,6 +8403,11 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
         if (!exact_upload_destination())
         {
             return swapchainFrameSlotOperationFailure(VulkanSwapchainFrameSlotParentOperationCode::UploadDestinationNotLive);
+        }
+        if (!exact_sample_pipeline())
+        {
+            return swapchainFrameSlotOperationFailure(
+                VulkanSwapchainFrameSlotParentOperationCode::TextureUploadSamplePipelineNotLive);
         }
         if (!exact_active_upload_destination())
         {
@@ -8253,6 +8420,7 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
         operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassClearToPresent ||
         operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawToPresent ||
         operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent ||
+        operation == SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassSampleDrawToPresent ||
         operation == SwapchainFrameSlotParentOperation::RetryPresentation ||
         operation == SwapchainFrameSlotParentOperation::RetryPresentationCompletion)
     {
@@ -8275,6 +8443,11 @@ SwapchainFrameSlotParentResult VulkanInstanceGenerationFactory::operateSwapchain
             case SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent:
                 result = frame_slot->executeAcquireRenderPassDrawReadbackToPresent(*selection, *presentation_target, *presentation_pipeline,
                                                                                    *upload_destination, *readback);
+                break;
+            case SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassSampleDrawToPresent:
+                result = frame_slot->executeAcquireRenderPassSampleDrawToPresent(*selection, *presentation_target,
+                                                                                  *texture_destination, *sample_binding,
+                                                                                  *sample_pipeline, *upload_destination);
                 break;
             case SwapchainFrameSlotParentOperation::RetryPresentation:
                 result = frame_slot->retryPresentation();
@@ -8423,6 +8596,21 @@ VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGenerationFactory
         operateSwapchainFrameSlot(instance_generation,
                                   request,
                                   SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassDrawReadbackToPresent);
+    if (const auto* error = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&result))
+    {
+        return *error;
+    }
+    return std::get<VulkanSwapchainFrameSlotPresentationSuccess>(result);
+}
+
+VulkanSwapchainFrameSlotParentPresentationResult VulkanInstanceGenerationFactory::acquireRenderPassSampleDrawToPresentSwapchainFrameSlot(
+    VulkanInstanceGeneration&                       instance_generation,
+    const VulkanSwapchainFrameSlotOperationRequest& request) noexcept
+{
+    const SwapchainFrameSlotParentResult result =
+        operateSwapchainFrameSlot(instance_generation,
+                                  request,
+                                  SwapchainFrameSlotParentOperation::ExecuteAcquireRenderPassSampleDrawToPresent);
     if (const auto* error = std::get_if<VulkanSwapchainFrameSlotParentOperationError>(&result))
     {
         return *error;

@@ -304,6 +304,7 @@ struct FakeState
     VkClearValue               mRenderPassClear{};
     VkSubpassContents          mRenderPassContents           = VK_SUBPASS_CONTENTS_MAX_ENUM;
     std::size_t                mBindPipelineCalls            = 0;
+    std::size_t                mBindDescriptorSetsCalls      = 0;
     std::size_t                mBindVertexBuffersCalls       = 0;
     std::size_t                mSetViewportCalls             = 0;
     std::size_t                mSetScissorCalls              = 0;
@@ -311,12 +312,19 @@ struct FakeState
     VkCommandBuffer            mDrawCommandBuffer            = VK_NULL_HANDLE;
     VkPipelineBindPoint        mPipelineBindPoint            = VK_PIPELINE_BIND_POINT_MAX_ENUM;
     VkPipeline                 mBoundPipeline                = VK_NULL_HANDLE;
+    VkPipelineBindPoint        mDescriptorPipelineBindPoint  = VK_PIPELINE_BIND_POINT_MAX_ENUM;
+    VkPipelineLayout           mBoundDescriptorPipelineLayout = VK_NULL_HANDLE;
+    std::uint32_t              mFirstDescriptorSet           = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t              mDescriptorSetCount           = 0;
+    VkDescriptorSet            mBoundDescriptorSet           = VK_NULL_HANDLE;
+    std::uint32_t              mDynamicOffsetCount           = std::numeric_limits<std::uint32_t>::max();
     VkBuffer                   mBoundVertexBuffer            = VK_NULL_HANDLE;
     VkDeviceSize               mBoundVertexOffset            = std::numeric_limits<VkDeviceSize>::max();
     std::uint32_t              mFirstVertexBinding           = std::numeric_limits<std::uint32_t>::max();
     std::uint32_t              mVertexBindingCount           = 0;
     std::size_t                mCommandOrder                 = 0;
     std::size_t                mBindPipelineOrder            = 0;
+    std::size_t                mBindDescriptorSetsOrder      = 0;
     std::size_t                mBindVertexBuffersOrder       = 0;
     std::size_t                mDrawOrder                    = 0;
     std::uint32_t              mFirstViewport                = std::numeric_limits<std::uint32_t>::max();
@@ -1402,6 +1410,28 @@ VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer     command_buffe
     }
 }
 
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindDescriptorSets(VkCommandBuffer        command_buffer,
+                                                     VkPipelineBindPoint    pipeline_bind_point,
+                                                     VkPipelineLayout       layout,
+                                                     std::uint32_t          first_set,
+                                                     std::uint32_t          descriptor_set_count,
+                                                     const VkDescriptorSet* descriptor_sets,
+                                                     std::uint32_t          dynamic_offset_count,
+                                                     const std::uint32_t*) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer)
+    {
+        ++gVulkanState->mBindDescriptorSetsCalls;
+        gVulkanState->mDescriptorPipelineBindPoint   = pipeline_bind_point;
+        gVulkanState->mBoundDescriptorPipelineLayout = layout;
+        gVulkanState->mFirstDescriptorSet            = first_set;
+        gVulkanState->mDescriptorSetCount            = descriptor_set_count;
+        gVulkanState->mBoundDescriptorSet = descriptor_set_count != 0 && descriptor_sets ? descriptor_sets[0] : VK_NULL_HANDLE;
+        gVulkanState->mDynamicOffsetCount      = dynamic_offset_count;
+        gVulkanState->mBindDescriptorSetsOrder = ++gVulkanState->mCommandOrder;
+    }
+}
+
 VKAPI_ATTR void VKAPI_CALL fakeCmdBindVertexBuffers(VkCommandBuffer     command_buffer,
                                                     std::uint32_t       first_binding,
                                                     std::uint32_t       binding_count,
@@ -1803,6 +1833,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, 
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdBeginRenderPass);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdEndRenderPass);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdBindPipeline);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdBindDescriptorSets);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdBindVertexBuffers);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdSetViewport);
     LL_SDL_VULKAN_DEVICE_COMMAND(CmdSetScissor);
@@ -2129,7 +2160,7 @@ bool acquireResidentUploadDestination(LLWindowSDLVulkan& owner, ResidentUploadDe
 {
     using namespace LLRenderVulkan;
 
-    auto* generation = const_cast<VulkanInstanceGeneration*>(owner.instanceGeneration());
+    auto* generation = owner.instanceGeneration();
     if (!generation)
     {
         return false;
@@ -2217,6 +2248,10 @@ void window_sdl_vulkan_object::test<1>()
     static_assert(std::is_nothrow_move_assignable_v<LLWindowSDLVulkan>);
     static_assert(std::is_nothrow_destructible_v<LLWindowSDLVulkan>);
     static_assert(std::is_same_v<decltype(std::declval<const LLWindowSDLVulkan&>().requirements()), const LLWindowVulkanRequirements*>);
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().instanceGeneration()),
+                                 LLRenderVulkan::VulkanInstanceGeneration*>);
+    static_assert(std::is_same_v<decltype(std::declval<const LLWindowSDLVulkan&>().instanceGeneration()),
+                                 const LLRenderVulkan::VulkanInstanceGeneration*>);
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainGeneration()),
                                  LLRenderVulkan::VulkanSwapchainAcquireResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainGeneration()));
@@ -2240,6 +2275,9 @@ void window_sdl_vulkan_object::test<1>()
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain()),
                                  LLRenderVulkan::VulkanSwapchainChainRebuildResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain(VkExtent2D{})),
+                                 LLRenderVulkan::VulkanSwapchainChainRebuildResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain(VkExtent2D{})));
     static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().roundTripEmptySwapchainFrameSlot()),
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().roundTripEmptySwapchainFrameSlot()));
@@ -2264,6 +2302,9 @@ void window_sdl_vulkan_object::test<1>()
                                  LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireRenderPassDrawToPresentSwapchainFrameSlot(
         std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireRenderPassSampleDrawToPresentSwapchainFrameSlot()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireRenderPassSampleDrawToPresentSwapchainFrameSlot()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentation()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentationCompletion()));
     static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().cancelSwapchainFrameSlotPresentation()));
@@ -3254,13 +3295,14 @@ void window_sdl_vulkan_object::test<19>()
                state.mDrawableSizeCalls == queries_before_invalid + 2 &&
                instance->hasSwapchainPresentationTargetGeneration() && instance->hasSwapchainFrameSlotGeneration());
 
-    state.mDrawableWidth  = 0;
-    state.mDrawableHeight = 900;
-    const auto suspended          = owner->rebuildSwapchainChain();
+    state.mDrawableWidth                       = 1280;
+    state.mDrawableHeight                      = 720;
+    const std::size_t queries_before_explicit = state.mDrawableSizeCalls;
+    const auto suspended                       = owner->rebuildSwapchainChain(VkExtent2D{ 0, 0 });
     const auto* suspended_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&suspended);
-    ensure("a zero SDL pixel dimension suspends the swapchain chain",
+    ensure("an explicit zero pixel dimension suspends without querying stale SDL geometry",
            suspended_outcome && *suspended_outcome == VulkanSwapchainChainRebuildOutcome::Suspended &&
-               state.mDrawableSizeCalls == queries_before_invalid + 3);
+               state.mDrawableSizeCalls == queries_before_explicit);
     ensure("suspension removes all six swapchain children",
            !instance->hasSwapchainConfigurationGeneration() && !instance->hasSwapchainGeneration() &&
                !instance->hasSwapchainImagesGeneration() && !instance->hasSwapchainPresentationTargetGeneration() &&
@@ -3279,13 +3321,11 @@ void window_sdl_vulkan_object::test<19>()
                instance->physicalDevice() == state.mPhysicalDevice && instance->logicalDevice() == state.mDevice &&
                instance->presentationQueue() == state.mQueue && owner->isGenerationCurrent(161));
 
-    state.mDrawableWidth  = 1600;
-    state.mDrawableHeight = 900;
-    const auto rebuilt          = owner->rebuildSwapchainChain();
+    const auto rebuilt          = owner->rebuildSwapchainChain(VkExtent2D{ 1600, 900 });
     const auto* rebuilt_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuilt);
-    ensure("one later nonzero SDL sample rebuilds the complete chain",
+    ensure("one later explicit nonzero extent rebuilds the complete chain without querying SDL",
            rebuilt_outcome && *rebuilt_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
-               state.mDrawableSizeCalls == queries_before_invalid + 4);
+               state.mDrawableSizeCalls == queries_before_explicit);
     ensure("the rebuilt configuration retains the new SDL backing-pixel extent",
            instance->hasSwapchainConfigurationGeneration() && instance->swapchainDrawableExtent().width == 1600 &&
                instance->swapchainDrawableExtent().height == 900);
@@ -3970,7 +4010,7 @@ void window_sdl_vulkan_object::test<26>()
                !owner->acquireSurfaceGeneration() && !owner->acquirePresentationDeviceGeneration() &&
                !owner->acquireLogicalDeviceGeneration());
 
-    auto* generation = const_cast<VulkanInstanceGeneration*>(owner->instanceGeneration());
+    auto* generation = owner->instanceGeneration();
     ensure("texture destination fixture publishes its mutable aggregate", generation != nullptr);
     UploadOperationContext                          context{ owner, generation };
     const VulkanTextureUploadDestinationDescription description = vulkanTextureUploadDestinationDescription();
@@ -4090,7 +4130,7 @@ void window_sdl_vulkan_object::test<27>()
     auto*             owner  = acquiredWindow(result);
     ensure("texture source fixture acquires the complete SDL owner chain", owner && acquireCompleteFrameSlot(*owner));
 
-    auto* generation = const_cast<VulkanInstanceGeneration*>(owner->instanceGeneration());
+    auto* generation = owner->instanceGeneration();
     ensure("texture source fixture publishes its mutable aggregate", generation != nullptr);
     UploadOperationContext context{ owner, generation };
 
@@ -4223,7 +4263,7 @@ void window_sdl_vulkan_object::test<28>()
     auto*             owner  = acquiredWindow(result);
     ensure("texture transfer fixture acquires the complete SDL owner chain", owner && acquireCompleteFrameSlot(*owner));
 
-    auto* generation = const_cast<VulkanInstanceGeneration*>(owner->instanceGeneration());
+    auto* generation = owner->instanceGeneration();
     ensure("texture transfer fixture publishes its mutable aggregate", generation != nullptr);
     UploadOperationContext context{ owner, generation };
 
@@ -4321,8 +4361,11 @@ void window_sdl_vulkan_object::test<29>()
     auto*             owner  = acquiredWindow(result);
     ensure("texture sample-binding fixture acquires the complete SDL owner chain", owner && acquireCompleteFrameSlot(*owner));
 
-    auto* generation = const_cast<VulkanInstanceGeneration*>(owner->instanceGeneration());
+    auto* generation = owner->instanceGeneration();
     ensure("texture sample-binding fixture publishes its mutable aggregate", generation != nullptr);
+    ResidentUploadDestination sampled_vertices;
+    ensure("texture sample-binding fixture uploads the screen-triangle vertices required by sampled presentation",
+           acquireResidentUploadDestination(*owner, sampled_vertices));
     UploadOperationContext context{ owner, generation };
 
     const LLRenderContract::TextureUploadFixture      fixture                 = LLRenderContract::makeTextureUploadFixture();
@@ -4618,6 +4661,37 @@ void window_sdl_vulkan_object::test<29>()
                generation->textureUploadSamplePipeline() == state.mTextureUploadSamplePipeline &&
                state.mCreateTextureUploadSamplePipelineCalls == 3 && state.mDrawCalls == draw_calls &&
                state.mQueueSubmitCalls == submit_calls);
+
+    const VkPipeline       final_sample_pipeline    = generation->textureUploadSamplePipeline();
+    const VkPipelineLayout final_pipeline_layout    = generation->textureUploadSampleBindingPipelineLayout();
+    const VkDescriptorSet  final_descriptor_set     = generation->textureUploadSampleBindingDescriptorSet();
+    const std::size_t      drawable_queries         = state.mDrawableSizeCalls;
+    const std::size_t      bind_pipeline_calls      = state.mBindPipelineCalls;
+    const std::size_t      bind_descriptor_calls    = state.mBindDescriptorSetsCalls;
+    const std::size_t      bind_vertex_calls        = state.mBindVertexBuffersCalls;
+    const std::size_t      sampled_draw_calls       = state.mDrawCalls;
+    const std::size_t      sampled_submit_calls     = state.mQueueSubmitCalls;
+    const std::size_t      sampled_present_calls    = state.mQueuePresentCalls;
+    state.mAcquiredImageIndex                       = 1;
+    const auto sampled_draw = owner->acquireRenderPassSampleDrawToPresentSwapchainFrameSlot();
+    ensure("the SDL sampled-draw bridge reaches the aggregate without a typed parent error", !presentationError(sampled_draw));
+    ensure("the SDL sampled-draw bridge presents one acquired image and returns the frame slot reusable",
+           presentationSucceeded(sampled_draw, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
+               generation->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !generation->swapchainFrameAcquiredImageIndex());
+    ensure("the SDL sampled-draw bridge queries backing pixels and submits one sampled draw",
+           state.mDrawableSizeCalls == drawable_queries + 1 && state.mBindPipelineCalls == bind_pipeline_calls + 1 &&
+               state.mBindDescriptorSetsCalls == bind_descriptor_calls + 1 &&
+               state.mBindVertexBuffersCalls == bind_vertex_calls + 1 && state.mDrawCalls == sampled_draw_calls + 1 &&
+               state.mQueueSubmitCalls == sampled_submit_calls + 1 && state.mQueuePresentCalls == sampled_present_calls + 1);
+    ensure("the sampled draw binds the exact pipeline layout, descriptor set, and pipeline in command order",
+           state.mBoundPipeline == final_sample_pipeline &&
+               state.mDescriptorPipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
+               state.mBoundDescriptorPipelineLayout == final_pipeline_layout && state.mFirstDescriptorSet == 0 &&
+               state.mDescriptorSetCount == 1 && state.mBoundDescriptorSet == final_descriptor_set &&
+               state.mDynamicOffsetCount == 0 && state.mBoundVertexBuffer == sampled_vertices.mBuffer &&
+               state.mBindPipelineOrder < state.mBindDescriptorSetsOrder &&
+               state.mBindDescriptorSetsOrder < state.mBindVertexBuffersOrder && state.mBindVertexBuffersOrder < state.mDrawOrder);
     ensure("full SDL owner reset retires the sampled pipeline before its binding, target, destination, and device",
            owner->reset() && state.mDestroyTextureUploadSamplePipelineCalls == 3 &&
                state.mDestroyTextureUploadSampleBindingDescriptorPoolCalls == 2 &&

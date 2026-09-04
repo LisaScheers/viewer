@@ -81,6 +81,7 @@
 #include "llviewermediafocus.h"
 #include "llviewermessage.h"
 #include "llviewerobjectlist.h"
+#include "llviewergraphicsapi.h"
 #include "llworldmap.h"
 #include "llmutelist.h"
 #include "llviewerhelp.h"
@@ -148,6 +149,10 @@
 
 #if LL_SDL_WINDOW
 #include "llwindowsdl.h"
+#endif
+
+#if defined(LL_VULKAN_SDL_WSI)
+#include "llviewervulkanruntime.h"
 #endif
 
 // Third party library includes
@@ -818,6 +823,64 @@ bool LLAppViewer::init()
 
     LL_INFOS("InitInfo") << "Configuration initialized." << LL_ENDL ;
 
+    const bool vulkan_requested = gSavedSettings.getBOOL("RenderVulkanDeveloper");
+    mGraphicsLifecycle = vulkan_requested ? GraphicsLifecycle::VulkanSelected : GraphicsLifecycle::Legacy;
+
+    constexpr bool vulkan_available =
+#if defined(LL_VULKAN_SDL_WSI)
+        true;
+#else
+        false;
+#endif
+    const LLViewerGraphicsAPISelection graphics_api =
+        selectViewerGraphicsAPI(gSavedSettings.getBOOL("HeadlessClient"),
+                                vulkan_requested,
+                                vulkan_available);
+    if (const auto* error = std::get_if<LLViewerGraphicsAPISelectionError>(&graphics_api))
+    {
+        LL_WARNS("VulkanViewerSlice")
+            << "failure="
+            << (*error == LLViewerGraphicsAPISelectionError::HeadlessVulkanConflict ? "headless-conflict" : "unsupported-platform")
+            << LL_ENDL;
+        cleanupVulkanSlice();
+        LL_PROFILER_FRAME_END;
+        return false;
+    }
+
+#if defined(LL_VULKAN_SDL_WSI)
+    if (std::get<LLWindow::GraphicsAPI>(graphics_api) == LLWindow::GraphicsAPI::Vulkan)
+    {
+        // This is intentionally a thin renderer-owned runtime. It returns before
+        // the legacy viewer constructs LLViewerWindow or initializes OpenGL.
+        gHiDPISupport = gSavedSettings.getBOOL("RenderHiDPI");
+        mVulkanRuntime = std::make_unique<LLViewerVulkanRuntime>();
+        LLViewerVulkanRuntime::Params params;
+        params.mTitle            = gWindowTitle;
+        params.mName             = sWindowClass;
+        params.mX                = gSavedSettings.getS32("WindowX");
+        params.mY                = gSavedSettings.getS32("WindowY");
+        params.mWidth            = static_cast<S32>(gSavedSettings.getU32("WindowWidth"));
+        params.mHeight           = static_cast<S32>(gSavedSettings.getU32("WindowHeight"));
+        params.mFullscreen       = gSavedSettings.getBOOL("FullScreen");
+        params.mEnableVsync      = gSavedSettings.getBOOL("RenderVSyncEnable");
+        params.mIgnorePixelDepth = gSavedSettings.getBOOL("IgnorePixelDepth");
+        const bool initialized   = mVulkanRuntime->initialize(params);
+        if (!initialized || LLViewerShaderMgr::sInitialized)
+        {
+            if (LLViewerShaderMgr::sInitialized)
+            {
+                LL_WARNS("VulkanViewerSlice") << "failure=gl-shader-manager-initialized" << LL_ENDL;
+            }
+            cleanupVulkanSlice();
+            LL_PROFILER_FRAME_END;
+            return false;
+        }
+        LL_INFOS("VulkanViewerSlice") << "shader_manager=0" << LL_ENDL;
+        LL_PROFILER_FRAME_END;
+        return true;
+    }
+#endif
+
     //set the max heap size.
     initMaxHeapSize() ;
     LLCoros::instance().setStackSize(gSavedSettings.getS32("CoroutineStackSize"));
@@ -1318,6 +1381,21 @@ LLTrace::BlockTimerStatHandle FTM_FRAME("Frame");
 
 bool LLAppViewer::frame()
 {
+#if defined(LL_VULKAN_SDL_WSI)
+    if (mVulkanRuntime)
+    {
+        if (LLApp::isRunning() && !mVulkanRuntime->tick())
+        {
+            // Linux skips cleanup after an application error, so release the
+            // renderer while the app and SDL event environment are intact.
+            cleanupVulkanSlice();
+            LLApp::setError();
+        }
+        LL_PROFILER_FRAME_END;
+        return !LLApp::isRunning();
+    }
+#endif
+
     bool ret = false;
 
     if (gSimulateMemLeak)
@@ -1732,6 +1810,12 @@ void LLAppViewer::flushLFSIO()
 
 bool LLAppViewer::cleanup()
 {
+    if (mGraphicsLifecycle != GraphicsLifecycle::Legacy)
+    {
+        cleanupVulkanSlice();
+        return true;
+    }
+
 #if LL_VELOPACK
     // Apply any pending Velopack update before shutdown
     if (velopack_is_update_pending())
@@ -2239,6 +2323,28 @@ bool LLAppViewer::cleanup()
 
     // return 0;
     return true;
+}
+
+void LLAppViewer::cleanupVulkanSlice() noexcept
+{
+    if (mGraphicsLifecycle == GraphicsLifecycle::VulkanCleaned)
+    {
+        return;
+    }
+    mGraphicsLifecycle = GraphicsLifecycle::VulkanCleaned;
+
+#if defined(LL_VULKAN_SDL_WSI)
+    if (mVulkanRuntime)
+    {
+        mVulkanRuntime->shutdown();
+        mVulkanRuntime.reset();
+    }
+#endif
+    LLSplashScreen::hide();
+    LLPrimitive::cleanupVolumeManager();
+    LLGridManager::deleteSingleton();
+    LLSingletonBase::deleteAll();
+    cleanupConsole();
 }
 
 void LLAppViewer::initGeneralThread()
