@@ -88,6 +88,7 @@ void viewer_vulkan_runtime_test_object::test<1>()
     ensure("second sampled frame presents", controller.tick());
     ensure_equals("two sampled frames were requested", backend.mPresents, U32{ 2 });
     ensure_equals("two frames were counted", controller.presentedFrameCount(), std::uint64_t{ 2 });
+    ensure_equals("initial frames are not restored frames", controller.framesSinceLastResume(), std::uint64_t{ 0 });
 }
 
 template<>
@@ -126,6 +127,19 @@ void viewer_vulkan_runtime_test_object::test<3>()
     ensure("restore returns to ready", controller.state() == LLViewerVulkanFrameController::State::Ready);
     ensure_equals("restore presents once", backend.mPresents, U32{ 1 });
     ensure_equals("one suspension transition is counted", controller.suspendedTransitionCount(), std::uint64_t{ 1 });
+    ensure_equals("a successful restored frame is counted", controller.framesSinceLastResume(), std::uint64_t{ 1 });
+    ensure("restored presentation repeats", controller.tick());
+    ensure_equals("restored frames continue counting", controller.framesSinceLastResume(), std::uint64_t{ 2 });
+
+    controller.requestSuspend();
+    ensure("second minimize suspends", controller.tick());
+    ensure_equals("a new minimize invalidates previous resume evidence", controller.framesSinceLastResume(), std::uint64_t{ 0 });
+    backend.mPresentResults.push_back(LLViewerVulkanPresentOutcome::RebuildRequired);
+    controller.requestDrawableExtent({ 1280, 720 });
+    ensure("restore can request another rebuild", controller.tick());
+    ensure_equals("rebuild alone is not a presented frame", controller.framesSinceLastResume(), std::uint64_t{ 0 });
+    ensure("retry presents", controller.tick());
+    ensure_equals("successful retry proves resume", controller.framesSinceLastResume(), std::uint64_t{ 1 });
 }
 
 template<>

@@ -79,6 +79,10 @@ bool LLViewerVulkanFrameController::tick() noexcept
     {
         case LLViewerVulkanPresentOutcome::Presented:
             ++mPresentedFrameCount;
+            if (mSuspendedTransitionCount != 0)
+            {
+                ++mFramesSinceLastResume;
+            }
             return true;
         case LLViewerVulkanPresentOutcome::RebuildRequired:
             mRebuildRequested = true;
@@ -153,6 +157,7 @@ bool LLViewerVulkanFrameController::rebuildIfNeeded() noexcept
             if (previous != State::Suspended)
             {
                 ++mSuspendedTransitionCount;
+                mFramesSinceLastResume = 0;
             }
             return true;
         case LLViewerVulkanRebuildOutcome::Failed:
@@ -514,11 +519,23 @@ bool LLViewerVulkanRuntime::initialize(LLWindow& window)
 
 bool LLViewerVulkanRuntime::tick()
 {
+    const auto previous_state = mController ? mController->state() : LLViewerVulkanFrameController::State::Starting;
+    const auto previous_resumed_frames = mController ? mController->framesSinceLastResume() : 0;
     requestCurrentDrawableExtent();
     const bool ticked = mController && mController->tick();
     if (ticked && mController->state() == LLViewerVulkanFrameController::State::Suspended)
     {
+        if (previous_state != LLViewerVulkanFrameController::State::Suspended)
+        {
+            logSummary("suspended");
+        }
         SDL_Delay(SUSPENDED_TICK_DELAY_MS);
+    }
+    else if (ticked && previous_resumed_frames == 0 && mController->framesSinceLastResume() != 0)
+    {
+        // Count a resume only after a successful presentation, not merely a
+        // restored window or a rebuilt swapchain.
+        logSummary("resumed");
     }
     return ticked;
 }
@@ -594,6 +611,7 @@ void LLViewerVulkanRuntime::logSummary(const char* status) const noexcept
     const bool          gl_context = SDL_GL_GetCurrentContext() != nullptr;
     const LLWindowSDLGLAuditSnapshot gl_audit = getLLWindowSDLGLAuditSnapshot();
     LL_INFOS("VulkanViewerSlice") << "status=" << status << " frames=" << frames << " rebuilds=" << rebuilds << " suspends=" << suspends
+                                  << " resumed_frames=" << (mController ? mController->framesSinceLastResume() : 0)
                                   << " validation_messages=" << validation << " gl_context=" << gl_context
                                   << " gl_manager=" << gGLManager.mInited
                                   << " gl_context_create_attempts=" << gl_audit.mContextCreateAttempts

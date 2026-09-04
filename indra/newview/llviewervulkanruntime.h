@@ -82,6 +82,7 @@ public:
     std::uint64_t presentedFrameCount() const noexcept { return mPresentedFrameCount; }
     std::uint64_t rebuildCount() const noexcept { return mRebuildCount; }
     std::uint64_t suspendedTransitionCount() const noexcept { return mSuspendedTransitionCount; }
+    std::uint64_t framesSinceLastResume() const noexcept { return mFramesSinceLastResume; }
 
 private:
     bool rebuildIfNeeded() noexcept;
@@ -94,6 +95,7 @@ private:
     std::uint64_t                mPresentedFrameCount      = 0;
     std::uint64_t                mRebuildCount             = 0;
     std::uint64_t                mSuspendedTransitionCount = 0;
+    std::uint64_t                mFramesSinceLastResume     = 0;
 };
 
 class LLViewerVulkanRuntime final

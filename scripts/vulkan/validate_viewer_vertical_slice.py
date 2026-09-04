@@ -63,6 +63,7 @@ class Artifacts:
     state: Path
     first_image: Path
     resized_image: Path
+    restored_image: Path
     viewer_stdout: Path
     window_manager_log: Path
     xvfb_log: Path
@@ -187,6 +188,7 @@ def prepare_artifacts(output_dir: Path | None) -> tuple[Artifacts, bool]:
         state=root / "state",
         first_image=root / "initial.png",
         resized_image=root / "resized.png",
+        restored_image=root / "restored.png",
         viewer_stdout=root / "secondlife-bin.output.log",
         window_manager_log=root / "openbox.log",
         xvfb_log=root / "xvfb.log",
@@ -196,6 +198,7 @@ def prepare_artifacts(output_dir: Path | None) -> tuple[Artifacts, bool]:
         for path in (
             paths.first_image,
             paths.resized_image,
+            paths.restored_image,
             paths.viewer_stdout,
             paths.window_manager_log,
             paths.xvfb_log,
@@ -304,6 +307,18 @@ def ensure_viewer_alive(viewer: subprocess.Popen[bytes], operation: str) -> None
         raise SmokeFailure(f"secondlife-bin exited during {operation} (exit {returncode})")
 
 
+def wait_for_status(viewer: subprocess.Popen[bytes], log_path: Path, status: str, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ensure_viewer_alive(viewer, f"waiting for {status}")
+        if log_path.is_file():
+            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if "VulkanViewerSlice" in line and key_values(line).get("status") == status:
+                    return
+        time.sleep(0.1)
+    raise SmokeFailure(f"viewer did not report {status} within {timeout:g}s")
+
+
 def screenshot(tooling: Tooling, env: Mapping[str, str], window_id: str, destination: Path) -> None:
     run_command([tooling.screenshot, "-window", window_id, str(destination)], env=env)
     if not destination.is_file() or destination.stat().st_size == 0:
@@ -389,6 +404,24 @@ def validate_viewer_log(log_path: Path) -> dict[str, int]:
         )
     if suspends < MIN_SUSPENDS:
         raise SmokeFailure(f"minimize did not produce a suspended zero-extent transition: {suspends}")
+    resumed_frames = integer_field(status, "resumed_frames", "final status")
+    if resumed_frames <= MIN_PRESENTED_FRAMES:
+        raise SmokeFailure(f"too few successful post-restore frames: {resumed_frames}")
+
+    suspended_records = [(index, fields) for index, _, fields in status_records if fields.get("status") == "suspended"]
+    resumed_records = [(index, fields) for index, _, fields in status_records if fields.get("status") == "resumed"]
+    if len(suspended_records) != 1 or len(resumed_records) != 1:
+        raise SmokeFailure("expected one observed suspension followed by one successful resume")
+    suspended_index, suspended = suspended_records[0]
+    resumed_index, resumed = resumed_records[0]
+    if not owner_indexes[0] < suspended_index < resumed_index < status_index:
+        raise SmokeFailure("suspend, resume, and shutdown records are out of order")
+    if integer_field(resumed, "frames", "resume record") != integer_field(suspended, "frames", "suspend record") + 1:
+        raise SmokeFailure("resume must report the first successfully presented frame after suspension")
+    if integer_field(resumed, "resumed_frames", "resume record") != 1:
+        raise SmokeFailure("resume record did not count its first successful frame")
+    if frames - integer_field(suspended, "frames", "suspend record") != resumed_frames:
+        raise SmokeFailure("post-restore frame count does not match presentation progress")
     for field in (
         "validation_messages",
         "gl_context",
@@ -422,7 +455,7 @@ def validate_viewer_log(log_path: Path) -> dict[str, int]:
     failures = [line.strip() for line in lines if "VulkanViewerSlice" in line and "failure=" in line]
     if failures:
         raise SmokeFailure(f"viewer reported a Vulkan slice failure: {failures[-1]}")
-    return {"frames": frames, "rebuilds": rebuilds, "suspends": suspends}
+    return {"frames": frames, "rebuilds": rebuilds, "suspends": suspends, "resumed_frames": resumed_frames}
 
 
 def diagnostic_tail(path: Path, lines: int = 20) -> str:
@@ -519,6 +552,7 @@ def execute(args: argparse.Namespace, artifacts: Artifacts) -> tuple[ImageFacts,
             start_new_session=True,
         )
         window_id = wait_for_window(tooling, environment, viewer, args.startup_timeout)
+        viewer_log = user_dir / "logs" / "SecondLife.log"
 
         initial_width, initial_height = args.initial_size
         run_command(
@@ -545,12 +579,15 @@ def execute(args: argparse.Namespace, artifacts: Artifacts) -> tuple[ImageFacts,
         screenshot(tooling, environment, window_id, artifacts.resized_image)
 
         run_command([tooling.xdotool, "windowminimize", "--sync", window_id], env=environment)
+        wait_for_status(viewer, viewer_log, "suspended", args.startup_timeout)
         time.sleep(args.minimize_seconds)
         ensure_viewer_alive(viewer, "zero-extent minimize")
         run_command([tooling.xdotool, "windowmap", "--sync", window_id], env=environment)
         run_command([tooling.xdotool, "windowactivate", "--sync", window_id], env=environment)
+        wait_for_status(viewer, viewer_log, "resumed", args.startup_timeout)
         time.sleep(args.settle_seconds)
         ensure_viewer_alive(viewer, "restore and resumed frame progress")
+        screenshot(tooling, environment, window_id, artifacts.restored_image)
 
         # Ask the window manager to close the client through its normal key
         # binding. xdotool's windowclose can destroy the X11 window before SDL
@@ -567,11 +604,14 @@ def execute(args: argparse.Namespace, artifacts: Artifacts) -> tuple[ImageFacts,
 
         first = image_facts(tooling, environment, artifacts.first_image)
         resized = image_facts(tooling, environment, artifacts.resized_image)
+        restored = image_facts(tooling, environment, artifacts.restored_image)
+        if (restored.width, restored.height) != (resized.width, resized.height):
+            raise SmokeFailure("restored screenshot did not retain the resized drawable extent")
         if (first.width, first.height) == (resized.width, resized.height):
             raise SmokeFailure(
                 f"screenshots did not prove a drawable resize: both are {first.width}x{first.height}"
             )
-        evidence = validate_viewer_log(user_dir / "logs" / "SecondLife.log")
+        evidence = validate_viewer_log(viewer_log)
         return first, resized, evidence
     finally:
         terminate_process(viewer)
@@ -603,8 +643,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         "PASS: "
         f"frames={evidence['frames']} rebuilds={evidence['rebuilds']} suspends={evidence['suspends']} "
+        f"resumed_frames={evidence['resumed_frames']} "
         f"images={first.width}x{first.height},{resized.width}x{resized.height} "
-        f"screenshots={artifacts.first_image},{artifacts.resized_image} "
+        f"screenshots={artifacts.first_image},{artifacts.resized_image},{artifacts.restored_image} "
         f"log={artifacts.state / 'user' / 'logs' / 'SecondLife.log'} "
         f"artifacts={artifacts.root}{'' if retained else ' (temporary; removing)'}"
     )
