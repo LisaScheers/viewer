@@ -327,6 +327,9 @@ void window_vulkan_sdl_wsi_object::test<1>()
     const std::size_t initial_instance_count = LLWindow::instanceCount();
     const SDLState    initial_sdl_state      = currentSDLState();
     const bool        initial_gl_manager     = gGLManager.mInited;
+    armLLWindowSDLGLAudit();
+    const LLWindowSDLGLAuditSnapshot initial_gl_audit = getLLWindowSDLGLAuditSnapshot();
+    ensure("the native smoke arms process-wide SDL OpenGL auditing", initial_gl_audit.mArmed);
 
     LLWindow* window = LLWindowManager::createWindow(nullptr, NATIVE_SMOKE_TITLE, "llwindowvulkansdlwsi", 0, 0, 64, 64,
                                                      LLWindow::GraphicsAPI::Vulkan, LLWindow::FLAG_CREATE_HIDDEN);
@@ -1778,6 +1781,13 @@ void window_vulkan_sdl_wsi_object::test<1>()
     ensure_equals("native teardown restores SDL subsystem state", final_sdl_state.mInitialized, initial_sdl_state.mInitialized);
     ensure("native teardown leaves no current OpenGL context", final_sdl_state.mGLContext == initial_sdl_state.mGLContext);
     ensure_equals("native teardown leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+    const LLWindowSDLGLAuditSnapshot final_gl_audit = getLLWindowSDLGLAuditSnapshot();
+    ensure_equals("the Vulkan window never attempts SDL OpenGL context creation",
+                  final_gl_audit.mContextCreateAttempts,
+                  initial_gl_audit.mContextCreateAttempts);
+    ensure_equals("the Vulkan window never attempts SDL OpenGL buffer swapping",
+                  final_gl_audit.mBufferSwapAttempts,
+                  initial_gl_audit.mBufferSwapAttempts);
 }
 
 } // namespace tut

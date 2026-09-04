@@ -56,6 +56,18 @@ class VulkanInstanceGeneration;
 }
 #endif
 
+struct LLWindowSDLGLAuditSnapshot
+{
+    U64 mContextCreateAttempts = 0;
+    U64 mBufferSwapAttempts    = 0;
+    bool mArmed                = false;
+};
+
+// Lifetime-wide process counters used to prove that an explicitly selected
+// Vulkan viewer never reaches SDL's OpenGL context or swap entry points.
+void                       armLLWindowSDLGLAudit() noexcept;
+LLWindowSDLGLAuditSnapshot getLLWindowSDLGLAuditSnapshot() noexcept;
+
 class LLWindowSDL final : public LLWindow
 {
 public:

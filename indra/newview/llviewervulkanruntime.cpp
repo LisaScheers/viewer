@@ -17,9 +17,7 @@
 
 #include "llviewervulkanruntime.h"
 
-#include "llapp.h"
 #include "llgl.h"
-#include "llkeyboard.h"
 #include "lltextureuploaddiagnostic.h"
 #include "llwindow.h"
 #include "llwindowsdl.h"
@@ -479,33 +477,14 @@ LLViewerVulkanRuntime::~LLViewerVulkanRuntime()
     shutdown();
 }
 
-bool LLViewerVulkanRuntime::initialize(const Params& params)
+bool LLViewerVulkanRuntime::initialize(LLWindow& window)
 {
 #if LL_SDL_WINDOW && defined(LL_VULKAN_SDL_WSI)
-    if (mWindow)
+    if (mWindow || window.getGraphicsAPI() != LLWindow::GraphicsAPI::Vulkan)
     {
         return false;
     }
-    mWindowSuspended = false;
-
-    mWindow = LLWindowManager::createWindow(this,
-                                            params.mTitle,
-                                            params.mName,
-                                            params.mX,
-                                            params.mY,
-                                            params.mWidth,
-                                            params.mHeight,
-                                            LLWindow::GraphicsAPI::Vulkan,
-                                            LLWindow::FLAG_CREATE_HIDDEN,
-                                            params.mFullscreen,
-                                            false,
-                                            params.mEnableVsync,
-                                            params.mIgnorePixelDepth);
-    if (!mWindow)
-    {
-        LL_WARNS("VulkanViewerSlice") << "failure=window-create" << LL_ENDL;
-        return false;
-    }
+    mWindow = &window;
 
     auto&              sdl_window = *static_cast<LLWindowSDL*>(mWindow);
     LLWindowSDLVulkan* owner      = sdl_window.getVulkanOwner();
@@ -527,7 +506,7 @@ bool LLViewerVulkanRuntime::initialize(const Params& params)
     LL_INFOS("VulkanViewerSlice") << "status=ready api=vulkan visible=1" << LL_ENDL;
     return true;
 #else
-    (void)params;
+    (void)window;
     LL_WARNS("VulkanViewerSlice") << "failure=unsupported-platform" << LL_ENDL;
     return false;
 #endif
@@ -535,6 +514,7 @@ bool LLViewerVulkanRuntime::initialize(const Params& params)
 
 bool LLViewerVulkanRuntime::tick()
 {
+    requestCurrentDrawableExtent();
     const bool ticked = mController && mController->tick();
     if (ticked && mController->state() == LLViewerVulkanFrameController::State::Suspended)
     {
@@ -571,11 +551,7 @@ void LLViewerVulkanRuntime::shutdown() noexcept
     logSummary(validation_clean && !failed() ? "stopped" : "failed");
     mController.reset();
     mBackend.reset();
-    LLWindowManager::destroyWindow(mWindow);
-    mWindow          = nullptr;
-    mWindowSuspended = false;
-    delete gKeyboard;
-    gKeyboard = nullptr;
+    mWindow = nullptr;
 }
 
 bool LLViewerVulkanRuntime::isInitialized() const noexcept
@@ -591,43 +567,10 @@ bool LLViewerVulkanRuntime::failed() const noexcept
            (mBackend && !mBackend->failure().empty());
 }
 
-void LLViewerVulkanRuntime::handleQuit(LLWindow*)
-{
-    LLApp::setQuitting();
-}
-
-bool LLViewerVulkanRuntime::handleActivate(LLWindow*, bool activated)
-{
-    mWindowSuspended = !activated;
-    if (mController)
-    {
-        if (activated)
-        {
-            requestCurrentDrawableExtent();
-        }
-        else
-        {
-            mController->requestSuspend();
-        }
-    }
-    return true;
-}
-
-void LLViewerVulkanRuntime::handleResize(LLWindow*, S32, S32)
-{
-    requestCurrentDrawableExtent();
-}
-
-bool LLViewerVulkanRuntime::handleDPIChanged(LLWindow*, F32, S32, S32)
-{
-    requestCurrentDrawableExtent();
-    return true;
-}
-
 LLViewerVulkanDrawableExtent LLViewerVulkanRuntime::currentDrawableExtent() const noexcept
 {
     LLCoordWindow size;
-    if (mWindowSuspended || !mWindow || !mWindow->getSize(&size) || size.mX <= 0 || size.mY <= 0)
+    if (!mWindow || mWindow->getMinimized() || !mWindow->getSize(&size) || size.mX <= 0 || size.mY <= 0)
     {
         return {};
     }
@@ -649,7 +592,12 @@ void LLViewerVulkanRuntime::logSummary(const char* status) const noexcept
     const std::uint64_t suspends   = mController ? mController->suspendedTransitionCount() : 0;
     const std::uint32_t validation = mBackend ? mBackend->validationMessageCount() : 0;
     const bool          gl_context = SDL_GL_GetCurrentContext() != nullptr;
+    const LLWindowSDLGLAuditSnapshot gl_audit = getLLWindowSDLGLAuditSnapshot();
     LL_INFOS("VulkanViewerSlice") << "status=" << status << " frames=" << frames << " rebuilds=" << rebuilds << " suspends=" << suspends
                                   << " validation_messages=" << validation << " gl_context=" << gl_context
-                                  << " gl_manager=" << gGLManager.mInited << LL_ENDL;
+                                  << " gl_manager=" << gGLManager.mInited
+                                  << " gl_context_create_attempts=" << gl_audit.mContextCreateAttempts
+                                  << " gl_swap_attempts=" << gl_audit.mBufferSwapAttempts
+                                  << " gl_audit_armed=" << gl_audit.mArmed
+                                  << " live_windows=" << LLWindow::instanceCount() << LL_ENDL;
 }

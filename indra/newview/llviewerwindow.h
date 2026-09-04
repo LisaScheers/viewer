@@ -39,6 +39,7 @@
 #include "v3dmath.h"
 #include "v2math.h"
 #include "llcursortypes.h"
+#include "llwindow.h"
 #include "llwindowcallbacks.h"
 #include "lltimer.h"
 #include "llmousehandler.h"
@@ -62,7 +63,6 @@ class LLPanel;
 class LLImageRaw;
 class LLImageFormatted;
 class LLHUDIcon;
-class LLWindow;
 class LLRootView;
 class LLWindowListener;
 class LLViewerWindowListener;
@@ -170,6 +170,8 @@ public:
         Optional<bool>              fullscreen,
                                     ignore_pixel_depth,
                                     first_run;
+
+        LLWindow::GraphicsAPI       graphics_api = LLWindow::GraphicsAPI::OpenGL;
 
         Params();
     };
@@ -509,8 +511,8 @@ private:
     LLRect          mWindowRectScaled;          // whole window, scaled by UI size
     LLRect          mWorldViewRectRaw;          // area of screen for 3D world
     LLRect          mWorldViewRectScaled;       // area of screen for 3D world scaled by UI size
-    LLRootView*     mRootView;                  // a view of size mWindowRectRaw, containing all child views
-    MainPanel*      mMainView;                  // a view of size mWindowRectRaw, directly containing the base elements of the ui tree
+    LLRootView*     mRootView = nullptr;        // a view of size mWindowRectRaw, containing all child views
+    MainPanel*      mMainView = nullptr;        // a view of size mWindowRectRaw, directly containing the base elements of the ui tree
     LLView*         mFloaterSnapRegion = nullptr;
     LLView*         mNavBarContainer = nullptr;
     LLPanel*        mStatusBarContainer = nullptr;
@@ -559,7 +561,7 @@ private:
     LLHandle<LLView> mLoginPanelHolder;     // container for login panel
     LLPopupView*    mPopupView;         // container for transient popups
 
-    class LLDebugText* mDebugText; // Internal class for debug text
+    class LLDebugText* mDebugText = nullptr; // Internal class for debug text
 
     bool            mResDirty;
     bool            mStatesDirty;

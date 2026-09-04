@@ -44,6 +44,7 @@
 #include "llpreeditor.h"
 #include "llsdl.h"
 
+#include <atomic>
 #include <limits>
 
 #if LL_LINUX
@@ -93,6 +94,25 @@ const S32 DEFAULT_REFRESH_RATE = 60;
 // maintain in the constructor and destructor.  This assumes that there will
 // be only one object of this class at any time.  Currently this is true.
 static LLWindowSDL *gWindowImplementation = nullptr;
+
+namespace
+{
+std::atomic<U64> sGLContextCreateAttempts{ 0 };
+std::atomic<U64> sGLBufferSwapAttempts{ 0 };
+std::atomic<bool> sGLAuditArmed{ false };
+}
+
+void armLLWindowSDLGLAudit() noexcept
+{
+    sGLAuditArmed.store(true, std::memory_order_release);
+}
+
+LLWindowSDLGLAuditSnapshot getLLWindowSDLGLAuditSnapshot() noexcept
+{
+    return { sGLContextCreateAttempts.load(std::memory_order_relaxed),
+             sGLBufferSwapAttempts.load(std::memory_order_relaxed),
+             sGLAuditArmed.load(std::memory_order_acquire) };
+}
 
 #if defined(LL_VULKAN_SDL_WSI)
 namespace
@@ -483,6 +503,10 @@ bool LLWindowSDL::createContext(int x, int y, int width, int height, int bits, b
     SDL_DestroyProperties(props); // Free properties once window is created
 
     // Create the context
+    if (sGLAuditArmed.load(std::memory_order_relaxed)) [[unlikely]]
+    {
+        sGLContextCreateAttempts.fetch_add(1, std::memory_order_relaxed);
+    }
     mContext = SDL_GL_CreateContext(mWindow);
     if(!mContext)
     {
@@ -660,6 +684,10 @@ void* LLWindowSDL::createSharedContext()
         return nullptr;
     }
     SDL_DestroyProperties(props); // Free properties once window is created
+    if (sGLAuditArmed.load(std::memory_order_relaxed)) [[unlikely]]
+    {
+        sGLContextCreateAttempts.fetch_add(1, std::memory_order_relaxed);
+    }
     SDL_GLContext pContext = SDL_GL_CreateContext(osr_window);
 
     // Hack to ensure main window context is bound
@@ -1033,6 +1061,10 @@ void LLWindowSDL::swapBuffers()
 
     if (mWindow)
     {
+        if (sGLAuditArmed.load(std::memory_order_relaxed)) [[unlikely]]
+        {
+            sGLBufferSwapAttempts.fetch_add(1, std::memory_order_relaxed);
+        }
         SDL_GL_SwapWindow(mWindow);
     }
     LL_PROFILER_GPU_COLLECT;

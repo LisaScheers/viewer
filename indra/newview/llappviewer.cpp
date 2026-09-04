@@ -847,37 +847,10 @@ bool LLAppViewer::init()
         return false;
     }
 
-#if defined(LL_VULKAN_SDL_WSI)
+#if LL_SDL_WINDOW
     if (std::get<LLWindow::GraphicsAPI>(graphics_api) == LLWindow::GraphicsAPI::Vulkan)
     {
-        // This is intentionally a thin renderer-owned runtime. It returns before
-        // the legacy viewer constructs LLViewerWindow or initializes OpenGL.
-        gHiDPISupport = gSavedSettings.getBOOL("RenderHiDPI");
-        mVulkanRuntime = std::make_unique<LLViewerVulkanRuntime>();
-        LLViewerVulkanRuntime::Params params;
-        params.mTitle            = gWindowTitle;
-        params.mName             = sWindowClass;
-        params.mX                = gSavedSettings.getS32("WindowX");
-        params.mY                = gSavedSettings.getS32("WindowY");
-        params.mWidth            = static_cast<S32>(gSavedSettings.getU32("WindowWidth"));
-        params.mHeight           = static_cast<S32>(gSavedSettings.getU32("WindowHeight"));
-        params.mFullscreen       = gSavedSettings.getBOOL("FullScreen");
-        params.mEnableVsync      = gSavedSettings.getBOOL("RenderVSyncEnable");
-        params.mIgnorePixelDepth = gSavedSettings.getBOOL("IgnorePixelDepth");
-        const bool initialized   = mVulkanRuntime->initialize(params);
-        if (!initialized || LLViewerShaderMgr::sInitialized)
-        {
-            if (LLViewerShaderMgr::sInitialized)
-            {
-                LL_WARNS("VulkanViewerSlice") << "failure=gl-shader-manager-initialized" << LL_ENDL;
-            }
-            cleanupVulkanSlice();
-            LL_PROFILER_FRAME_END;
-            return false;
-        }
-        LL_INFOS("VulkanViewerSlice") << "shader_manager=0" << LL_ENDL;
-        LL_PROFILER_FRAME_END;
-        return true;
+        armLLWindowSDLGLAudit();
     }
 #endif
 
@@ -1088,9 +1061,34 @@ bool LLAppViewer::init()
     //
     // Initialize the window
     //
-    gGLActive = true;
-    initWindow();
+    gGLActive = mGraphicsLifecycle == GraphicsLifecycle::Legacy;
+    if (!initWindow())
+    {
+        LL_WARNS("InitInfo") << "Window initialization failed." << LL_ENDL;
+        if (mGraphicsLifecycle != GraphicsLifecycle::Legacy)
+        {
+            cleanupVulkanSlice();
+        }
+        LL_PROFILER_FRAME_END;
+        return false;
+    }
     LL_INFOS("InitInfo") << "Window is initialized." << LL_ENDL ;
+
+    if (mGraphicsLifecycle == GraphicsLifecycle::VulkanSelected)
+    {
+        if (LLViewerShaderMgr::sInitialized || gGLManager.mInited)
+        {
+            LL_WARNS("VulkanViewerSlice")
+                << "failure=opengl-initialized shader_manager=" << LLViewerShaderMgr::sInitialized
+                << " gl_manager=" << gGLManager.mInited << LL_ENDL;
+            cleanupVulkanSlice();
+            LL_PROFILER_FRAME_END;
+            return false;
+        }
+        LL_INFOS("VulkanViewerSlice") << "shader_manager=0 gl_manager=0" << LL_ENDL;
+        LL_PROFILER_FRAME_END;
+        return true;
+    }
 
     // writeSystemInfo can be called after window is initialized (gViewerWindow non-null)
     writeSystemInfo();
@@ -2333,6 +2331,29 @@ void LLAppViewer::cleanupVulkanSlice() noexcept
     }
     mGraphicsLifecycle = GraphicsLifecycle::VulkanCleaned;
 
+    // This path now shares the normal application prefix through thread,
+    // cache, LLUI, and window construction. Stop every worker from that
+    // prefix before deleting the singleton services they can reach.
+    const bool common_threads_initialized = sTextureFetch && sTextureCache && sImageDecodeThread && sPurgeDiskCacheThread;
+    if (common_threads_initialized)
+    {
+        gMeshRepo.shutdown();
+        mAppCoreHttp.requestStop();
+        sTextureFetch->shutdown();
+        sTextureCache->shutdown();
+        sImageDecodeThread->shutdown();
+        sPurgeDiskCacheThread->shutdown();
+        if (mGeneralThreadPool)
+        {
+            mGeneralThreadPool->close();
+        }
+        sTextureFetch->shutDownTextureCacheThread();
+        if (LLLFSThread::sLocal)
+        {
+            LLLFSThread::sLocal->shutdown();
+        }
+    }
+
 #if defined(LL_VULKAN_SDL_WSI)
     if (mVulkanRuntime)
     {
@@ -2340,10 +2361,68 @@ void LLAppViewer::cleanupVulkanSlice() noexcept
         mVulkanRuntime.reset();
     }
 #endif
+    if (gViewerWindow)
+    {
+        gViewerWindow->shutdownViews();
+    }
+    if (gViewerWindow)
+    {
+        delete gViewerWindow;
+        gViewerWindow = nullptr;
+    }
+    delete gKeyboard;
+    gKeyboard = nullptr;
+
+#if LL_SDL_WINDOW
+    const LLWindowSDLGLAuditSnapshot gl_audit = getLLWindowSDLGLAuditSnapshot();
+    LL_INFOS("VulkanViewerSlice")
+        << "window_retired=1 live_windows=" << LLWindow::instanceCount()
+        << " gl_context_create_attempts=" << gl_audit.mContextCreateAttempts
+        << " gl_swap_attempts=" << gl_audit.mBufferSwapAttempts
+        << " gl_audit_armed=" << gl_audit.mArmed
+        << " gl_manager=" << gGLManager.mInited
+        << " shader_manager=" << LLViewerShaderMgr::sInitialized << LL_ENDL;
+#endif
+
+    if (common_threads_initialized)
+    {
+        gMeshRepo.shutdownDecomposition();
+        mAppCoreHttp.cleanup();
+        SUBSYSTEM_CLEANUP(LLFilePickerThread);
+        SUBSYSTEM_CLEANUP(LLDirPickerThread);
+
+        delete sTextureCache;
+        sTextureCache = nullptr;
+        sTextureFetch->shutdown();
+        sTextureFetch->waitOnPending(10.f);
+        delete sTextureFetch;
+        sTextureFetch = nullptr;
+        delete sImageDecodeThread;
+        sImageDecodeThread = nullptr;
+        delete mFastTimerLogThread;
+        mFastTimerLogThread = nullptr;
+        delete sPurgeDiskCacheThread;
+        sPurgeDiskCacheThread = nullptr;
+        delete mGeneralThreadPool;
+        mGeneralThreadPool = nullptr;
+
+        SUBSYSTEM_CLEANUP(LLImage);
+        if (LLLFSThread::sLocal)
+        {
+            SUBSYSTEM_CLEANUP(LLLFSThread);
+        }
+        LLViewerAssetStatsFF::cleanup();
+        LLCore::LLHttp::cleanup();
+    }
+
     LLSplashScreen::hide();
     LLPrimitive::cleanupVolumeManager();
+    LLViewerEventRecorder::deleteSingleton();
+    LLUI::deleteSingleton();
     LLGridManager::deleteSingleton();
+    LLWatchdog::deleteSingleton();
     LLSingletonBase::deleteAll();
+    LLUICtrlFactory::deleteSingleton();
     cleanupConsole();
 }
 
@@ -3496,9 +3575,33 @@ bool LLAppViewer::initWindow()
         .ignore_pixel_depth(ignorePixelDepth)
         .first_run(mIsFirstRun);
 
+    window_params.graphics_api = gHeadlessClient
+        ? LLWindow::GraphicsAPI::Headless
+        : mGraphicsLifecycle == GraphicsLifecycle::VulkanSelected
+            ? LLWindow::GraphicsAPI::Vulkan
+            : LLWindow::GraphicsAPI::OpenGL;
+
     gViewerWindow = new LLViewerWindow(window_params);
 
     LL_INFOS("AppInit") << "gViewerwindow created." << LL_ENDL;
+
+    if (mGraphicsLifecycle == GraphicsLifecycle::VulkanSelected)
+    {
+#if defined(LL_VULKAN_SDL_WSI)
+        LLUI::getInstance()->mWindow = gViewerWindow->getWindow();
+        mVulkanRuntime = std::make_unique<LLViewerVulkanRuntime>();
+        if (!mVulkanRuntime->initialize(*gViewerWindow->getWindow()))
+        {
+            return false;
+        }
+        LL_INFOS("VulkanViewerSlice")
+            << "window_owner=viewer callbacks=viewer live_windows=" << LLWindow::instanceCount()
+            << LL_ENDL;
+        return true;
+#else
+        return false;
+#endif
+    }
 
     // Need to load feature table before cheking to start watchdog.
     bool use_watchdog = false;

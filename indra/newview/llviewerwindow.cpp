@@ -1022,6 +1022,12 @@ void LLViewerWindow::handlePieMenu(S32 x, S32 y, MASK mask)
 
 bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK mask, EMouseClickType clicktype, bool down, bool& is_toolmgr_action)
 {
+    if (!mMainView)
+    {
+        is_toolmgr_action = false;
+        return false;
+    }
+
     const char* buttonname = "";
     const char* buttonstatestr = "";
     S32 x = pos.mX;
@@ -1245,6 +1251,11 @@ bool LLViewerWindow::handleMiddleMouseDown(LLWindow *window,  LLCoordGL pos, MAS
 
 LLWindowCallbacks::DragNDropResult LLViewerWindow::handleDragNDrop( LLWindow *window, LLCoordGL pos, MASK mask, LLWindowCallbacks::DragNDropAction action, std::string data)
 {
+    if (!mMainView)
+    {
+        return LLWindowCallbacks::DND_NONE;
+    }
+
     LLWindowCallbacks::DragNDropResult result = LLWindowCallbacks::DND_NONE;
 
     const bool prim_media_dnd_enabled = gSavedSettings.getBOOL("PrimMediaDragNDrop");
@@ -1428,6 +1439,11 @@ bool LLViewerWindow::handleOtherMouseUp(LLWindow *window, LLCoordGL pos, MASK ma
 // WARNING: this is potentially called multiple times per frame
 void LLViewerWindow::handleMouseMove(LLWindow *window,  LLCoordGL pos, MASK mask)
 {
+    if (!mMainView)
+    {
+        return;
+    }
+
     S32 x = pos.mX;
     S32 y = pos.mY;
 
@@ -1464,6 +1480,11 @@ void LLViewerWindow::handleMouseMove(LLWindow *window,  LLCoordGL pos, MASK mask
 
 void LLViewerWindow::handleMouseDragged(LLWindow *window,  LLCoordGL pos, MASK mask)
 {
+    if (!mMainView)
+    {
+        return;
+    }
+
     if (mMouseDownTimer.getStarted())
     {
         if (mMouseDownTimer.getElapsedTimeF32() > 0.1)
@@ -1483,7 +1504,10 @@ void LLViewerWindow::handleMouseLeave(LLWindow *window)
     // Note: we won't get this if we have captured the mouse.
     llassert( gFocusMgr.getMouseCapture() == NULL );
     mMouseInWindow = false;
-    LLToolTipMgr::instance().blockToolTips();
+    if (mMainView)
+    {
+        LLToolTipMgr::instance().blockToolTips();
+    }
 }
 
 void LLViewerWindow::handlePreCloseRequest()
@@ -1654,6 +1678,11 @@ void LLViewerWindow::handleFocusLost(LLWindow *window)
 
 bool LLViewerWindow::handleTranslatedKeyDown(KEY key,  MASK mask, bool repeated)
 {
+    if (!mMainView)
+    {
+        return false;
+    }
+
     // Handle non-consuming global keybindings, like voice
     // Never affects event processing.
     gViewerInput.handleGlobalBindsKeyDown(key, mask);
@@ -1686,6 +1715,11 @@ bool LLViewerWindow::handleTranslatedKeyDown(KEY key,  MASK mask, bool repeated)
 
 bool LLViewerWindow::handleTranslatedKeyUp(KEY key,  MASK mask)
 {
+    if (!mMainView)
+    {
+        return false;
+    }
+
     // Handle non-consuming global keybindings, like voice
     // Never affects event processing.
     gViewerInput.handleGlobalBindsKeyUp(key, mask);
@@ -1702,6 +1736,11 @@ bool LLViewerWindow::handleTranslatedKeyUp(KEY key,  MASK mask)
 
 void LLViewerWindow::handleScanKey(KEY key, bool key_down, bool key_up, bool key_level)
 {
+    if (!mMainView)
+    {
+        return;
+    }
+
     LLViewerJoystick::getInstance()->setCameraNeedsUpdate(true);
     gViewerInput.scanKey(key, key_down, key_up, key_level);
     return; // Be clear this function returns nothing
@@ -1987,7 +2026,9 @@ LLViewerWindow::LLViewerWindow(const Params& p)
 
     U32 max_core_count = gSavedSettings.getU32("EmulateCoreCount");
     F32 max_gl_version = gSavedSettings.getF32("RenderMaxOpenGLVersion");
-    U32 window_flags = (gSavedSettings.getBOOL("RenderTonemapContractParityTest")
+    const bool vulkan_window = p.graphics_api == LLWindow::GraphicsAPI::Vulkan;
+    U32 window_flags = (vulkan_window
+                        || gSavedSettings.getBOOL("RenderTonemapContractParityTest")
                         || gSavedSettings.getBOOL("RenderMaterialContractParityTest")
                         || gSavedSettings.getBOOL("RenderTextureUploadContractParityTest"))
         ? LLWindow::FLAG_CREATE_HIDDEN
@@ -1995,10 +2036,10 @@ LLViewerWindow::LLViewerWindow(const Params& p)
 
     mWindow = LLWindowManager::createWindow(this,
         p.title, p.name, p.x, p.y, p.width, p.height,
-        gHeadlessClient ? LLWindow::GraphicsAPI::Headless : LLWindow::GraphicsAPI::OpenGL,
+        p.graphics_api,
         window_flags,
         p.fullscreen,
-        gHeadlessClient,
+        p.graphics_api == LLWindow::GraphicsAPI::Headless,
         gSavedSettings.getBOOL("RenderVSyncEnable"),
         p.ignore_pixel_depth,
         0,
@@ -2018,7 +2059,7 @@ LLViewerWindow::LLViewerWindow(const Params& p)
                 << LL_ENDL;
         LLAppViewer::instance()->fastQuit(1);
     }
-    else if (!LLViewerShaderMgr::sInitialized)
+    else if (!vulkan_window && !LLViewerShaderMgr::sInitialized)
     {
         //immediately initialize shaders
         LLViewerShaderMgr::sInitialized = true;
@@ -2089,58 +2130,61 @@ LLViewerWindow::LLViewerWindow(const Params& p)
         mWindowRectScaled.set(0, ll_round((F32)size.mY / mDisplayScale.mV[VY]), ll_round((F32)size.mX / mDisplayScale.mV[VX]), 0);
     }
 
-    LLFontManager::initClass();
-
-    // fonts use an GL_UNSIGNED_BYTE image format,
-    // so they need convertion, init buffers if needed
-    LLImageGL::allocateConversionBuffer();
-
-    // Init font system, load default fonts and generate basic glyphs
-    // currently it takes aprox. 0.5 sec and we would load these fonts anyway
-    // before login screen.
-    LLFontGL::initClass( gSavedSettings.getF32("FontScreenDPI"),
-        mDisplayScale.mV[VX],
-        mDisplayScale.mV[VY],
-        gDirUtilp->getAppRODataDir());
-
-    //
-    // We want to set this stuff up BEFORE we initialize the pipeline, so we can turn off
-    // stuff like AGP if we think that it'll crash the viewer.
-    //
-    LL_DEBUGS("Window") << "Loading feature tables." << LL_ENDL;
-
-    // Initialize OpenGL Renderer
-    LLVertexBuffer::initClass(mWindow);
-    LL_INFOS("RenderInit") << "LLVertexBuffer initialization done." << LL_ENDL ;
-    if (!gGL.init(true))
+    if (!vulkan_window)
     {
-        LLError::LLUserWarningMsg::show(LLTrans::getString("MBVideoDrvErr"));
-        LL_ERRS() << "gGL not initialized" << LL_ENDL;
-    }
+        LLFontManager::initClass();
 
-    if (LLFeatureManager::getInstance()->isSafe()
-        || (gSavedSettings.getS32("LastFeatureVersion") != LLFeatureManager::getInstance()->getVersion())
-        || (gSavedSettings.getString("LastGPUString") != LLFeatureManager::getInstance()->getGPUString())
-        || (gSavedSettings.getBOOL("ProbeHardwareOnStartup")))
-    {
-        LLFeatureManager::getInstance()->applyRecommendedSettings();
-        gSavedSettings.setBOOL("ProbeHardwareOnStartup", false);
-    }
+        // fonts use an GL_UNSIGNED_BYTE image format,
+        // so they need convertion, init buffers if needed
+        LLImageGL::allocateConversionBuffer();
 
-    // If we crashed while initializng GL stuff last time, disable certain features
-    if (gSavedSettings.getBOOL("RenderInitError"))
-    {
-        mInitAlert = "DisplaySettingsNoShaders";
-        LLFeatureManager::getInstance()->setGraphicsLevel(0, false);
-        gSavedSettings.setU32("RenderQualityPerformance", 0);
-    }
+        // Init font system, load default fonts and generate basic glyphs
+        // currently it takes aprox. 0.5 sec and we would load these fonts anyway
+        // before login screen.
+        LLFontGL::initClass( gSavedSettings.getF32("FontScreenDPI"),
+            mDisplayScale.mV[VX],
+            mDisplayScale.mV[VY],
+            gDirUtilp->getAppRODataDir());
 
-    // Init the image list.  Must happen after GL is initialized and before the images that
-    // LLViewerWindow needs are requested, as well as before LLViewerMedia starts updating images.
-    LLImageGL::initClass(mWindow, LLViewerTexture::MAX_GL_IMAGE_CATEGORY, false, gSavedSettings.getBOOL("RenderGLMultiThreadedTextures"), gSavedSettings.getBOOL("RenderGLMultiThreadedMedia"));
-    gTextureList.init();
-    LLViewerTextureManager::init() ;
-    gBumpImageList.init();
+        //
+        // We want to set this stuff up BEFORE we initialize the pipeline, so we can turn off
+        // stuff like AGP if we think that it'll crash the viewer.
+        //
+        LL_DEBUGS("Window") << "Loading feature tables." << LL_ENDL;
+
+        // Initialize OpenGL Renderer
+        LLVertexBuffer::initClass(mWindow);
+        LL_INFOS("RenderInit") << "LLVertexBuffer initialization done." << LL_ENDL ;
+        if (!gGL.init(true))
+        {
+            LLError::LLUserWarningMsg::show(LLTrans::getString("MBVideoDrvErr"));
+            LL_ERRS() << "gGL not initialized" << LL_ENDL;
+        }
+
+        if (LLFeatureManager::getInstance()->isSafe()
+            || (gSavedSettings.getS32("LastFeatureVersion") != LLFeatureManager::getInstance()->getVersion())
+            || (gSavedSettings.getString("LastGPUString") != LLFeatureManager::getInstance()->getGPUString())
+            || (gSavedSettings.getBOOL("ProbeHardwareOnStartup")))
+        {
+            LLFeatureManager::getInstance()->applyRecommendedSettings();
+            gSavedSettings.setBOOL("ProbeHardwareOnStartup", false);
+        }
+
+        // If we crashed while initializng GL stuff last time, disable certain features
+        if (gSavedSettings.getBOOL("RenderInitError"))
+        {
+            mInitAlert = "DisplaySettingsNoShaders";
+            LLFeatureManager::getInstance()->setGraphicsLevel(0, false);
+            gSavedSettings.setU32("RenderQualityPerformance", 0);
+        }
+
+        // Init the image list.  Must happen after GL is initialized and before the images that
+        // LLViewerWindow needs are requested, as well as before LLViewerMedia starts updating images.
+        LLImageGL::initClass(mWindow, LLViewerTexture::MAX_GL_IMAGE_CATEGORY, false, gSavedSettings.getBOOL("RenderGLMultiThreadedTextures"), gSavedSettings.getBOOL("RenderGLMultiThreadedMedia"));
+        gTextureList.init();
+        LLViewerTextureManager::init() ;
+        gBumpImageList.init();
+    }
 
     // Create container for all sub-views
     LLView::Params rvp;
@@ -2454,6 +2498,31 @@ void LLViewerWindow::initWorldUI()
 // Destroy the UI
 void LLViewerWindow::shutdownViews()
 {
+    if (!mMainView)
+    {
+        // Vulkan currently stops after constructing the API-neutral window/UI
+        // shell. None of the legacy menu, floater, or world globals below have
+        // been initialized, so retire only the objects this partial lifetime
+        // actually owns.
+        gFocusMgr.unlockFocus();
+        gFocusMgr.setMouseCapture(nullptr);
+        gFocusMgr.setKeyboardFocus(nullptr);
+        gFocusMgr.setTopCtrl(nullptr);
+        if (mWindow)
+        {
+            mWindow->allowLanguageTextInput(nullptr, false);
+        }
+        delete mDebugText;
+        mDebugText = nullptr;
+        if (LLUI::instanceExists() && LLUI::getInstance()->getRootView() == mRootView)
+        {
+            LLUI::getInstance()->setRootView(nullptr);
+        }
+        delete mRootView;
+        mRootView = nullptr;
+        return;
+    }
+
     // clean up warning logger
     RecordToChatConsole::getInstance()->stopRecorder();
     LL_INFOS() << "Warning logger is cleaned." << LL_ENDL ;
@@ -2574,6 +2643,24 @@ void LLViewerWindow::shutdownGL()
 LLViewerWindow::~LLViewerWindow()
 {
     LL_INFOS() << "Destroying Window" << LL_ENDL;
+
+    // The Vulkan startup slice builds the root view but deliberately skips
+    // initBase()/shutdownViews(). Keep that partial lifetime explicit so the
+    // only native window remains owned by LLViewerWindow through teardown.
+    if (mRootView)
+    {
+        if (LLUI::instanceExists() && LLUI::getInstance()->getRootView() == mRootView)
+        {
+            LLUI::getInstance()->setRootView(nullptr);
+        }
+        delete mRootView;
+        mRootView = nullptr;
+    }
+    if (LLUI::instanceExists() && LLUI::getInstance()->mWindow == mWindow)
+    {
+        LLUI::getInstance()->mWindow = nullptr;
+    }
+
     destroyWindow();
 
     delete mDebugText;
@@ -2660,13 +2747,20 @@ void LLViewerWindow::reshape(S32 width, S32 height)
         mWindowRectScaled.mRight = mWindowRectScaled.mLeft + ll_round((F32)width / mDisplayScale.mV[VX]);
         mWindowRectScaled.mTop = mWindowRectScaled.mBottom + ll_round((F32)height / mDisplayScale.mV[VY]);
 
-        setup2DViewport();
+        const bool vulkan_window = mWindow && mWindow->getGraphicsAPI() == LLWindow::GraphicsAPI::Vulkan;
+        if (!vulkan_window)
+        {
+            setup2DViewport();
+        }
 
         // Inform lower views of the change
         // round up when converting coordinates to make sure there are no gaps at edge of window
         LLView::sForceReshape = display_scale_changed;
-        mRootView->reshape(llceil((F32)width / mDisplayScale.mV[VX]), llceil((F32)height / mDisplayScale.mV[VY]));
-        if (display_scale_changed)
+        if (mRootView)
+        {
+            mRootView->reshape(llceil((F32)width / mDisplayScale.mV[VX]), llceil((F32)height / mDisplayScale.mV[VY]));
+        }
+        if (display_scale_changed && !vulkan_window)
         {
             // Needs only a 'scale change' update, everything else gets handled by LLLayoutStack::updateClass()
             LLPanelLogin::reshapePanel();
@@ -2674,7 +2768,7 @@ void LLViewerWindow::reshape(S32 width, S32 height)
         LLView::sForceReshape = false;
 
         // clear font width caches
-        if (display_scale_changed)
+        if (display_scale_changed && !vulkan_window)
         {
             LLHUDObject::reshapeAll();
         }
@@ -3275,6 +3369,11 @@ bool LLViewerWindow::handleKey(KEY key, MASK mask)
 
 bool LLViewerWindow::handleUnicodeChar(llwchar uni_char, MASK mask)
 {
+    if (!mMainView)
+    {
+        return false;
+    }
+
     // HACK:  We delay processing of return keys until they arrive as a Unicode char,
     // so that if you're typing chat text at low frame rate, we don't send the chat
     // until all keystrokes have been entered. JC
@@ -3314,6 +3413,11 @@ bool LLViewerWindow::handleUnicodeChar(llwchar uni_char, MASK mask)
 
 void LLViewerWindow::handleScrollWheel(S32 clicks)
 {
+    if (!mMainView)
+    {
+        return;
+    }
+
     LLUI::getInstance()->resetMouseIdleTimer();
 
     LLMouseHandler* mouse_captor = gFocusMgr.getMouseCapture();
@@ -3364,6 +3468,11 @@ void LLViewerWindow::handleScrollWheel(S32 clicks)
 
 void LLViewerWindow::handleScrollHWheel(S32 clicks)
 {
+    if (!mMainView)
+    {
+        return;
+    }
+
     if (LLAppViewer::instance()->quitRequested())
     {
         return;
@@ -6126,8 +6235,11 @@ void LLViewerWindow::calcDisplayScale()
         LL_INFOS() << "Setting display scale to " << display_scale << " for ui scale: " << ui_scale_factor << LL_ENDL;
 
         mDisplayScale = display_scale;
-        // Init default fonts
-        initFonts();
+        if (mWindow->getGraphicsAPI() != LLWindow::GraphicsAPI::Vulkan)
+        {
+            // Font atlas creation is still OpenGL-owned.
+            initFonts();
+        }
     }
 }
 

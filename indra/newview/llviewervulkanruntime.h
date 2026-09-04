@@ -16,11 +16,10 @@
 #ifndef LL_LLVIEWERVULKANRUNTIME_H
 #define LL_LLVIEWERVULKANRUNTIME_H
 
-#include "llwindowcallbacks.h"
+#include "stdtypes.h"
 
 #include <cstdint>
 #include <memory>
-#include <string>
 
 class LLWindow;
 
@@ -97,39 +96,21 @@ private:
     std::uint64_t                mSuspendedTransitionCount = 0;
 };
 
-class LLViewerVulkanRuntime final : public LLWindowCallbacks
+class LLViewerVulkanRuntime final
 {
 public:
-    struct Params
-    {
-        std::string mTitle;
-        std::string mName;
-        S32         mX                = 0;
-        S32         mY                = 0;
-        S32         mWidth            = 1024;
-        S32         mHeight           = 768;
-        bool        mFullscreen       = false;
-        bool        mEnableVsync      = true;
-        bool        mIgnorePixelDepth = false;
-    };
-
     LLViewerVulkanRuntime();
-    ~LLViewerVulkanRuntime() override;
+    ~LLViewerVulkanRuntime();
 
     LLViewerVulkanRuntime(const LLViewerVulkanRuntime&)            = delete;
     LLViewerVulkanRuntime& operator=(const LLViewerVulkanRuntime&) = delete;
 
-    bool initialize(const Params& params);
+    bool initialize(LLWindow& window);
     bool tick();
     void shutdown() noexcept;
 
     bool isInitialized() const noexcept;
     bool failed() const noexcept;
-
-    void handleQuit(LLWindow* window) override;
-    bool handleActivate(LLWindow* window, bool activated) override;
-    void handleResize(LLWindow* window, S32 width, S32 height) override;
-    bool handleDPIChanged(LLWindow* window, F32 ui_scale_factor, S32 window_width, S32 window_height) override;
 
 private:
     class VulkanBackend;
@@ -141,7 +122,6 @@ private:
     LLWindow*                                      mWindow = nullptr;
     std::unique_ptr<VulkanBackend>                 mBackend;
     std::unique_ptr<LLViewerVulkanFrameController> mController;
-    bool                                           mWindowSuspended = false;
 };
 
 #endif // LL_LLVIEWERVULKANRUNTIME_H

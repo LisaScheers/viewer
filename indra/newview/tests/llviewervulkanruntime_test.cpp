@@ -17,9 +17,13 @@
 #include "../test/lltut.h"
 
 #include "../llviewervulkanruntime.h"
+#include "llwindowcallbacks.h"
 
 #include <deque>
+#include <type_traits>
 #include <vector>
+
+static_assert(!std::is_base_of_v<LLWindowCallbacks, LLViewerVulkanRuntime>);
 
 namespace tut
 {
