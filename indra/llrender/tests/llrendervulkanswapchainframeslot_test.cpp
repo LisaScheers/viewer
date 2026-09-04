@@ -2038,7 +2038,7 @@ struct render_vulkan_swapchain_frame_slot_test
 {
 };
 
-using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test, 56>;
+using render_vulkan_swapchain_frame_slot_group  = test_group<render_vulkan_swapchain_frame_slot_test, 57>;
 using render_vulkan_swapchain_frame_slot_object = render_vulkan_swapchain_frame_slot_group::object;
 render_vulkan_swapchain_frame_slot_group render_vulkan_swapchain_frame_slot_tests("render Vulkan swapchain frame slot");
 
@@ -5001,6 +5001,47 @@ void render_vulkan_swapchain_frame_slot_object::test<56>()
 
     ensureOperationSuccess(slot.cancelAcquireToPresent(), VulkanSwapchainFrameSlotDisposition::Reusable);
     ensure("successful cancellation clears changed destination retention", !slot.hasRetainedUploadDestinationGeneration());
+}
+
+template<> template<>
+void render_vulkan_swapchain_frame_slot_object::test<57>()
+{
+    FakeState state;
+    ScopedFakeState scope(state);
+    auto parents = makeParents(state);
+    auto target = makePresentationTarget(parents);
+    auto slot = takeGeneration(resolveSlot(parents));
+    ensureOperationSuccess(resolveRenderPassPresentation(slot, parents, target), VulkanSwapchainFrameSlotDisposition::Reusable);
+    struct Recorder
+    {
+        FakeState* state;
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        VkExtent2D extent{};
+        unsigned calls = 0;
+    } recorder{&state};
+    const VulkanSwapchainFrameSlotGeneration::RenderPassRecorder commands{&recorder,
+        [](void* owner, VkCommandBuffer command, VkExtent2D extent) noexcept {
+            auto& recorder = *static_cast<Recorder*>(owner);
+            recorder.command = command;
+            recorder.extent = extent;
+            ++recorder.calls;
+            recorder.state->mEvents.emplace_back("real UI commands");
+        }};
+    ensure("incomplete recorder rejected", !slot.setRenderPassRecorder({&recorder, nullptr}));
+    ensure("renderer attaches to reusable slot", slot.setRenderPassRecorder(commands));
+    state.clearFrameRecords();
+    state.mPresentResults = {VK_ERROR_OUT_OF_HOST_MEMORY};
+    const auto pending = slot.executeAcquireRenderPassClearToPresent(target, {});
+    ensure("retryable presentation retains commands", requirePresentationError(pending).mDisposition == VulkanSwapchainFrameSlotDisposition::PresentationReady);
+    ensure_equals("one recording", recorder.calls, 1u);
+    ensure("exact slot command buffer", recorder.command == slot.commandBuffer());
+    auto ui = std::find(state.mEvents.begin(), state.mEvents.end(), "real UI commands");
+    ensure("UI records inside the existing render pass", ui != state.mEvents.begin() && ui != state.mEvents.end() &&
+           *(ui - 1) == "begin render pass" && *(ui + 1) == "end render pass");
+    ensure("cannot replace outstanding renderer resources", !slot.setRenderPassRecorder({}));
+    (void)requirePresentationSuccess(slot.retryPresentation());
+    ensure_equals("presentation retry does not record twice", recorder.calls, 1u);
+    ensure("settled slot permits detachment", slot.setRenderPassRecorder({}));
 }
 
 } // namespace tut

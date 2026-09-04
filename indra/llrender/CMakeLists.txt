@@ -75,6 +75,8 @@ set(llrender_HEADER_FILES
 list(APPEND llrender_SOURCE_FILES ${llrender_HEADER_FILES})
 
 set(llrendercontract_SOURCE_FILES
+    lluirenderframe.cpp
+    lluirenderframe.h
     lldrawpacketcontract.cpp
     lldrawpacketcontract.h
     llmaterialcontract.cpp
@@ -167,6 +169,10 @@ endif ()
 
 if (LL_TESTS)
   include(LLAddBuildTest)
+  set_source_files_properties(tests/lluirenderframe_test.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(lluirenderframe "" "llrender;llrendercontract;llcommon")
+  target_compile_definitions(INTEGRATION_TEST_lluirenderframe PRIVATE
+      LL_UI_TEST_FONT="${CMAKE_CURRENT_SOURCE_DIR}/../newview/fonts/DejaVuSans.ttf")
   set_source_files_properties(
     tests/lldrawpacketcontract_test.cpp
     tests/llmaterialdiagnostic_test.cpp
@@ -679,6 +685,9 @@ if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
       PRIVATE VK_NO_PROTOTYPES)
 
   add_library(llrendervulkaninstance STATIC
+      vulkan/llrendervulkanui.cpp
+      vulkan/llrendervulkanui.h
+      vulkan/llrendervulkanuishaders.h
       vulkan/llrendervulkaninstance.cpp
       vulkan/llrendervulkaninstance.h)
   target_include_directories(llrendervulkaninstance

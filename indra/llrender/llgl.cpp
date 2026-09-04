@@ -2517,6 +2517,15 @@ void LLGLState::checkStates(GLboolean writeAlpha)
 LLGLState::LLGLState(LLGLenum state, S32 enabled) :
     mState(state), mWasEnabled(false), mIsEnabled(false)
 {
+    if (gGL.isUIRecording())
+    {
+        // The UI executor fixes blend/depth/cull state in its pipeline; clip
+        // rectangles are recorded explicitly by LLScreenClipRect.
+        llassert_always(state == GL_BLEND || state == GL_DEPTH_TEST || state == GL_CULL_FACE || state == GL_SCISSOR_TEST);
+        mWasEnabled = state == GL_BLEND;
+        setEnabled(enabled);
+        return;
+    }
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
 
     if (mState)
@@ -2528,6 +2537,17 @@ LLGLState::LLGLState(LLGLenum state, S32 enabled) :
 
 void LLGLState::setEnabled(S32 enabled)
 {
+    if (gGL.isUIRecording())
+    {
+        if (enabled == CURRENT_STATE) enabled = mWasEnabled ? ENABLED_STATE : DISABLED_STATE;
+        // Reject an unmigrated state request instead of silently changing its
+        // meaning. Scissor enablement follows the recorded clip-rectangle stack.
+        llassert_always(mState == GL_SCISSOR_TEST ||
+                       (mState == GL_BLEND && enabled == ENABLED_STATE) ||
+                       ((mState == GL_DEPTH_TEST || mState == GL_CULL_FACE) && enabled == DISABLED_STATE));
+        mIsEnabled = enabled;
+        return;
+    }
     if (!mState)
     {
         return;
@@ -2553,6 +2573,7 @@ void LLGLState::setEnabled(S32 enabled)
 
 LLGLState::~LLGLState()
 {
+    if (gGL.isUIRecording()) return;
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
     if (mState)
     {
@@ -2788,6 +2809,11 @@ LLGLUserClipPlane::~LLGLUserClipPlane()
 LLGLDepthTest::LLGLDepthTest(GLboolean depth_enabled, GLboolean write_enabled, GLenum depth_func)
 : mPrevDepthEnabled(sDepthEnabled), mPrevDepthFunc(sDepthFunc), mPrevWriteEnabled(sWriteEnabled)
 {
+    if (gGL.isUIRecording())
+    {
+        llassert_always(!depth_enabled);
+        return;
+    }
     stop_glerror();
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
     checkState();
@@ -2822,6 +2848,7 @@ LLGLDepthTest::LLGLDepthTest(GLboolean depth_enabled, GLboolean write_enabled, G
 
 LLGLDepthTest::~LLGLDepthTest()
 {
+    if (gGL.isUIRecording()) return;
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
     checkState();
     if (sDepthEnabled != mPrevDepthEnabled )
@@ -2989,5 +3016,3 @@ extern "C"
     __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 #endif
-
-

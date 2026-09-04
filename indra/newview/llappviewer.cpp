@@ -73,6 +73,7 @@
 #include "lltrace.h"
 #include "lltracethreadrecorder.h"
 #include "llviewerwindow.h"
+#include "llfontfreetype.h"
 #include "llviewerdisplay.h"
 #include "llviewermedia.h"
 #include "llviewerparcelaskplay.h"
@@ -896,6 +897,10 @@ bool LLAppViewer::init()
     settings_map["floater"] = &gSavedSettings; // *TODO: New settings file
     settings_map["account"] = &gSavedPerAccountSettings;
 
+    if (mGraphicsLifecycle == GraphicsLifecycle::VulkanSelected)
+    {
+        LLUIImageList::getInstance()->enableCPUImages();
+    }
     LLUI::createInstance(settings_map,
         LLUIImageList::getInstance(),
         ui_audio_callback,
@@ -1382,7 +1387,7 @@ bool LLAppViewer::frame()
 #if defined(LL_VULKAN_SDL_WSI)
     if (mVulkanRuntime)
     {
-        if (LLApp::isRunning() && !mVulkanRuntime->tick())
+        if (LLApp::isRunning() && !mVulkanRuntime->tick(gViewerWindow->recordVulkanProgress()))
         {
             // Linux skips cleanup after an application error, so release the
             // renderer while the app and SDL event environment are intact.
@@ -2365,6 +2370,12 @@ void LLAppViewer::cleanupVulkanSlice() noexcept
     {
         gViewerWindow->shutdownViews();
     }
+    if (gGL.isUIRecording())
+    {
+        LLFontGL::destroyDefaultFonts();
+        LLFontManager::cleanupClass();
+        gGL.shutdown();
+    }
     if (gViewerWindow)
     {
         delete gViewerWindow;
@@ -2381,6 +2392,8 @@ void LLAppViewer::cleanupVulkanSlice() noexcept
         << " gl_swap_attempts=" << gl_audit.mBufferSwapAttempts
         << " gl_audit_armed=" << gl_audit.mArmed
         << " gl_manager=" << gGLManager.mInited
+        << " gl_images=" << LLImageGL::sCount
+        << " media_initialized=" << LLViewerMedia::instanceExists()
         << " shader_manager=" << LLViewerShaderMgr::sInitialized << LL_ENDL;
 #endif
 
@@ -3594,6 +3607,7 @@ bool LLAppViewer::initWindow()
         {
             return false;
         }
+        if (!gViewerWindow->initVulkanProgress()) return false;
         LL_INFOS("VulkanViewerSlice")
             << "window_owner=viewer callbacks=viewer live_windows=" << LLWindow::instanceCount()
             << LL_ENDL;

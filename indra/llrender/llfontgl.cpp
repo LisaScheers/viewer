@@ -90,14 +90,14 @@ void LLFontGL::destroyGL()
     mFontFreetype->destroyGL();
 }
 
-bool LLFontGL::loadFace(const std::string& filename, F32 point_size, const F32 vert_dpi, const F32 horz_dpi, S32 weight, bool is_fallback, S32 face_n, EFontHinting hinting, S32 flags)
+bool LLFontGL::loadFace(const std::string& filename, F32 point_size, const F32 vert_dpi, const F32 horz_dpi, S32 weight, bool is_fallback, S32 face_n, EFontHinting hinting, S32 flags, bool create_gl_textures)
 {
     if(mFontFreetype == reinterpret_cast<LLFontFreetype*>(NULL))
     {
         mFontFreetype = new LLFontFreetype;
     }
 
-    return mFontFreetype->loadFace(filename, point_size, vert_dpi, horz_dpi, weight, is_fallback, face_n, hinting, flags);
+    return mFontFreetype->loadFace(filename, point_size, vert_dpi, horz_dpi, weight, is_fallback, face_n, hinting, flags, create_gl_textures);
 }
 
 S32 LLFontGL::getNumFaces(const std::string& filename)
@@ -330,8 +330,15 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
             }
 
             bitmap_entry = next_bitmap_entry;
-            LLImageGL* font_image = font_bitmap_cache->getImageGL(bitmap_entry.first, bitmap_entry.second);
-            gGL.getTexUnit(0)->bind(font_image);
+            if (gGL.isUIRecording())
+            {
+                gGL.bindUIImage(font_bitmap_cache->getImageRaw(bitmap_entry.first, bitmap_entry.second));
+            }
+            else
+            {
+                LLImageGL* font_image = font_bitmap_cache->getImageGL(bitmap_entry.first, bitmap_entry.second);
+                gGL.getTexUnit(0)->bind(font_image);
+            }
 
             // For some reason it's not enough to compare by bitmap_entry.
             // Issue hits emojis, japenese and chinese glyphs, only on first run.

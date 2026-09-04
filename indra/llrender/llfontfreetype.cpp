@@ -174,7 +174,7 @@ LLFontFreetype::~LLFontFreetype()
     // mFallbackFonts cleaned up by LLPointer destructor
 }
 
-bool LLFontFreetype::loadFace(const std::string& filename, F32 point_size, F32 vert_dpi, F32 horz_dpi, S32 weight, bool is_fallback, S32 face_n, EFontHinting hinting, S32 flags)
+bool LLFontFreetype::loadFace(const std::string& filename, F32 point_size, F32 vert_dpi, F32 horz_dpi, S32 weight, bool is_fallback, S32 face_n, EFontHinting hinting, S32 flags, bool create_gl_textures)
 {
     // Don't leak face objects.  This is also needed to deal with
     // changed font file names.
@@ -248,7 +248,7 @@ bool LLFontFreetype::loadFace(const std::string& filename, F32 point_size, F32 v
     S32 max_char_width = ll_round(0.5f + (x_max - x_min));
     S32 max_char_height = ll_round(0.5f + (y_max - y_min));
 
-    mFontBitmapCachep->init(max_char_width, max_char_height);
+    mFontBitmapCachep->init(max_char_width, max_char_height, create_gl_textures);
 
     if (!mFTFace->charmap)
     {
@@ -718,7 +718,7 @@ LLFontGlyphInfo* LLFontFreetype::addGlyphFromFont(const LLFontFreetype *fontp, l
     {
         image_gl->setSubImage(image_raw, 0, 0, image_gl->getWidth(), image_gl->getHeight());
     }
-    else
+    else if (mFontBitmapCachep->createsGLTextures() || !image_raw)
     {
         llassert(false); //images were just inserted by nextOpenPos, they shouldn't be missing
     }
@@ -853,7 +853,8 @@ void LLFontFreetype::renderGlyph(EFontGlyphType bitmap_type, U32 glyph_index, ll
 void LLFontFreetype::reset(F32 vert_dpi, F32 horz_dpi)
 {
     resetBitmapCache();
-    loadFace(mName, mPointSize, vert_dpi ,horz_dpi, mWeight, mIsFallback, mFaceIndex, mHinting, mFontFlags);
+    loadFace(mName, mPointSize, vert_dpi ,horz_dpi, mWeight, mIsFallback, mFaceIndex, mHinting, mFontFlags,
+             mFontBitmapCachep->createsGLTextures());
     if (!mIsFallback)
     {
         // This is the head of the list - need to rebuild ourself and all fallbacks.

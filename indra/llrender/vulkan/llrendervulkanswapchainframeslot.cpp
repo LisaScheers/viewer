@@ -359,6 +359,7 @@ VulkanSwapchainFrameSlotGeneration::~VulkanSwapchainFrameSlotGeneration() noexce
 }
 
 VulkanSwapchainFrameSlotGeneration::VulkanSwapchainFrameSlotGeneration(VulkanSwapchainFrameSlotGeneration&& other) noexcept :
+    mRenderPassRecorder(std::exchange(other.mRenderPassRecorder, {})),
     mLogicalDeviceGeneration(std::exchange(other.mLogicalDeviceGeneration, nullptr)),
     mConfigurationGeneration(std::exchange(other.mConfigurationGeneration, nullptr)),
     mSwapchainGeneration(std::exchange(other.mSwapchainGeneration, nullptr)),
@@ -1844,6 +1845,10 @@ VulkanSwapchainFrameSlotPresentationResult VulkanSwapchainFrameSlotGeneration::e
             mCmdSetScissor(mCommandBuffer, 0, 1, &scissor);
             mCmdDraw(mCommandBuffer, 3, 1, 0, 0);
         }
+        if (mRenderPassRecorder.record)
+        {
+            mRenderPassRecorder.record(mRenderPassRecorder.owner, mCommandBuffer, presentation_extent);
+        }
         mCmdEndRenderPass(mCommandBuffer);
 
         barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -2431,6 +2436,7 @@ void VulkanSwapchainFrameSlotGeneration::reset() noexcept
     }
     mCommandPool   = VK_NULL_HANDLE;
     mCommandBuffer = VK_NULL_HANDLE;
+    mRenderPassRecorder = {};
 
     mLogicalDeviceGeneration          = nullptr;
     mConfigurationGeneration          = nullptr;

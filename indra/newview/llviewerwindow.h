@@ -40,6 +40,7 @@
 #include "v2math.h"
 #include "llcursortypes.h"
 #include "llwindow.h"
+#include "lluirenderframe.h"
 #include "llwindowcallbacks.h"
 #include "lltimer.h"
 #include "llmousehandler.h"
@@ -184,6 +185,8 @@ public:
 
     void            initGLDefaults();
     void            initBase();
+    bool            initVulkanProgress();
+    LLUIRender::Frame recordVulkanProgress();
     void            adjustRectanglesForFirstUse(const LLRect& window);
     void            adjustControlRectanglesForFirstUse(const LLRect& window);
     void            initWorldUI();
@@ -528,6 +531,8 @@ private:
     bool            mRightMouseDown;
 
     LLProgressView  *mProgressView;
+    F32             mVulkanProgressPercent = 25.f;
+    F32             mLastRecordedProgressPercent = -1.f;
 
     LLFrameTimer    mToolTipFadeTimer;
     LLPanel*        mToolTip;

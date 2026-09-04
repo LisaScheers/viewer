@@ -198,6 +198,20 @@ using VulkanSwapchainFrameSlotPresentationResult =
 class VulkanSwapchainFrameSlotGeneration
 {
 public:
+    struct RenderPassRecorder
+    {
+        void* owner = nullptr;
+        void (*record)(void*, VkCommandBuffer, VkExtent2D) noexcept = nullptr;
+    };
+    // Main-thread renderer seam. Commands and their resources must outlive
+    // completion of this slot. No replacement while work is outstanding.
+    bool setRenderPassRecorder(RenderPassRecorder recorder) noexcept
+    {
+        if (mDisposition != VulkanSwapchainFrameSlotDisposition::Reusable ||
+            (recorder.owner == nullptr) != (recorder.record == nullptr)) return false;
+        mRenderPassRecorder = recorder;
+        return true;
+    }
     ~VulkanSwapchainFrameSlotGeneration() noexcept;
 
     VulkanSwapchainFrameSlotGeneration(const VulkanSwapchainFrameSlotGeneration&)            = delete;
@@ -352,6 +366,7 @@ public:
     void reset() noexcept;
 
 private:
+    RenderPassRecorder mRenderPassRecorder;
     friend struct VulkanSwapchainFrameSlotGenerationFactory;
 
     VulkanSwapchainFrameSlotGeneration(const VulkanLogicalDeviceGeneration&          logical_device_generation,

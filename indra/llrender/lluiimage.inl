@@ -31,7 +31,7 @@ void LLUIImage::draw(S32 x, S32 y, const LLColor4& color) const
 
 void LLUIImage::draw(S32 x, S32 y, S32 width, S32 height, const LLColor4& color, bool solid_color) const
 {
-    if (sEnableDisplayListsCollection)
+    if (sEnableDisplayListsCollection && !gGL.isUIRecording())
     {
         // Get display list for this configuration
         buffer_data_list_t* display_list = findDisplayList(x, y, width, height, color, solid_color);

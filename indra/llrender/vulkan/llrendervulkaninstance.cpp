@@ -2681,6 +2681,11 @@ VkMemoryPropertyFlags VulkanInstanceGeneration::swapchainReadbackMemoryPropertyF
     return mSwapchainReadbackGeneration ? mSwapchainReadbackGeneration->memoryPropertyFlags() : 0;
 }
 
+bool VulkanInstanceGeneration::setRenderPassRecorder(VulkanSwapchainFrameSlotGeneration::RenderPassRecorder recorder) noexcept
+{
+    return mSwapchainFrameSlotGeneration && mSwapchainFrameSlotGeneration->setRenderPassRecorder(recorder);
+}
+
 bool VulkanInstanceGeneration::hasSwapchainFrameSlotGeneration() const noexcept
 {
     return mSwapchainFrameSlotGeneration != nullptr;

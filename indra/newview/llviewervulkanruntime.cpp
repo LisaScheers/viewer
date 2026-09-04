@@ -18,11 +18,11 @@
 #include "llviewervulkanruntime.h"
 
 #include "llgl.h"
-#include "lltextureuploaddiagnostic.h"
 #include "llwindow.h"
 #include "llwindowsdl.h"
 #include "llwindowsdlvulkan.h"
 #include "llrendervulkaninstance.h"
+#include "llrendervulkanui.h"
 
 #include <SDL3/SDL.h>
 
@@ -31,22 +31,10 @@
 
 namespace
 {
-constexpr std::uint64_t UPLOAD_TIMEOUT_NS       = 1'000'000'000;
 constexpr std::uint32_t SUSPENDED_TICK_DELAY_MS = 16;
 
 using namespace LLRenderVulkan;
 
-bool completed(VulkanUploadTransferParentOperationResult result) noexcept
-{
-    const auto* disposition = std::get_if<VulkanUploadTransferDisposition>(&result);
-    return disposition && *disposition == VulkanUploadTransferDisposition::Complete;
-}
-
-bool completed(VulkanTextureUploadTransferParentOperationResult result) noexcept
-{
-    const auto* disposition = std::get_if<VulkanTextureUploadTransferDisposition>(&result);
-    return disposition && *disposition == VulkanTextureUploadTransferDisposition::Complete;
-}
 } // namespace
 
 LLViewerVulkanFrameController::LLViewerVulkanFrameController(LLViewerVulkanFrameBackend& backend) noexcept : mBackend(backend)
@@ -75,7 +63,7 @@ bool LLViewerVulkanFrameController::tick() noexcept
         return true;
     }
 
-    switch (mBackend.presentSampledFrame())
+    switch (mBackend.presentFrame())
     {
         case LLViewerVulkanPresentOutcome::Presented:
             ++mPresentedFrameCount;
@@ -171,123 +159,25 @@ bool LLViewerVulkanFrameController::rebuildIfNeeded() noexcept
 class LLViewerVulkanRuntime::VulkanBackend final : public LLViewerVulkanFrameBackend
 {
 public:
-    VulkanBackend(LLWindowSDL& window, LLWindowSDLVulkan& owner) noexcept :
-        mWindow(window),
+    explicit VulkanBackend(LLWindowSDLVulkan& owner) noexcept :
         mOwner(owner),
         mGeneration(owner.instanceGeneration())
     {
     }
 
-    bool initializeResidentResources() noexcept
+    bool initializeResources() noexcept
     {
-        if (!mGeneration)
-        {
-            return fail("missing-instance-generation");
-        }
-
-        const auto fixture        = LLRenderContract::makeTextureUploadFixture();
-        mTextureDescription       = vulkanTextureUploadDestinationDescription();
-        mTextureSourceDescription = vulkanTextureUploadSourceDescription(fixture.mSourceRGBA8);
-        mBindingDescription       = vulkanTextureUploadSampleBindingDescription();
-        mPipelineDescription      = vulkanTextureUploadSamplePipelineDescription();
-        mTriangleDescription      = vulkanScreenTriangleUploadSourceDescription();
-
-        VulkanTextureUploadDestinationRequest texture_destination_request;
-        fill(texture_destination_request);
-        texture_destination_request.mDescription = mTextureDescription;
-        if (mGeneration->acquireTextureUploadDestinationGeneration(texture_destination_request))
-        {
-            return fail("texture-destination-acquire");
-        }
-
-        VulkanTextureUploadSourceRequest texture_source_request;
-        fill(texture_source_request);
-        texture_source_request.mDescription = mTextureSourceDescription;
-        if (mGeneration->acquireTextureUploadSourceGeneration(texture_source_request))
-        {
-            return fail("texture-source-acquire");
-        }
-
-        VulkanTextureUploadTransferRequest texture_transfer_request;
-        fill(texture_transfer_request);
-        texture_transfer_request.mSourceDescription      = mTextureSourceDescription;
-        texture_transfer_request.mDestinationDescription = mTextureDescription;
-        if (mGeneration->acquireTextureUploadTransferGeneration(texture_transfer_request))
-        {
-            return fail("texture-transfer-acquire");
-        }
-
-        VulkanTextureUploadTransferOperationRequest texture_operation;
-        fill(texture_operation);
-        texture_operation.mSourceDescription      = mTextureSourceDescription;
-        texture_operation.mDestinationDescription = mTextureDescription;
-        texture_operation.mTimeoutNs              = UPLOAD_TIMEOUT_NS;
-        auto texture_result                       = mGeneration->executeTextureUploadTransfer(texture_operation);
-        while (mGeneration->textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Pending)
-        {
-            texture_result = mGeneration->retryTextureUploadTransferCompletion(texture_operation);
-        }
-        if (!completed(std::move(texture_result)) || !mGeneration->textureUploadDestinationIsResident())
-        {
-            return fail("texture-transfer-complete");
-        }
-
-        VulkanTextureUploadSampleBindingRequest binding_request;
-        fill(binding_request);
-        binding_request.mDestinationDescription = mTextureDescription;
-        binding_request.mDescription            = mBindingDescription;
-        if (mGeneration->acquireTextureUploadSampleBindingGeneration(binding_request))
-        {
-            return fail("sample-binding-acquire");
-        }
-        if (!mGeneration->resetTextureUploadTransferGeneration() || !mGeneration->resetTextureUploadSourceGeneration())
-        {
-            return fail("texture-temporary-retire");
-        }
-
-        VulkanUploadSourceRequest triangle_source_request;
-        fill(triangle_source_request);
-        triangle_source_request.mDescription = mTriangleDescription;
-        if (mGeneration->acquireUploadSourceGeneration(triangle_source_request))
-        {
-            return fail("triangle-source-acquire");
-        }
-
-        VulkanUploadDestinationRequest triangle_destination_request;
-        fill(triangle_destination_request);
-        triangle_destination_request.mDescription = mTriangleDescription;
-        if (mGeneration->acquireUploadDestinationGeneration(triangle_destination_request))
-        {
-            return fail("triangle-destination-acquire");
-        }
-
-        VulkanUploadTransferRequest triangle_transfer_request;
-        fill(triangle_transfer_request);
-        triangle_transfer_request.mDescription = mTriangleDescription;
-        if (mGeneration->acquireUploadTransferGeneration(triangle_transfer_request))
-        {
-            return fail("triangle-transfer-acquire");
-        }
-
-        VulkanUploadTransferOperationRequest triangle_operation;
-        fill(triangle_operation);
-        triangle_operation.mDescription = mTriangleDescription;
-        auto triangle_result            = mGeneration->executeUploadTransfer(triangle_operation);
-        while (mGeneration->uploadTransferDisposition() == VulkanUploadTransferDisposition::Pending)
-        {
-            triangle_result = mGeneration->retryUploadTransferCompletion(triangle_operation);
-        }
-        if (!completed(std::move(triangle_result)) || !mGeneration->uploadDestinationIsResident())
-        {
-            return fail("triangle-transfer-complete");
-        }
-        if (!mGeneration->resetUploadTransferGeneration() || !mGeneration->resetUploadSourceGeneration())
-        {
-            return fail("triangle-temporary-retire");
-        }
-
-        return validationClean("resident-resource-initialize");
+        if (!mGeneration) return fail("missing-instance-generation");
+        mUI = std::make_unique<UIRenderer>();
+        const auto resolver = reinterpret_cast<PFN_vkGetInstanceProcAddr>(mOwner.requirements()->resolver());
+        if (!mUI->initialize(resolver, mGeneration->instance(), mGeneration->physicalDevice(), mGeneration->logicalDevice(),
+                             mGeneration->presentationQueue(), mGeneration->logicalDeviceQueueFamilyIndex()))
+            return fail(mUI->error().c_str());
+        return validationClean("ui-resource-initialize");
     }
+
+    void setFrame(LLUIRender::Frame frame) { mNextFrame = std::move(frame); }
+    void retireUI() noexcept { mUI.reset(); }
 
     bool settleFrame() noexcept override
     {
@@ -337,35 +227,9 @@ public:
         }
     }
 
-    bool settleUploads() noexcept
-    {
-        if (!mGeneration)
-        {
-            return true;
-        }
-
-        VulkanTextureUploadTransferOperationRequest texture_request;
-        fill(texture_request);
-        texture_request.mSourceDescription      = mTextureSourceDescription;
-        texture_request.mDestinationDescription = mTextureDescription;
-        texture_request.mTimeoutNs              = UPLOAD_TIMEOUT_NS;
-        while (mGeneration->textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Pending)
-        {
-            (void)mGeneration->retryTextureUploadTransferCompletion(texture_request);
-        }
-
-        VulkanUploadTransferOperationRequest triangle_request;
-        fill(triangle_request);
-        triangle_request.mDescription = mTriangleDescription;
-        while (mGeneration->uploadTransferDisposition() == VulkanUploadTransferDisposition::Pending)
-        {
-            (void)mGeneration->retryUploadTransferCompletion(triangle_request);
-        }
-        return true;
-    }
-
     LLViewerVulkanRebuildOutcome rebuild(LLViewerVulkanDrawableExtent extent) noexcept override
     {
+        mUI->retireTarget();
         const auto  result  = mOwner.rebuildSwapchainChain({ extent.mWidth, extent.mHeight });
         const auto* outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&result);
         if (!outcome)
@@ -377,17 +241,39 @@ public:
         {
             return LLViewerVulkanRebuildOutcome::Suspended;
         }
-        if (*outcome != VulkanSwapchainChainRebuildOutcome::Ready || !acquireSamplePipeline(extent))
+        if (*outcome != VulkanSwapchainChainRebuildOutcome::Ready)
         {
-            fail("sample-pipeline-rebuild");
+            fail("ui-target-rebuild");
             return LLViewerVulkanRebuildOutcome::Failed;
         }
         return validationClean("swapchain-rebuild") ? LLViewerVulkanRebuildOutcome::Ready : LLViewerVulkanRebuildOutcome::Failed;
     }
 
-    LLViewerVulkanPresentOutcome presentSampledFrame() noexcept override
+    LLViewerVulkanPresentOutcome presentFrame() noexcept override
     {
-        const auto result = mOwner.acquireRenderPassSampleDrawToPresentSwapchainFrameSlot();
+        if (!settleFrame()) return LLViewerVulkanPresentOutcome::Failed;
+        const auto extent = mGeneration->swapchainDrawableExtent();
+        if (mNextFrame.width != extent.width || mNextFrame.height != extent.height)
+            return LLViewerVulkanPresentOutcome::RebuildRequired;
+        const auto image_extent = mGeneration->swapchainImageExtent();
+        if (image_extent.width != extent.width || image_extent.height != extent.height)
+        {
+            fail("ui-target-extent-mismatch");
+            return LLViewerVulkanPresentOutcome::Failed;
+        }
+        if (!mUI->prepare(std::move(mNextFrame), mGeneration->swapchainPresentationRenderPass()))
+        {
+            fail(mUI->error().c_str());
+            return LLViewerVulkanPresentOutcome::Failed;
+        }
+        if (!mGeneration->setRenderPassRecorder({mUI.get(), [](void* owner, VkCommandBuffer command, VkExtent2D size) noexcept {
+            static_cast<UIRenderer*>(owner)->record(command, size);
+        }}))
+        {
+            fail("ui-frame-not-reusable");
+            return LLViewerVulkanPresentOutcome::Failed;
+        }
+        const auto result = mOwner.acquireRenderPassClearToPresentSwapchainFrameSlot({{0.f, 0.f, 0.f, 1.f}});
         if (const auto* success = std::get_if<VulkanSwapchainFrameSlotPresentationSuccess>(&result))
         {
             switch (success->mOutcome)
@@ -402,7 +288,7 @@ public:
                     return LLViewerVulkanPresentOutcome::SurfaceLost;
             }
         }
-        fail("sample-present");
+        fail("ui-present");
         return LLViewerVulkanPresentOutcome::Failed;
     }
 
@@ -411,37 +297,6 @@ public:
     const std::string& failure() const noexcept { return mFailure; }
 
 private:
-    template<typename Request>
-    void fill(Request& request) noexcept
-    {
-        request.mNativeWindowGeneration = mGeneration->nativeWindowGeneration();
-        request.mInstanceOwnerCheck     = { this, instanceCurrent };
-        request.mWindowGenerationCheck  = { this, windowCurrent };
-    }
-
-    static bool instanceCurrent(void* userdata, const VulkanInstanceGeneration& generation) noexcept
-    {
-        const auto& self = *static_cast<const VulkanBackend*>(userdata);
-        return self.mGeneration == &generation && self.mOwner.instanceGeneration() == self.mGeneration;
-    }
-
-    static bool windowCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
-    {
-        const auto& self = *static_cast<const VulkanBackend*>(userdata);
-        return self.mWindow.isVulkanWindowGenerationCurrent(native_window_generation);
-    }
-
-    bool acquireSamplePipeline(LLViewerVulkanDrawableExtent extent) noexcept
-    {
-        VulkanTextureUploadSamplePipelineRequest request;
-        fill(request);
-        request.mDrawableExtent           = { extent.mWidth, extent.mHeight };
-        request.mDestinationDescription   = mTextureDescription;
-        request.mSampleBindingDescription = mBindingDescription;
-        request.mDescription              = mPipelineDescription;
-        return !mGeneration->acquireTextureUploadSamplePipelineGeneration(request);
-    }
-
     bool validationClean(const char* operation) noexcept
     {
         const VulkanValidationSnapshot snapshot = mGeneration->validationSnapshot();
@@ -464,14 +319,10 @@ private:
         return false;
     }
 
-    LLWindowSDL&                                 mWindow;
     LLWindowSDLVulkan&                           mOwner;
     VulkanInstanceGeneration*                    mGeneration = nullptr;
-    VulkanTextureUploadDestinationDescription    mTextureDescription;
-    VulkanTextureUploadSourceDescription         mTextureSourceDescription;
-    VulkanTextureUploadSampleBindingDescription  mBindingDescription;
-    VulkanTextureUploadSamplePipelineDescription mPipelineDescription;
-    VulkanUploadSourceDescription                mTriangleDescription;
+    std::unique_ptr<UIRenderer>                   mUI;
+    LLUIRender::Frame                            mNextFrame;
     std::string                                  mFailure;
 };
 
@@ -498,9 +349,9 @@ bool LLViewerVulkanRuntime::initialize(LLWindow& window)
         shutdown();
         return false;
     }
-    mBackend    = std::make_unique<VulkanBackend>(sdl_window, *owner);
+    mBackend    = std::make_unique<VulkanBackend>(*owner);
     mController = std::make_unique<LLViewerVulkanFrameController>(*mBackend);
-    if (!mBackend->initializeResidentResources() || !mController->start(currentDrawableExtent()))
+    if (!mBackend->initializeResources() || !mController->start(currentDrawableExtent()))
     {
         logSummary("initialization-failed");
         shutdown();
@@ -517,8 +368,9 @@ bool LLViewerVulkanRuntime::initialize(LLWindow& window)
 #endif
 }
 
-bool LLViewerVulkanRuntime::tick()
+bool LLViewerVulkanRuntime::tick(LLUIRender::Frame frame)
 {
+    if (mBackend) mBackend->setFrame(std::move(frame));
     const auto previous_state = mController ? mController->state() : LLViewerVulkanFrameController::State::Starting;
     const auto previous_resumed_frames = mController ? mController->framesSinceLastResume() : 0;
     requestCurrentDrawableExtent();
@@ -548,14 +400,13 @@ void LLViewerVulkanRuntime::shutdown() noexcept
     }
 
     const bool frame_settled  = !mController || mController->shutdown();
-    const bool upload_settled = !mBackend || mBackend->settleUploads();
-    const bool settled        = frame_settled && upload_settled;
-    if (!settled)
+    if (!frame_settled)
     {
         logSummary("device-retirement-required");
         std::terminate();
     }
 
+    if (mBackend) mBackend->retireUI();
     auto*      owner           = static_cast<LLWindowSDL*>(mWindow)->getVulkanOwner();
     const bool surface_retired = !owner || owner->resetSurfaceGeneration();
     if (!surface_retired)

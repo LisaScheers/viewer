@@ -17,6 +17,7 @@
 #define LL_LLVIEWERVULKANRUNTIME_H
 
 #include "stdtypes.h"
+#include "lluirenderframe.h"
 
 #include <cstdint>
 #include <memory>
@@ -53,7 +54,7 @@ public:
 
     virtual bool                         settleFrame() noexcept                                = 0;
     virtual LLViewerVulkanRebuildOutcome rebuild(LLViewerVulkanDrawableExtent extent) noexcept = 0;
-    virtual LLViewerVulkanPresentOutcome presentSampledFrame() noexcept                        = 0;
+    virtual LLViewerVulkanPresentOutcome presentFrame() noexcept                        = 0;
 };
 
 // This controller is deliberately independent of LLWindow and Vulkan handles.
@@ -108,7 +109,7 @@ public:
     LLViewerVulkanRuntime& operator=(const LLViewerVulkanRuntime&) = delete;
 
     bool initialize(LLWindow& window);
-    bool tick();
+    bool tick(LLUIRender::Frame frame);
     void shutdown() noexcept;
 
     bool isInitialized() const noexcept;

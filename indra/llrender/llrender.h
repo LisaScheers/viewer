@@ -43,6 +43,8 @@
 #include "llglheaders.h"
 #include "llmatrix4a.h"
 #include "glm/mat4x4.hpp"
+#include "lluirenderframe.h"
+#include <memory>
 
 #include <array>
 #include <chrono>
@@ -55,6 +57,8 @@ class LLImageGL;
 class LLRenderTarget;
 class LLTexture;
 class LLVertexBufferData;
+class LLImageRaw;
+struct LLUIRenderRecording;
 
 #define LL_MATRIX_STACK_DEPTH 32
 
@@ -381,6 +385,14 @@ public:
     LLRender();
     ~LLRender();
     bool init(bool needs_vertex_buffer);
+    void initUIRecording();
+    bool isUIRecording() const { return bool(mUIRecording); }
+    void beginUIFrame(U32 width, U32 height);
+    LLUIRender::Frame finishUIFrame();
+    void bindUIImage(LLImageRaw* image);
+    void setUIClip(S32 left, S32 bottom, S32 right, S32 top);
+    void resetUIClip();
+    void setUIAlphaMask(bool enabled);
     void initVertexBuffer();
     void resetVertexBuffer();
     void shutdown();
@@ -497,6 +509,7 @@ public:
     static bool sClassicMode; // classic sky mode active
 
 private:
+    std::unique_ptr<LLUIRenderRecording> mUIRecording;
     friend class LLLightState;
 
     LLVertexBuffer* bufferfromCache(U32 attribute_mask, U32 count);

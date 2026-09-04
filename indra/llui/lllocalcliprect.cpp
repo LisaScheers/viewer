@@ -80,6 +80,18 @@ void LLScreenClipRect::popClipRect()
 //static
 void LLScreenClipRect::updateScissorRegion()
 {
+    if (gGL.isUIRecording())
+    {
+        if (sClipRectStack.empty()) gGL.resetUIClip();
+        else
+        {
+            const auto& rect = sClipRectStack.top();
+            const auto& scale = LLUI::getScaleFactor();
+            gGL.setUIClip(llfloor(rect.mLeft * scale.mV[VX]), llfloor(rect.mBottom * scale.mV[VY]),
+                          llceil(rect.mRight * scale.mV[VX]), llceil(rect.mTop * scale.mV[VY]));
+        }
+        return;
+    }
     if (sClipRectStack.empty()) return;
 
     // finish any deferred calls in the old clipping region

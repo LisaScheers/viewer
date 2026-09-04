@@ -55,6 +55,7 @@ class Tooling:
     xdotool: str
     screenshot: str
     identify: str
+    convert: str
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class Artifacts:
     first_image: Path
     resized_image: Path
     restored_image: Path
+    progress_image: Path
     viewer_stdout: Path
     window_manager_log: Path
     xvfb_log: Path
@@ -127,6 +129,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--xdotool", default="xdotool", help="xdotool executable override")
     parser.add_argument("--screenshot-tool", default="import", help="ImageMagick import executable override")
     parser.add_argument("--identify", default="identify", help="ImageMagick identify executable override")
+    parser.add_argument("--convert", default="convert", help="ImageMagick pixel extraction executable override")
+    parser.add_argument("--expect-progress-ui", action="store_true", help="require real progress text/images and a 25-to-75 percent update")
     return parser.parse_args(argv)
 
 
@@ -171,6 +175,7 @@ def validate_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path, Path, P
         xdotool=resolved_executable(args.xdotool, "xdotool"),
         screenshot=resolved_executable(args.screenshot_tool, "ImageMagick import"),
         identify=resolved_executable(args.identify, "ImageMagick identify"),
+        convert=resolved_executable(args.convert, "ImageMagick convert"),
     )
     return viewer, app_dir, vulkan_icd, layer_dir, loader_dir, tooling
 
@@ -189,6 +194,7 @@ def prepare_artifacts(output_dir: Path | None) -> tuple[Artifacts, bool]:
         first_image=root / "initial.png",
         resized_image=root / "resized.png",
         restored_image=root / "restored.png",
+        progress_image=root / "progress-75.png",
         viewer_stdout=root / "secondlife-bin.output.log",
         window_manager_log=root / "openbox.log",
         xvfb_log=root / "xvfb.log",
@@ -199,6 +205,7 @@ def prepare_artifacts(output_dir: Path | None) -> tuple[Artifacts, bool]:
             paths.first_image,
             paths.resized_image,
             paths.restored_image,
+            paths.progress_image,
             paths.viewer_stdout,
             paths.window_manager_log,
             paths.xvfb_log,
@@ -317,6 +324,80 @@ def wait_for_status(viewer: subprocess.Popen[bytes], log_path: Path, status: str
                     return
         time.sleep(0.1)
     raise SmokeFailure(f"viewer did not report {status} within {timeout:g}s")
+
+
+def wait_for_progress(viewer: subprocess.Popen[bytes], log_path: Path, percent: int, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ensure_viewer_alive(viewer, f"waiting for progress {percent}")
+        if log_path.is_file():
+            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if "VulkanUI" in line and key_values(line).get("progress") == str(percent):
+                    return
+        time.sleep(0.1)
+    raise SmokeFailure(f"viewer did not record progress {percent}")
+
+
+def progress_landmarks(pixels: bytes, width: int, height: int) -> tuple[int, int, int, int]:
+    if len(pixels) != width * height * 3:
+        raise SmokeFailure("invalid progress pixel payload")
+    cyan = []
+    black = 0
+    for index in range(width * height):
+        r, g, b = pixels[index * 3:index * 3 + 3]
+        black += max(r, g, b) < 12
+        if b > 65 and g > 40 and r < b * 0.4 and b > g:
+            cyan.append((index % width, index // width))
+    if black < width * height * 0.35 or len(cyan) < 200:
+        raise SmokeFailure("missing native progress background or fill; sampled fixture is not UI")
+    left = min(x for x, _ in cyan)
+    right = max(x for x, _ in cyan) + 1
+    top = min(y for _, y in cyan)
+    bottom = max(y for _, y in cyan) + 1
+    if not 5 <= bottom - top <= 40 or right - left < 60:
+        raise SmokeFailure("cyan pixels do not form the real progress bar")
+    text = 0
+    text_edges = 0
+    for y in range(max(0, top - 100), top):
+        previous_light = False
+        for x in range(left, min(width, left + 580)):
+            offset = (y * width + x) * 3
+            r, g, b = pixels[offset:offset + 3]
+            light = min(r, g, b) > 160 and max(r, g, b) - min(r, g, b) < 25
+            text += light
+            text_edges += light != previous_light
+            previous_light = light
+    if text < 150 or text_edges < 100:
+        raise SmokeFailure("progress title/text landmarks are missing")
+    return left, top, right, bottom
+
+
+def validate_progress_images(tooling: Tooling, env: Mapping[str, str], first: Path, changed: Path) -> None:
+    facts = image_facts(tooling, env, first)
+    other = image_facts(tooling, env, changed)
+    if (facts.width, facts.height) != (other.width, other.height):
+        raise SmokeFailure("progress change screenshots must share an extent")
+    def pixels(path: Path) -> bytes:
+        return subprocess.run([tooling.convert, str(path), "-depth", "8", "RGB:-"], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=COMMAND_TIMEOUT_SECONDS, check=True).stdout
+    before, after = pixels(first), pixels(changed)
+    validate_progress_change(before, after, facts.width, facts.height)
+
+
+def validate_progress_change(before: bytes, after: bytes, width: int, height: int) -> None:
+    a = progress_landmarks(before, width, height)
+    b = progress_landmarks(after, width, height)
+    if abs(a[0] - b[0]) > 2 or abs(a[1] - b[1]) > 2 or not 2.7 < (b[2] - b[0]) / (a[2] - a[0]) < 3.3:
+        raise SmokeFailure("real progress fill did not change from 25 to 75 percent")
+    outside = 0
+    for index in range(width * height):
+        x, y = index % width, index // width
+        if b[0] - 2 <= x <= b[2] + 2 and b[1] - 2 <= y <= b[3] + 2:
+            continue
+        offset = index * 3
+        outside += any(abs(before[offset + c] - after[offset + c]) > 8 for c in range(3))
+    if outside > width * height * 0.005:
+        raise SmokeFailure("progress update changed broad unrelated image regions")
 
 
 def screenshot(tooling: Tooling, env: Mapping[str, str], window_id: str, destination: Path) -> None:
@@ -553,6 +634,8 @@ def execute(args: argparse.Namespace, artifacts: Artifacts) -> tuple[ImageFacts,
         )
         window_id = wait_for_window(tooling, environment, viewer, args.startup_timeout)
         viewer_log = user_dir / "logs" / "SecondLife.log"
+        if args.expect_progress_ui:
+            wait_for_progress(viewer, viewer_log, 25, args.startup_timeout)
 
         initial_width, initial_height = args.initial_size
         run_command(
@@ -568,6 +651,13 @@ def execute(args: argparse.Namespace, artifacts: Artifacts) -> tuple[ImageFacts,
         time.sleep(args.settle_seconds)
         ensure_viewer_alive(viewer, "input callback exercise")
         screenshot(tooling, environment, window_id, artifacts.first_image)
+
+        if args.expect_progress_ui:
+            run_command([tooling.xdotool, "key", "--clearmodifiers", "space"], env=environment)
+            wait_for_progress(viewer, viewer_log, 75, args.startup_timeout)
+            time.sleep(args.settle_seconds)
+            screenshot(tooling, environment, window_id, artifacts.progress_image)
+            validate_progress_images(tooling, environment, artifacts.first_image, artifacts.progress_image)
 
         resized_width, resized_height = args.resized_size
         run_command(
@@ -612,6 +702,20 @@ def execute(args: argparse.Namespace, artifacts: Artifacts) -> tuple[ImageFacts,
                 f"screenshots did not prove a drawable resize: both are {first.width}x{first.height}"
             )
         evidence = validate_viewer_log(viewer_log)
+        if args.expect_progress_ui:
+            log = viewer_log.read_text(encoding="utf-8", errors="replace")
+            if len(re.findall(r"ui_tree=progress instances=1 media_enabled=0", log)) != 1:
+                raise SmokeFailure("expected exactly one real progress tree with media disabled")
+            for line in log.splitlines():
+                if "VulkanUI" in line or "window_retired=1" in line:
+                    fields = key_values(line)
+                    for field in ("gl_images", "media_initialized"):
+                        if integer_field(fields, field, "UI lifetime audit") != 0:
+                            raise SmokeFailure(f"unexpected {field} in the native UI path")
+            for path, facts in ((artifacts.resized_image, resized), (artifacts.restored_image, restored)):
+                pixels = subprocess.run([tooling.convert, str(path), "-depth", "8", "RGB:-"], env=environment,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=COMMAND_TIMEOUT_SECONDS, check=True).stdout
+                progress_landmarks(pixels, facts.width, facts.height)
         return first, resized, evidence
     finally:
         terminate_process(viewer)

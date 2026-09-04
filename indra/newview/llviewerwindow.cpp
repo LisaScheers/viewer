@@ -1680,6 +1680,13 @@ bool LLViewerWindow::handleTranslatedKeyDown(KEY key,  MASK mask, bool repeated)
 {
     if (!mMainView)
     {
+        // Developer progress slice: exercise a real widget value change through
+        // the application's native input owner, without starting legacy idle().
+        if (mProgressView && key == ' ' && mask == MASK_NONE && !repeated)
+        {
+            mVulkanProgressPercent = mVulkanProgressPercent == 25.f ? 75.f : 25.f;
+            return true;
+        }
         return false;
     }
 
@@ -1751,6 +1758,13 @@ void LLViewerWindow::handleScanKey(KEY key, bool key_down, bool key_up, bool key
 
 bool LLViewerWindow::handleActivate(LLWindow *window, bool activated)
 {
+    if (!mMainView)
+    {
+        // Native activation still matters to the partial startup window, but
+        // audio_update_volume() lazily creates media services not started yet.
+        mActive = activated;
+        return true;
+    }
     if (activated)
     {
         mActive = true;
@@ -2340,6 +2354,49 @@ void LLViewerWindow::initBase()
     LLMenuGL::sMenuContainer = gMenuHolder;
 }
 
+bool LLViewerWindow::initVulkanProgress()
+{
+    llassert_always(mWindow->getGraphicsAPI() == LLWindow::GraphicsAPI::Vulkan && !mMainView && !mProgressView);
+    gGL.initUIRecording();
+    LLFontManager::initClass();
+    LLFontGL::initClass(gSavedSettings.getF32("FontScreenDPI"), mDisplayScale.mV[VX], mDisplayScale.mV[VY],
+                        gDirUtilp->getAppRODataDir(), false);
+    mProgressView = new LLProgressView(false);
+    mRootView->addChild(mProgressView);
+    if (!mProgressView->buildFromFile("panel_progress.xml")) return false;
+    mProgressView->setShape(mRootView->getLocalRect());
+    mProgressView->setVisible(true);
+    mProgressView->setText("Initializing Vulkan renderer");
+    mProgressView->setMessage("Native progress UI: images and text");
+    mProgressView->setCancelButtonVisible(false, "");
+    LL_INFOS("VulkanUI") << "ui_tree=progress instances=1 media_enabled=0"
+                        << " gl_images=" << LLImageGL::sCount
+                        << " media_initialized=" << LLViewerMedia::instanceExists() << LL_ENDL;
+    return true;
+}
+
+LLUIRender::Frame LLViewerWindow::recordVulkanProgress()
+{
+    LLCoordWindow size;
+    if (!mWindow->getSize(&size) || size.mX <= 0 || size.mY <= 0 || mWindow->getMinimized()) return {};
+    mProgressView->setPercent(mVulkanProgressPercent);
+    gGL.beginUIFrame(size.mX, size.mY);
+    gGL.pushUIMatrix();
+    gGL.scaleUI(mDisplayScale.mV[VX], mDisplayScale.mV[VY], 1.f);
+    mRootView->draw();
+    gGL.popUIMatrix();
+    auto frame = gGL.finishUIFrame();
+    if (mLastRecordedProgressPercent != mVulkanProgressPercent)
+    {
+        LL_INFOS("VulkanUI") << "progress=" << mVulkanProgressPercent << " vertices=" << frame.vertices.size()
+                            << " images=" << frame.images.size() << " draws=" << frame.draws.size()
+                            << " gl_images=" << LLImageGL::sCount
+                            << " media_initialized=" << LLViewerMedia::instanceExists() << LL_ENDL;
+        mLastRecordedProgressPercent = mVulkanProgressPercent;
+    }
+    return frame;
+}
+
 void LLViewerWindow::initWorldUI()
 {
     if (gNonInteractive)
@@ -2520,6 +2577,7 @@ void LLViewerWindow::shutdownViews()
         }
         delete mRootView;
         mRootView = nullptr;
+        mProgressView = nullptr;
         return;
     }
 

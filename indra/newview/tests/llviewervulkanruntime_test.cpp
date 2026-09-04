@@ -47,7 +47,7 @@ struct FakeBackend final : LLViewerVulkanFrameBackend
         return extent.mWidth == 0 || extent.mHeight == 0 ? LLViewerVulkanRebuildOutcome::Suspended : LLViewerVulkanRebuildOutcome::Ready;
     }
 
-    LLViewerVulkanPresentOutcome presentSampledFrame() noexcept override
+    LLViewerVulkanPresentOutcome presentFrame() noexcept override
     {
         ++mPresents;
         if (mPresentResults.empty())

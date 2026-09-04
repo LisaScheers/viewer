@@ -1330,6 +1330,7 @@ public:
     std::uint32_t                     swapchainReadbackMemoryTypeIndex() const noexcept;
     VkMemoryPropertyFlags             swapchainReadbackMemoryPropertyFlags() const noexcept;
     bool                              hasSwapchainFrameSlotGeneration() const noexcept;
+    bool setRenderPassRecorder(VulkanSwapchainFrameSlotGeneration::RenderPassRecorder recorder) noexcept;
     VkCommandPool                     swapchainFrameCommandPool() const noexcept;
     VkCommandBuffer                   swapchainFrameCommandBuffer() const noexcept;
     VkSemaphore                       swapchainFrameImageAvailableSemaphore() const noexcept;
