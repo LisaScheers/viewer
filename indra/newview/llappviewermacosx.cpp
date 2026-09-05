@@ -37,6 +37,7 @@
 
 #include "llappviewermacosx.h"
 #include "llappviewermacosx-for-objc.h"
+#include "llcontractparityargs.h"
 #include "llwindowmacosx-objc.h"
 #include "llcommandlineparser.h"
 #include "llsdserialize.h"
@@ -56,6 +57,8 @@
 #include <vector>
 #include <exception>
 #include <fstream>
+#include <cstdio>
+#include <cstdlib>
 
 #include "lldir.h"
 #include "lldiriterator.h"
@@ -71,6 +74,7 @@ namespace
     char** gArgV;
     LLAppViewerMacOSX* gViewerAppPtr = NULL;
     std::string gHandleSLURL;
+
 }
 
 void constructViewer()
@@ -275,6 +279,22 @@ int main( int argc, char **argv )
     LL_PROFILER_FRAME_END;
     LL_PROFILER_SET_THREAD_NAME("App");
 
+    const LLContractParitySelection parity = getRawContractParitySelection(argc, argv);
+    const char* isolated_user_dir = std::getenv("SECONDLIFE_USER_DIR");
+    if ((parity.mTonemap || parity.mMaterial || parity.mTextureUpload)
+        && (!isolated_user_dir || isolated_user_dir[0] == '\0'))
+    {
+        std::fputs(
+            parity.mTonemap
+                ? "TONEMAP_CONTRACT_PARITY result=fail reason=missing_SECONDLIFE_USER_DIR\n"
+                : parity.mMaterial
+                    ? "MATERIAL_CONTRACT_PARITY result=fail reason=missing_SECONDLIFE_USER_DIR\n"
+                    : "TEXTURE_UPLOAD_CONTRACT_PARITY result=fail reason=missing_SECONDLIFE_USER_DIR\n",
+            stderr);
+        std::fflush(stderr);
+        return EXIT_FAILURE;
+    }
+
     // Store off the command line args for use later.
     gArgC = argc;
     gArgV = argv;
@@ -416,7 +436,9 @@ bool LLAppViewerMacOSX::restoreErrorTrap()
 
 bool LLAppViewerMacOSX::initSLURLHandler()
 {
-    if (isSecondInstance())
+    // The explicit developer slice must not replace the installed viewer's
+    // system URL handlers when launched from an isolated build tree.
+    if (isSecondInstance() || gSavedSettings.getBOOL("RenderVulkanDeveloper"))
     {
         return false;
     }

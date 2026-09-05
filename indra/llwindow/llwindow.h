@@ -37,6 +37,7 @@
 class LLSplashScreen;
 class LLPreeditor;
 class LLWindowCallbacks;
+class LLWindowVulkanRequirements;
 
 // Result of an OS font-fallback query; empty mPath means no font was found.
 struct LLFontFallbackMatch
@@ -51,6 +52,13 @@ class LLWindow : public LLInstanceTracker<LLWindow>
 {
 public:
 
+    enum class GraphicsAPI : U8
+    {
+        OpenGL,
+        Vulkan,
+        Headless
+    };
+
     struct LLWindowResolution
     {
         S32 mWidth;
@@ -64,7 +72,7 @@ public:
     };
     enum EFlags
     {
-        // currently unused
+        FLAG_CREATE_HIDDEN = 1 << 0
     };
 public:
     virtual void show() = 0;
@@ -77,9 +85,16 @@ public:
     virtual void minimize() = 0;
     virtual void restore() = 0;
     bool getFullscreen()    { return mFullscreen; };
+    GraphicsAPI getGraphicsAPI() const noexcept { return mGraphicsAPI; }
+    virtual const LLWindowVulkanRequirements* getVulkanRequirements() const noexcept { return nullptr; }
+    virtual bool isVulkanWindowGenerationCurrent(U64) const noexcept { return false; }
     virtual bool getPosition(LLCoordScreen *position) = 0;
     virtual bool getSize(LLCoordScreen *size) = 0;
     virtual bool getSize(LLCoordWindow *size) = 0;
+    // Native content dimensions are logical display units. getSize() remains
+    // the backing-pixel size used by the renderer.
+    virtual bool getNativeContentSize(LLCoordWindow *size);
+    virtual void getBackingScale(F32& scale_x, F32& scale_y);
     virtual bool setPosition(LLCoordScreen position) = 0;
     bool setSize(LLCoordScreen size);
     bool setSize(LLCoordWindow size);
@@ -215,7 +230,7 @@ public:
 
     virtual void initWatchdog() {} // windows runs window as a thread and it needs a watchdog
 protected:
-    LLWindow(LLWindowCallbacks* callbacks, bool fullscreen, U32 flags);
+    LLWindow(LLWindowCallbacks* callbacks, bool fullscreen, U32 flags, GraphicsAPI graphics_api = GraphicsAPI::OpenGL);
     virtual ~LLWindow();
     // Defaults to true
     virtual bool isValid();
@@ -227,6 +242,7 @@ protected:
 
 protected:
     LLWindowCallbacks*  mCallbacks;
+    GraphicsAPI         mGraphicsAPI;
 
     bool        mPostQuit;      // should this window post a quit message when destroyed?
     bool        mFullscreen;
@@ -311,11 +327,11 @@ public:
     static LLWindow *createWindow(
         LLWindowCallbacks* callbacks,
         const std::string& title, const std::string& name, S32 x, S32 y, S32 width, S32 height,
+        LLWindow::GraphicsAPI graphics_api,
         U32 flags = 0,
         bool fullscreen = false,
         bool clearBg = false,
         bool enable_vsync = false,
-        bool use_gl = true,
         bool ignore_pixel_depth = false,
         U32 fsaa_samples = 0,
         U32 max_cores = 0,

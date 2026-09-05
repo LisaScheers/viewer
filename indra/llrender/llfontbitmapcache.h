@@ -47,8 +47,8 @@ public:
     ~LLFontBitmapCache();
 
     // Need to call this once, before caching any glyphs.
-    void init(S32 max_char_width,
-              S32 max_char_height);
+    void init(S32 max_char_width, S32 max_char_height, bool create_gl_textures = true);
+    bool createsGLTextures() const { return mCreateGLTextures; }
 
     void reset();
 
@@ -69,6 +69,7 @@ protected:
     static U32 getNumComponents(EFontGlyphType bitmap_type);
 
 private:
+    bool mCreateGLTextures = true;
     S32 mBitmapWidth = 0;
     S32 mBitmapHeight = 0;
     S32 mCurrentOffsetX[static_cast<U32>(EFontGlyphType::Count)] = { 1 };

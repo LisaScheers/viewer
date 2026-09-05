@@ -30,5 +30,5 @@
 
 extern bool gSDLMainHandled;
 
-void init_sdl(const std::string& app_name);
+bool init_sdl(const std::string& app_name);
 void quit_sdl();

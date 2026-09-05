@@ -385,7 +385,7 @@ public:
     bool isForSculptOnly() const;
 
     //raw image management
-    LLImageRaw* getRawImage()const { return mRawImage ;}
+    LLImageRaw* getRawImage() const override { return mRawImage; }
     S32         getRawImageLevel() const {return mRawDiscardLevel;}
     bool        isRawImageValid()const { return mIsRawImageValid ; }
     void        forceToSaveRawImage(S32 desired_discard = 0, F32 kept_time = 0.f) ;

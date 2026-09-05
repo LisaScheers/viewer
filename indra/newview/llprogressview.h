@@ -46,7 +46,7 @@ class LLProgressView :
     LOG_CLASS(LLProgressView);
 
 public:
-    LLProgressView();
+    explicit LLProgressView(bool enable_media = true);
     virtual ~LLProgressView();
 
     bool postBuild();
@@ -83,6 +83,8 @@ public:
     bool onAlertModal(const LLSD& sd);
 
 protected:
+    bool mEnableMedia = true;
+    boost::signals2::scoped_connection mAlertConnection;
     LLProgressBar* mProgressBar;
     LLMediaCtrl* mMediaCtrl;
     LLTextBox* mProgressText = nullptr;

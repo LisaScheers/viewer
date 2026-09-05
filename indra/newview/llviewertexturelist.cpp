@@ -1616,6 +1616,10 @@ void LLUIImageList::cleanUp()
 
 LLUIImagePtr LLUIImageList::getUIImageByID(const LLUUID& image_id, S32 priority)
 {
+    if (mCPUImages)
+    {
+        LL_ERRS("VulkanUI") << "Remote UI image is outside the local progress slice: " << image_id << LL_ENDL;
+    }
     LL_PROFILE_ZONE_SCOPED_CATEGORY_TEXTURE;
     // use id as image name
     std::string image_name = image_id.asString();
@@ -1635,6 +1639,10 @@ LLUIImagePtr LLUIImageList::getUIImageByID(const LLUUID& image_id, S32 priority)
 
 LLUIImagePtr LLUIImageList::getUIImage(const std::string& image_name, S32 priority)
 {
+    if (mCPUImages && !mCPUDeclarationsLoaded && !initFromFile())
+    {
+        LL_ERRS("VulkanUI") << "Cannot read skin image declarations" << LL_ENDL;
+    }
     LL_PROFILE_ZONE_SCOPED_CATEGORY_TEXTURE;
     // look for existing image
     uuid_ui_image_map_t::iterator found_it = mUIImages.find(image_name);
@@ -1653,6 +1661,40 @@ LLUIImagePtr LLUIImageList::loadUIImageByName(const std::string& name, const std
                                               bool use_mips, const LLRect& scale_rect, const LLRect& clip_rect, LLViewerTexture::EBoostLevel boost_priority,
                                               LLUIImage::EScaleStyle scale_style)
 {
+    if (mCPUImages)
+    {
+        class CPUTexture final : public LLTexture
+        {
+        public:
+            explicit CPUTexture(LLImageRaw* raw) : mRaw(raw) {}
+            LLImageRaw* getRawImage() const override { return mRaw; }
+            S32 getWidth(S32 = -1) const override { return mRaw->getWidth(); }
+            S32 getHeight(S32 = -1) const override { return mRaw->getHeight(); }
+            void setKnownDrawSize(S32, S32) override {}
+        private:
+            LLPointer<LLImageRaw> mRaw;
+        };
+        CPUImageDeclaration declaration{filename, scale_rect, clip_rect, scale_style};
+        if (auto found = mCPUDeclarations.find(name); found != mCPUDeclarations.end()) declaration = found->second;
+        const auto path = gDirUtilp->findSkinnedFilename(LLDir::TEXTURES, declaration.file);
+        LLPointer<LLImageFormatted> formatted = LLImageFormatted::createFromExtension(declaration.file);
+        LLPointer<LLImageRaw> raw = new LLImageRaw;
+        if (path.empty() || !formatted || !formatted->load(path) || !formatted->decode(raw, 0.f) || !raw->getData())
+        {
+            LL_ERRS("VulkanUI") << "Cannot decode local skin image: " << declaration.file << LL_ENDL;
+        }
+        LLUIImagePtr image = new LLUIImage(name, new CPUTexture(raw));
+        image->setScaleStyle(declaration.style);
+        const auto normalized = [](const LLRect& rect, F32 width, F32 height)
+        {
+            return LLRectf(llclamp(rect.mLeft / width, 0.f, 1.f), llclamp(rect.mTop / height, 0.f, 1.f),
+                           llclamp(rect.mRight / width, 0.f, 1.f), llclamp(rect.mBottom / height, 0.f, 1.f));
+        };
+        if (declaration.clip != LLRect::null) image->setClipRegion(normalized(declaration.clip, raw->getWidth(), raw->getHeight()));
+        if (declaration.scale != LLRect::null) image->setScaleRegion(normalized(declaration.scale, image->getWidth(), image->getHeight()));
+        mUIImages.emplace(name, image);
+        return image;
+    }
     LL_PROFILE_ZONE_SCOPED_CATEGORY_TEXTURE;
     if (boost_priority == LLGLTexture::BOOST_NONE)
     {
@@ -1891,6 +1933,17 @@ bool LLUIImageList::initFromFile()
         NUM_PASSES
     };
 
+    if (mCPUImages)
+    {
+        for (const auto& [name, image] : merged_declarations)
+        {
+            mCPUDeclarations.emplace(name, CPUImageDeclaration{
+                image.file_name.isProvided() ? image.file_name() : image.name(), image.scale(), image.clip(), image.scale_type()});
+        }
+        mCPUDeclarationsLoaded = true;
+        return true;
+    }
+
     for (S32 cur_pass = PASS_DECODE_NOW; cur_pass < NUM_PASSES; cur_pass++)
     {
         for (std::map<std::string, UIImageDeclaration>::const_iterator image_it = merged_declarations.begin();
@@ -1925,5 +1978,4 @@ bool LLUIImageList::initFromFile()
     }
     return true;
 }
-
 

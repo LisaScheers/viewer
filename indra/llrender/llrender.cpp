@@ -53,7 +53,117 @@ extern void APIENTRY gl_debug_callback(GLenum source,
 ;
 #endif
 
+struct LLUIRenderRecording
+{
+    LLUIRender::Frame frame;
+    LLUIRender::Draw state;
+    std::vector<LLPointer<LLImageRaw>> images;
+    std::array<LLVector4a, 4096> vertices;
+    std::array<LLVector2, 4096> uvs;
+    std::array<LLColor4U, 4096> colors;
+};
+
 thread_local LLRender gGL;
+
+void LLRender::initUIRecording()
+{
+    llassert_always(!mBuffer && !mUIRecording);
+    mUIRecording = std::make_unique<LLUIRenderRecording>();
+    mVerticesp = mUIRecording->vertices.data();
+    mTexcoordsp = mUIRecording->uvs.data();
+    mColorsp = mUIRecording->colors.data();
+    mCount = 0;
+}
+
+void LLRender::beginUIFrame(U32 width, U32 height)
+{
+    llassert_always(mUIRecording && !mCount && width && height);
+    auto& recording = *mUIRecording;
+    recording.frame = {};
+    recording.frame.width = width;
+    recording.frame.height = height;
+    recording.state = {};
+    recording.state.width = width;
+    recording.state.height = height;
+    recording.images.clear();
+    recording.images.emplace_back(nullptr); // index zero is the solid white image
+    matrixMode(MM_MODELVIEW);
+    loadIdentity();
+}
+
+void LLRender::bindUIImage(LLImageRaw* image)
+{
+    llassert_always(mUIRecording);
+    flush();
+    auto& recording = *mUIRecording;
+    auto found = std::find(recording.images.begin(), recording.images.end(), image);
+    if (found == recording.images.end())
+    {
+        recording.state.image = static_cast<U32>(recording.images.size());
+        recording.images.emplace_back(image);
+    }
+    else recording.state.image = static_cast<U32>(found - recording.images.begin());
+}
+
+void LLRender::setUIClip(S32 left, S32 bottom, S32 right, S32 top)
+{
+    flush();
+    auto& recording = *mUIRecording;
+    const S32 width = recording.frame.width, height = recording.frame.height;
+    left = llclamp(left, 0, width);
+    right = llclamp(right, left, width);
+    bottom = llclamp(bottom, 0, height);
+    top = llclamp(top, bottom, height);
+    recording.state.x = left;
+    recording.state.y = height - top;
+    recording.state.width = right - left;
+    recording.state.height = top - bottom;
+}
+
+void LLRender::resetUIClip()
+{
+    setUIClip(0, 0, mUIRecording->frame.width, mUIRecording->frame.height);
+}
+
+void LLRender::setUIAlphaMask(bool enabled)
+{
+    flush();
+    mUIRecording->state.alphaMask = enabled;
+}
+
+LLUIRender::Frame LLRender::finishUIFrame()
+{
+    flush();
+    auto& recording = *mUIRecording;
+    // Snapshot after traversal: glyph insertion can update an atlas after its
+    // first draw. The completed frame borrows neither widgets nor mutable pixels.
+    for (const auto& raw : recording.images)
+    {
+        if (!raw)
+        {
+            recording.frame.images.push_back({1, 1, {255, 255, 255, 255}});
+            continue;
+        }
+        LLUIRender::Image image;
+        image.width = raw->getWidth();
+        image.height = raw->getHeight();
+        const auto components = raw->getComponents();
+        llassert_always(components >= 1 && components <= 4);
+        image.rgba.resize(std::size_t(image.width) * image.height * 4);
+        for (std::size_t i = 0; i < image.rgba.size() / 4; ++i)
+        {
+            const U8* source = raw->getData() + i * components;
+            U8* target = image.rgba.data() + i * 4;
+            target[0] = source[0];
+            target[1] = components >= 3 ? source[1] : source[0];
+            target[2] = components >= 3 ? source[2] : source[0];
+            target[3] = components == 4 ? source[3] : components == 2 ? source[1] : 255;
+        }
+        recording.frame.images.push_back(std::move(image));
+    }
+    recording.images.clear();
+    return std::move(recording.frame);
+}
 
 // Handy copies of last good GL matrices
 F32 gGLModelView[16];
@@ -148,6 +258,11 @@ void LLTexUnit::refreshState(void)
 
 void LLTexUnit::activate(void)
 {
+    if (gGL.isUIRecording())
+    {
+        llassert_always(mIndex == 0);
+        return;
+    }
     if (mIndex < 0) return;
 
     if ((S32)gGL.mCurrTextureUnitIndex != mIndex || gGL.mDirty)
@@ -214,6 +329,12 @@ void LLTexUnit::bindFast(LLTexture* texture)
 
 bool LLTexUnit::bind(LLTexture* texture, bool for_rendering, bool forceBind)
 {
+    if (gGL.isUIRecording())
+    {
+        llassert_always(mIndex == 0 && texture && texture->getRawImage());
+        gGL.bindUIImage(texture->getRawImage());
+        return true;
+    }
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
     stop_glerror();
     if (mIndex >= 0)
@@ -410,6 +531,12 @@ bool LLTexUnit::bindManual(eTextureType type, U32 texture, bool hasMips)
 
 void LLTexUnit::unbind(eTextureType type)
 {
+    if (gGL.isUIRecording())
+    {
+        llassert_always(mIndex == 0);
+        gGL.bindUIImage(nullptr);
+        return;
+    }
     stop_glerror();
 
     if (mIndex < 0) return;
@@ -830,6 +957,7 @@ void LLRender::resetVertexBuffer()
 void LLRender::shutdown()
 {
     resetVertexBuffer();
+    mUIRecording.reset();
 }
 
 void LLRender::refreshState(void)
@@ -1339,6 +1467,11 @@ void LLRender::setSceneBlendType(eBlendType type)
 
 void LLRender::blendFunc(eBlendFactor sfactor, eBlendFactor dfactor)
 {
+    if (isUIRecording())
+    {
+        llassert_always(sfactor == BF_SOURCE_ALPHA && dfactor == BF_ONE_MINUS_SOURCE_ALPHA);
+        return;
+    }
     llassert(sfactor < BF_UNDEF);
     llassert(dfactor < BF_UNDEF);
     if (mCurrBlendColorSFactor != sfactor || mCurrBlendColorDFactor != dfactor ||
@@ -1491,6 +1624,26 @@ void LLRender::end()
 
 void LLRender::flush()
 {
+    if (mUIRecording)
+    {
+        if (!mCount) return;
+        llassert_always(mMode == TRIANGLES && mCount % 3 == 0);
+        auto& recording = *mUIRecording;
+        auto draw = recording.state;
+        draw.first = static_cast<U32>(recording.frame.vertices.size());
+        draw.count = mCount;
+        for (U32 i = 0; i < mCount; ++i)
+        {
+            const F32* position = mVerticesp[i].getF32ptr();
+            const glm::vec4 transformed = getModelviewMatrix() * glm::vec4(position[0], position[1], position[2], 1.f);
+            const auto& color = mColorsp[i];
+            recording.frame.vertices.push_back({transformed.x, transformed.y, mTexcoordsp[i].mV[0], mTexcoordsp[i].mV[1],
+                                                {color.mV[0], color.mV[1], color.mV[2], color.mV[3]}});
+        }
+        recording.frame.draws.push_back(draw);
+        resetStriders(mCount);
+        return;
+    }
     STOP_GLERROR;
     if (mCount > 0)
     {

@@ -240,6 +240,7 @@ GLViewRef createOpenGLView(NSWindowRef window, unsigned int samples, bool vsync)
 
 void glSwapBuffers(void* context)
 {
+    recordMacOSXGLSwapAttempt();
     [(NSOpenGLContext*)context flushBuffer];
 }
 
@@ -262,6 +263,13 @@ unsigned long getVramSize(GLViewRef view)
 float getDeviceUnitSize(GLViewRef view)
 {
     return [(LLOpenGLView*)view convertSizeToBacking:NSMakeSize(1, 1)].width;
+}
+
+void getBackingScale(GLViewRef view, float* scale_x, float* scale_y)
+{
+    NSSize backing_size = [(LLOpenGLView*)view convertSizeToBacking:NSMakeSize(1, 1)];
+    *scale_x = backing_size.width;
+    *scale_y = backing_size.height;
 }
 
 CGRect getContentViewRect(NSWindowRef window)
@@ -289,6 +297,13 @@ void setWindowSize(NSWindowRef window, int width, int height)
     frame.size.width = width;
     frame.size.height = height;
     [(LLNSWindow*)window setFrame:frame display:TRUE];
+}
+
+void setWindowContentSize(NSWindowRef window, GLViewRef view, int width, int height)
+{
+    NSSize backing_size = NSMakeSize(width, height);
+    NSSize content_size = [(NSOpenGLView*)view convertSizeFromBacking:backing_size];
+    [(LLNSWindow*)window setContentSize:content_size];
 }
 
 void setWindowPos(NSWindowRef window, float* pos)
@@ -376,6 +391,11 @@ void commitCurrentPreedit(GLViewRef glView)
 void allowDirectMarkedTextInput(bool allow, GLViewRef glView)
 {
     [(LLOpenGLView*)glView allowMarkedTextInput:allow];
+}
+
+bool isWindowMiniaturized(NSWindowRef window)
+{
+    return [(NSWindow*)window isMiniaturized];
 }
 
 NSWindowRef getMainAppWindow()

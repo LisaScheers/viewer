@@ -106,6 +106,7 @@ set(viewer_SOURCE_FILES
     llappearancemgr.cpp
     llappviewer.cpp
     llappviewerlistener.cpp
+    llcontractparityargs.cpp
     llattachmentsmgr.cpp
     llaudiosourcevo.cpp
     llautoreplace.cpp
@@ -155,6 +156,8 @@ set(viewer_SOURCE_FILES
     lldonotdisturbnotificationstorage.cpp
     lldndbutton.cpp
     lldrawable.cpp
+    lldrawinfo.cpp
+    lldrawinfotranslator.cpp
     lldrawpool.cpp
     lldrawpoolalpha.cpp
     lldrawpoolavatar.cpp
@@ -402,6 +405,8 @@ set(viewer_SOURCE_FILES
     llmarketplacenotifications.cpp
     llmaterialeditor.cpp
     llmaterialmgr.cpp
+    llmaterialparity.cpp
+    lltextureuploadparity.cpp
     llmediactrl.cpp
     llmediadataclient.cpp
     llmenuoptionpathfindingrebakenavmesh.cpp
@@ -679,6 +684,7 @@ set(viewer_SOURCE_FILES
     llviewerfoldertype.cpp
     llviewergenericmessage.cpp
     llviewergesture.cpp
+    llviewergraphicsapi.cpp
     llviewerhelp.cpp
     llviewerhelputil.cpp
     llviewerhome.cpp
@@ -755,6 +761,10 @@ set(viewer_SOURCE_FILES
     pipeline.cpp
     )
 
+if (LL_VULKAN_SDL_WSI OR LL_VULKAN_MACOS_WSI)
+  list(APPEND viewer_SOURCE_FILES llviewervulkanruntime.cpp)
+endif ()
+
 set(VIEWER_BINARY_NAME "secondlife-bin" CACHE STRING
     "The name of the viewer executable to create.")
 
@@ -790,6 +800,7 @@ set(viewer_HEADER_FILES
     llappearancemgr.h
     llappviewer.h
     llappviewerlistener.h
+    llcontractparityargs.h
     llattachmentsmgr.h
     llaudiosourcevo.h
     llautoreplace.h
@@ -800,6 +811,9 @@ set(viewer_HEADER_FILES
     llavatarpropertiesprocessor.h
     llavatarrenderinfoaccountant.h
     llavatarrendernotifier.h
+    llbenchmarkappearance.h
+    llbenchmarkdisplay.h
+    llcachemigration.h
     llblockedlistitem.h
     llblocklist.h
     llbox.h
@@ -839,6 +853,7 @@ set(viewer_HEADER_FILES
     lldonotdisturbnotificationstorage.h
     lldndbutton.h
     lldrawable.h
+    lldrawinfotranslator.h
     lldrawpool.h
     lldrawpoolalpha.h
     lldrawpoolavatar.h
@@ -1087,6 +1102,8 @@ set(viewer_HEADER_FILES
     llmarketplacenotifications.h
     llmaterialeditor.h
     llmaterialmgr.h
+    llmaterialparity.h
+    lltextureuploadparity.h
     llmediactrl.h
     llmediadataclient.h
     llmenuoptionpathfindingrebakenavmesh.h
@@ -1357,6 +1374,7 @@ set(viewer_HEADER_FILES
     llviewerfoldertype.h
     llviewergenericmessage.h
     llviewergesture.h
+    llviewergraphicsapi.h
     llviewerhelp.h
     llviewerhome.h
     llviewerinventory.h
@@ -1432,6 +1450,10 @@ set(viewer_HEADER_FILES
     pipeline.h
     roles_constants.h
     )
+
+if (LL_VULKAN_SDL_WSI OR LL_VULKAN_MACOS_WSI)
+  list(APPEND viewer_HEADER_FILES llviewervulkanruntime.h)
+endif ()
 
 source_group("CMake Rules" FILES ViewerInstall.cmake)
 
@@ -1784,13 +1806,55 @@ set_source_files_properties(${viewer_CHARACTER_FILES}
 list(APPEND viewer_SOURCE_FILES ${viewer_CHARACTER_FILES})
 
 set(viewer_MISC_FILES
+    clean_vulkan_material_install.cmake
     viewer_manifest.py
+    vulkan_material_artifact_delivery.py
+    tests/test_vulkan_material_artifact_delivery.py
     )
 
 set_source_files_properties(${viewer_MISC_FILES}
                             PROPERTIES HEADER_FILE_ONLY TRUE)
 
 list(APPEND viewer_SOURCE_FILES ${viewer_MISC_FILES})
+
+set(VULKAN_MATERIAL_ARTIFACT_MANIFEST_ARGS)
+set(VULKAN_MATERIAL_ARTIFACT_DEPENDENCIES)
+set(VULKAN_MATERIAL_ARTIFACT_STATE_FILE
+    "${CMAKE_CURRENT_BINARY_DIR}/vulkan_material_artifact_delivery.state")
+file(GENERATE
+    OUTPUT "${VULKAN_MATERIAL_ARTIFACT_STATE_FILE}"
+    CONTENT "${LL_VULKAN_TONEMAP_TEST}\n")
+set(VULKAN_MATERIAL_ARTIFACT_FILE_DEPENDENCIES
+    "${VULKAN_MATERIAL_ARTIFACT_STATE_FILE}")
+if (LL_VULKAN_TONEMAP_TEST)
+  if (NOT LL_VULKAN_MATERIAL_PRODUCTION_ARTIFACT_DIR OR
+      NOT LL_VULKAN_MATERIAL_PRODUCTION_VERTEX_SPV OR
+      NOT LL_VULKAN_MATERIAL_PRODUCTION_FRAGMENT_SPV OR
+      NOT LL_VULKAN_MATERIAL_PRODUCTION_VERIFIED_STAMP OR
+      NOT TARGET llvulkanmaterialproduction_shaders)
+    message(FATAL_ERROR
+        "The Vulkan material artifact directory and validation target must come from llrender")
+  endif ()
+  list(APPEND VULKAN_MATERIAL_ARTIFACT_MANIFEST_ARGS
+      "--vulkan_material_artifact_dir=${LL_VULKAN_MATERIAL_PRODUCTION_ARTIFACT_DIR}")
+  list(APPEND VULKAN_MATERIAL_ARTIFACT_DEPENDENCIES
+      llvulkanmaterialproduction_shaders)
+  list(APPEND VULKAN_MATERIAL_ARTIFACT_FILE_DEPENDENCIES
+      "${LL_VULKAN_MATERIAL_PRODUCTION_VERTEX_SPV}"
+      "${LL_VULKAN_MATERIAL_PRODUCTION_FRAGMENT_SPV}"
+      "${LL_VULKAN_MATERIAL_PRODUCTION_VERIFIED_STAMP}")
+
+  add_test(
+      NAME VULKAN_MATERIAL_ARTIFACT_DELIVERY
+      COMMAND "${PYTHON_EXECUTABLE}" -B
+              "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vulkan_material_artifact_delivery.py")
+  add_test(
+      NAME VULKAN_MATERIAL_ARTIFACT_MANIFEST_ARGUMENT
+      COMMAND "${PYTHON_EXECUTABLE}" -B
+              "${CMAKE_CURRENT_SOURCE_DIR}/viewer_manifest.py"
+              --help
+              "--vulkan_material_artifact_dir=${LL_VULKAN_MATERIAL_PRODUCTION_ARTIFACT_DIR}")
+endif ()
 
 if (WINDOWS)
   file(GLOB viewer_INSTALLER_FILES installers/windows/*.nsi)
@@ -1805,11 +1869,33 @@ endif (WINDOWS)
 
 list(APPEND viewer_SOURCE_FILES ${viewer_HEADER_FILES})
 
+if (LL_RENDER_BENCHMARK)
+  set_property(SOURCE
+      llappviewer.cpp
+      llstatslistener.cpp
+      llviewerdisplay.cpp
+      llviewerwindow.cpp
+      llviewerstats.cpp
+      APPEND PROPERTY COMPILE_DEFINITIONS LL_RENDER_BENCHMARK=1)
+  set_property(SOURCE
+      llappviewer.cpp
+      llstatslistener.cpp
+      llviewerdisplay.cpp
+      llviewerwindow.cpp
+      PROPERTY SKIP_PRECOMPILE_HEADERS ON)
+endif()
+
 add_executable(${VIEWER_BINARY_NAME}
     WIN32
     MACOSX_BUNDLE
     ${viewer_SOURCE_FILES}
     )
+
+if (VULKAN_MATERIAL_ARTIFACT_DEPENDENCIES)
+  add_dependencies(
+      ${VIEWER_BINARY_NAME}
+      ${VULKAN_MATERIAL_ARTIFACT_DEPENDENCIES})
+endif ()
 
 target_include_directories(${VIEWER_BINARY_NAME} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 
@@ -2114,6 +2200,10 @@ target_link_libraries(${VIEWER_BINARY_NAME}
         ll::openxr
         )
 
+if (LL_VULKAN_MACOS_WSI)
+    target_link_libraries(${VIEWER_BINARY_NAME} llwindowmacosxvulkan)
+endif ()
+
 if (NOT DISABLE_WEBRTC)
     target_link_libraries(${VIEWER_BINARY_NAME} llwebrtc )
 endif()
@@ -2197,9 +2287,13 @@ if (LINUX)
         --source=${CMAKE_CURRENT_SOURCE_DIR}
         --touch=${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/.${product}.touched
         --versionfile=${CMAKE_CURRENT_BINARY_DIR}/viewer_version.txt
+        ${VULKAN_MATERIAL_ARTIFACT_MANIFEST_ARGS}
       DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/viewer_manifest.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_material_artifact_delivery.py
         ${COPY_INPUT_DEPENDENCIES}
+        ${VULKAN_MATERIAL_ARTIFACT_DEPENDENCIES}
+        ${VULKAN_MATERIAL_ARTIFACT_FILE_DEPENDENCIES}
       )
 
   if (PACKAGE)
@@ -2225,9 +2319,13 @@ if (LINUX)
       --grid=${GRID}
       --source=${CMAKE_CURRENT_SOURCE_DIR}
       --versionfile=${CMAKE_CURRENT_BINARY_DIR}/viewer_version.txt
+      ${VULKAN_MATERIAL_ARTIFACT_MANIFEST_ARGS}
     DEPENDS
       ${CMAKE_CURRENT_SOURCE_DIR}/viewer_manifest.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_material_artifact_delivery.py
       ${COPY_INPUT_DEPENDENCIES}
+      ${VULKAN_MATERIAL_ARTIFACT_DEPENDENCIES}
+      ${VULKAN_MATERIAL_ARTIFACT_FILE_DEPENDENCIES}
     COMMENT "Performing viewer_manifest copy"
     )
 
@@ -2280,10 +2378,7 @@ if (DARWIN)
      "${VIEWER_APP_BUNDLE}/Contents/Info.plist"
     )
 
-  add_custom_command(
-    TARGET ${VIEWER_BINARY_NAME} POST_BUILD
-    COMMAND ${PYTHON_EXECUTABLE}
-    ARGS
+  set(MAC_VIEWER_MANIFEST_COPY_ARGS
       ${CMAKE_CURRENT_SOURCE_DIR}/viewer_manifest.py
       --actions=copy
       --arch=${ARCH}
@@ -2301,7 +2396,32 @@ if (DARWIN)
       --grid=${GRID}
       --source=${CMAKE_CURRENT_SOURCE_DIR}
       --versionfile=${CMAKE_CURRENT_BINARY_DIR}/viewer_version.txt
+      ${VULKAN_MATERIAL_ARTIFACT_MANIFEST_ARGS})
+
+  add_custom_command(
+    TARGET ${VIEWER_BINARY_NAME} POST_BUILD
+    COMMAND ${PYTHON_EXECUTABLE}
+    ARGS ${MAC_VIEWER_MANIFEST_COPY_ARGS}
     )
+
+  set(MAC_VULKAN_MATERIAL_ARTIFACT_COPY_STAMP
+      "${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/.vulkan_material_artifacts.touched")
+  add_custom_command(
+      OUTPUT "${MAC_VULKAN_MATERIAL_ARTIFACT_COPY_STAMP}"
+      COMMAND ${PYTHON_EXECUTABLE}
+      ARGS ${MAC_VIEWER_MANIFEST_COPY_ARGS}
+      COMMAND "${CMAKE_COMMAND}" -E touch
+              "${MAC_VULKAN_MATERIAL_ARTIFACT_COPY_STAMP}"
+      DEPENDS
+      ${VIEWER_BINARY_NAME}
+      ${CMAKE_CURRENT_SOURCE_DIR}/viewer_manifest.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_material_artifact_delivery.py
+      ${VULKAN_MATERIAL_ARTIFACT_DEPENDENCIES}
+      ${VULKAN_MATERIAL_ARTIFACT_FILE_DEPENDENCIES}
+      COMMENT "Refreshing packaged Vulkan material artifacts"
+      VERBATIM)
+  add_custom_target(copy_m_vulkan_material_artifacts ALL
+      DEPENDS "${MAC_VULKAN_MATERIAL_ARTIFACT_COPY_STAMP}")
 
   add_dependencies(${VIEWER_BINARY_NAME} SLPlugin media_plugin_libvlc media_plugin_cef)
 
@@ -2313,6 +2433,7 @@ if (DARWIN)
 
   if (PACKAGE)
       add_custom_target(llpackage ALL DEPENDS ${VIEWER_BINARY_NAME})
+      add_dependencies(llpackage copy_m_vulkan_material_artifacts)
 
       add_custom_command(
         TARGET llpackage POST_BUILD
@@ -2337,6 +2458,7 @@ if (DARWIN)
               --touch=${CMAKE_CURRENT_BINARY_DIR}/$<IF:$<BOOL:${LL_GENERATOR_IS_MULTI_CONFIG}>,$<CONFIG>,>/.${product}.bat
               --versionfile=${CMAKE_CURRENT_BINARY_DIR}/viewer_version.txt
               ${SIGNING_SETTING}
+              ${VULKAN_MATERIAL_ARTIFACT_MANIFEST_ARGS}
       )
   endif (PACKAGE)
 endif (DARWIN)
@@ -2476,6 +2598,43 @@ if (LL_TESTS)
     "${test_libs}"
   )
 
+  LL_ADD_INTEGRATION_TEST(llbenchmarkdisplay
+    ""
+    "${test_libs}"
+  )
+
+  LL_ADD_INTEGRATION_TEST(llbenchmarkappearance
+    ""
+    "${test_libs}"
+  )
+
+  set(lldrawinfotranslator_test_sources
+    lldrawinfo.cpp
+    lldrawinfotranslator.cpp
+    tests/lldrawinfotranslator_texture_stub.cpp
+  )
+  LL_ADD_INTEGRATION_TEST(lldrawinfotranslator
+    "${lldrawinfotranslator_test_sources}"
+    "${test_libs};llrender;llrendercontract;OpenGL::GL"
+  )
+  target_include_directories(INTEGRATION_TEST_lldrawinfotranslator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  if (LINUX)
+    target_include_directories(INTEGRATION_TEST_lldrawinfotranslator PRIVATE
+      ${X11_X11_INCLUDE_PATH}
+      ${X11_Xlib_INCLUDE_PATH}
+    )
+  endif ()
+
+  LL_ADD_INTEGRATION_TEST(llcachemigration
+    ""
+    "${test_libs}"
+  )
+
+  LL_ADD_INTEGRATION_TEST(llcontractparityargs
+    llcontractparityargs.cpp
+    "${test_libs}"
+  )
+
   LL_ADD_INTEGRATION_TEST(llsechandler_basic
     llsechandler_basic.cpp
     "${test_libs}"
@@ -2513,6 +2672,18 @@ if (LL_TESTS)
     llviewernetwork.cpp
     "${test_libs}"
   )
+
+  LL_ADD_INTEGRATION_TEST(llviewergraphicsapi
+    llviewergraphicsapi.cpp
+    "${test_libs};llwindow"
+  )
+
+  if (LL_VULKAN_SDL_WSI OR LL_VULKAN_MACOS_WSI)
+    LL_ADD_INTEGRATION_TEST(llviewervulkanruntime
+      llviewervulkanruntime.cpp
+      "${test_libs};llwindow;llrender;llrendervulkaninstance;$<$<BOOL:${LL_VULKAN_MACOS_WSI}>:llwindowmacosxvulkan>"
+    )
+  endif ()
 
   LL_ADD_INTEGRATION_TEST(llviewerassetstats
     llviewerassetstats.cpp

@@ -62,8 +62,9 @@ const F32 FADE_TO_WORLD_TIME = 1.0f;
 static LLPanelInjector<LLProgressView> r("progress_view");
 
 // XUI: Translate
-LLProgressView::LLProgressView()
+LLProgressView::LLProgressView(bool enable_media)
 :   LLPanel(),
+    mEnableMedia(enable_media),
     mPercentDone( 0.f ),
     mMediaCtrl( NULL ),
     mMouseDownInActiveArea( false ),
@@ -88,9 +89,11 @@ bool LLProgressView::postBuild()
     // media control that is used to play intro video
     mMediaCtrl = getChild<LLMediaCtrl>("login_media_panel");
     mMediaCtrl->setVisible( false );        // hidden initially
-    mMediaCtrl->addObserver( this );        // watch events
-
-    LLViewerMedia::getInstance()->setOnlyAudibleMediaTextureID(mMediaCtrl->getTextureID());
+    if (mEnableMedia)
+    {
+        mMediaCtrl->addObserver(this);
+        LLViewerMedia::getInstance()->setOnlyAudibleMediaTextureID(mMediaCtrl->getTextureID());
+    }
 
     mCancelBtn = getChild<LLButton>("cancel_btn");
     mCancelBtn->setClickedCallback(  LLProgressView::onCancelButtonClicked, NULL );
@@ -108,7 +111,16 @@ bool LLProgressView::postBuild()
     // hidden initially, until we need it
     setVisible(false);
 
-    LLNotifications::instance().getChannel("AlertModal")->connectChanged(boost::bind(&LLProgressView::onAlertModal, this, _1));
+    // The local startup UI can be constructed before the application's modal
+    // notification handlers. Normal startup constructs that channel first.
+    if (auto channel = LLNotifications::instance().getChannel("AlertModal"))
+    {
+        mAlertConnection = channel->connectChanged(boost::bind(&LLProgressView::onAlertModal, this, _1));
+    }
+    else
+    {
+        LL_WARNS("ProgressView") << "Modal notification channel is not initialized; progress alerts are unavailable" << LL_ENDL;
+    }
 
     sInstance = this;
     return true;
@@ -147,6 +159,7 @@ bool LLProgressView::handleKeyHere(KEY key, MASK mask)
 
 void LLProgressView::revealIntroPanel()
 {
+    if (!mEnableMedia) return;
     // if user hasn't yet seen intro video
     std::string intro_url = gSavedSettings.getString("PostFirstLoginIntroURL");
     if ( intro_url.length() > 0 &&

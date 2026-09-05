@@ -108,14 +108,18 @@ NSWindowRef createNSWindow(int x, int y, int width, int height);
 #include <OpenGL/OpenGL.h>
 
 GLViewRef createOpenGLView(NSWindowRef window, unsigned int samples, bool vsync);
+void recordMacOSXGLContextAttempt() noexcept;
+void recordMacOSXGLSwapAttempt() noexcept;
 void glSwapBuffers(void* context);
 CGLContextObj getCGLContextObj(GLViewRef view);
 unsigned long getVramSize(GLViewRef view);
 float getDeviceUnitSize(GLViewRef view);
+void getBackingScale(GLViewRef view, float* scale_x, float* scale_y);
 CGRect getContentViewRect(NSWindowRef window);
 CGRect getBackingViewRect(NSWindowRef window, GLViewRef view);
 void getWindowSize(NSWindowRef window, float* size);
 void setWindowSize(NSWindowRef window, int width, int height);
+void setWindowContentSize(NSWindowRef window, GLViewRef view, int width, int height);
 void getCursorPos(NSWindowRef window, float* pos);
 void makeWindowOrderFront(NSWindowRef window);
 void convertScreenToWindow(NSWindowRef window, float *coord);
@@ -178,6 +182,7 @@ void getPreeditLocation(float *location, unsigned int length);
 void allowDirectMarkedTextInput(bool allow, GLViewRef glView);
 
 NSWindowRef getMainAppWindow();
+bool isWindowMiniaturized(NSWindowRef window);
 GLViewRef getGLView();
 
 unsigned int getModifiers();

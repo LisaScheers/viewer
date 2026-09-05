@@ -1,0 +1,814 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A sequential, commit-by-commit todo plan for diagnosing Second Life viewer performance and migrating the renderer toward Vulkan.">
+  <title>Second Life renderer modernization todo plan</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #000;
+      --panel: #090909;
+      --panel2: #101010;
+      --text: #fff;
+      --muted: #aaa;
+      --dim: #747474;
+      --line: #292929;
+      --strong-line: #484848;
+      --cyan: #67ddff;
+      --green: #7ff0a6;
+      --amber: #ffca67;
+      --red: #ff8585;
+      --violet: #caa8ff;
+      --measure: 1180px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      text-rendering: optimizeLegibility;
+    }
+
+    a { color: var(--cyan); text-underline-offset: 3px; }
+    a:hover { color: #b9f1ff; }
+
+    code {
+      color: #ddd;
+      font: .9em/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+
+    .wrap { width: min(var(--measure), calc(100% - 40px)); margin: 0 auto; }
+
+    header {
+      padding: 70px 0 52px;
+      border-bottom: 1px solid var(--strong-line);
+      background:
+        linear-gradient(112deg, rgba(103, 221, 255, .075), transparent 38%),
+        radial-gradient(circle at 86% 16%, rgba(202, 168, 255, .08), transparent 30%);
+    }
+
+    .eyebrow {
+      margin: 0 0 18px;
+      color: var(--cyan);
+      font: 700 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 1020px;
+      margin: 0;
+      font-size: clamp(42px, 7vw, 84px);
+      font-weight: 760;
+      line-height: .98;
+      letter-spacing: -.052em;
+    }
+
+    .lede {
+      max-width: 890px;
+      margin: 28px 0 0;
+      color: #d4d4d4;
+      font-size: clamp(18px, 2.1vw, 24px);
+      line-height: 1.42;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px 27px;
+      margin-top: 32px;
+      color: var(--dim);
+      font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--line);
+      background: rgba(0, 0, 0, .94);
+      backdrop-filter: blur(12px);
+    }
+
+    nav .wrap {
+      display: flex;
+      gap: 22px;
+      overflow-x: auto;
+      padding-top: 12px;
+      padding-bottom: 12px;
+      scrollbar-width: none;
+    }
+
+    nav a {
+      flex: none;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+    }
+
+    nav a:hover { color: #fff; }
+
+    main section {
+      padding: 70px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h2 {
+      max-width: 900px;
+      margin: 0 0 33px;
+      font-size: clamp(29px, 4vw, 48px);
+      line-height: 1.07;
+      letter-spacing: -.035em;
+    }
+
+    h3 {
+      margin: 0 0 12px;
+      font-size: 20px;
+      line-height: 1.25;
+      letter-spacing: -.012em;
+    }
+
+    h4 {
+      margin: 0 0 10px;
+      font-size: 14px;
+      line-height: 1.3;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    p { margin: 0 0 16px; }
+    p:last-child { margin-bottom: 0; }
+    ul, ol { margin: 0; padding-left: 21px; }
+    li + li { margin-top: 7px; }
+
+    .section-intro {
+      max-width: 850px;
+      margin: -14px 0 36px;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .status-line {
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      border-top: 1px solid var(--strong-line);
+      border-bottom: 1px solid var(--strong-line);
+    }
+
+    .status-line > div { padding: 22px 24px 23px 0; }
+    .status-line > div + div { border-left: 1px solid var(--line); padding-left: 24px; }
+    .status-line strong { display: block; margin-bottom: 7px; color: var(--green); }
+    .status-line p { color: var(--muted); }
+
+    .rule {
+      margin-top: 30px;
+      padding: 22px 24px;
+      border-left: 3px solid var(--amber);
+      background: #0c0a05;
+      color: #ded8c9;
+    }
+
+    .rule strong { color: #fff; }
+
+    .protocol {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      margin-top: 32px;
+      border: 1px solid var(--strong-line);
+      background: var(--line);
+    }
+
+    .protocol > div { padding: 22px; background: var(--panel); }
+    .protocol .number { display: block; margin-bottom: 15px; color: var(--cyan); font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .protocol p { color: var(--muted); font-size: 14px; }
+
+    .overview { border-top: 1px solid var(--strong-line); }
+
+    .stage-row {
+      display: grid;
+      grid-template-columns: 82px minmax(210px, .8fr) minmax(300px, 1.5fr) minmax(190px, .75fr);
+      gap: 24px;
+      padding: 22px 0;
+      border-bottom: 1px solid var(--line);
+      align-items: start;
+    }
+
+    .stage-row .id {
+      color: var(--cyan);
+      font: 700 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    .stage-row.current { background: linear-gradient(90deg, rgba(103, 221, 255, .075), transparent 72%); }
+    .stage-row.current .id { color: var(--green); }
+    .stage-row.completed .id { color: var(--green); }
+    .stage-row.completed h3::after { content: "  ✓"; color: var(--green); }
+    .stage-row h3 { font-size: 17px; }
+    .stage-row p { color: var(--muted); font-size: 14px; }
+    .stage-row .commit { color: #d6d6d6; font-size: 13px; }
+    .stage-row .commit span { display: block; margin-bottom: 7px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+    .stage-row .commit span:not(:first-child) { margin-top: 13px; }
+
+    .scope-grid {
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 44px;
+    }
+
+    .in-out {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      border: 1px solid var(--strong-line);
+      background: var(--line);
+    }
+
+    .in-out > div { padding: 24px; background: var(--panel); }
+    .in-out h3 { color: var(--green); }
+    .in-out .out h3 { color: var(--red); }
+    .in-out li { color: var(--muted); }
+
+    .workstream {
+      margin-top: 28px;
+      border-top: 1px solid var(--strong-line);
+    }
+
+    .work-item {
+      display: grid;
+      grid-template-columns: 40px minmax(0, 1fr) minmax(240px, .7fr);
+      gap: 20px;
+      padding: 25px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .work-item .box {
+      width: 19px;
+      height: 19px;
+      margin-top: 3px;
+      border: 1px solid #646464;
+      background: #050505;
+    }
+
+    .completed-stage .work-item .box {
+      display: grid;
+      place-items: center;
+      border-color: #31503a;
+      color: var(--green);
+      background: #071009;
+      font: 700 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .completed-stage .work-item .box::after { content: "✓"; }
+
+    .work-item p, .work-item li { color: var(--muted); }
+    .work-item .proof { color: #d3d3d3; font-size: 13px; }
+    .work-item .proof strong { display: block; margin-bottom: 8px; color: var(--amber); text-transform: uppercase; letter-spacing: .07em; }
+
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      margin-top: 28px;
+      border: 1px solid var(--strong-line);
+      background: var(--line);
+    }
+
+    .scenario-grid > div { padding: 21px; background: var(--panel); }
+    .scenario-grid h3 { color: var(--cyan); font-size: 16px; }
+    .scenario-grid p { color: var(--muted); font-size: 14px; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--strong-line); }
+    table { width: 100%; min-width: 820px; border-collapse: collapse; }
+    th, td { padding: 16px 17px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--dim); background: #070707; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+    td { color: #d2d2d2; }
+    td:first-child { color: #fff; font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+
+    .files {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1px;
+      margin-top: 28px;
+      border: 1px solid var(--strong-line);
+      background: var(--line);
+    }
+
+    .files > div { padding: 22px; background: var(--panel); }
+    .files p { color: var(--muted); font-size: 14px; }
+
+    .gate-list { border-top: 1px solid var(--strong-line); }
+
+    .gate {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 18px;
+      padding: 19px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .gate .mark { color: var(--green); font: 700 19px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .gate p { color: var(--muted); }
+
+    .decision-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1px;
+      margin-top: 28px;
+      border: 1px solid var(--strong-line);
+      background: var(--line);
+    }
+
+    .decision-grid > div { padding: 23px; background: var(--panel); }
+    .decision-grid h3 { font-size: 16px; }
+    .decision-grid p { color: var(--muted); font-size: 14px; }
+    .decision-grid .continue h3 { color: var(--green); }
+    .decision-grid .pivot h3 { color: var(--amber); }
+    .decision-grid .pause h3 { color: var(--red); }
+    .decision-grid .separate h3 { color: var(--violet); }
+
+    .replan {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 34px;
+      margin-top: 32px;
+    }
+
+    .replan article {
+      padding: 23px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    .replan li { color: var(--muted); }
+
+    .risk-list { counter-reset: risk; border-top: 1px solid var(--strong-line); }
+
+    .risk {
+      counter-increment: risk;
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr) minmax(250px, .8fr);
+      gap: 20px;
+      padding: 21px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .risk::before {
+      content: counter(risk, decimal-leading-zero);
+      color: var(--dim);
+      font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .risk p { color: var(--muted); }
+    .risk .control { color: #d4d4d4; font-size: 13px; }
+    .risk .control strong { color: var(--green); }
+
+    .commit-card {
+      padding: 25px;
+      border: 1px solid #31503a;
+      background: #071009;
+    }
+
+    .commit-card h3 { color: var(--green); }
+    .commit-card pre {
+      margin: 18px 0 0;
+      padding: 17px;
+      overflow-x: auto;
+      border: 1px solid #294331;
+      background: #030704;
+      color: #e3f6e8;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+    }
+
+    .change-log { border-top: 1px solid var(--strong-line); }
+    .change {
+      display: grid;
+      grid-template-columns: 130px 160px 1fr;
+      gap: 20px;
+      padding: 17px 0;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .change time, .change .version { color: #ddd; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+    footer { padding: 36px 0 58px; color: var(--dim); font-size: 13px; }
+
+    @media (max-width: 940px) {
+      .protocol { grid-template-columns: repeat(2, 1fr); }
+      .stage-row { grid-template-columns: 70px 1fr 1.25fr; }
+      .stage-row .commit { grid-column: 2 / -1; }
+      .scope-grid, .replan { grid-template-columns: 1fr; }
+      .scenario-grid { grid-template-columns: repeat(2, 1fr); }
+      .risk { grid-template-columns: 36px 1fr; }
+      .risk .control { grid-column: 2; }
+    }
+
+    @media (max-width: 650px) {
+      .wrap { width: min(100% - 26px, var(--measure)); }
+      header { padding: 52px 0 38px; }
+      main section { padding: 52px 0; }
+      .status-line, .protocol, .stage-row, .in-out, .scenario-grid, .files, .decision-grid, .change { grid-template-columns: 1fr; }
+      .status-line > div + div { border-left: 0; border-top: 1px solid var(--line); padding-left: 0; }
+      .stage-row { gap: 10px; }
+      .stage-row .commit { grid-column: auto; }
+      .work-item { grid-template-columns: 28px 1fr; }
+      .work-item .proof { grid-column: 2; }
+      .change { gap: 5px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <p class="eyebrow">Rolling renderer plan</p>
+      <h1>One stage. One commit. Then replan.</h1>
+      <p class="lede">Stages 1 through 4 now provide a reproducible, isolated, display-normalized, fail-closed benchmark contract. Stage 5 has the only detailed checklist: collect the first controlled Apple Silicon native OpenGL baseline from that committed contract.</p>
+      <div class="meta">
+        <span>Second Life viewer</span>
+        <span>Plan v3</span>
+        <span>Repository snapshot through Stage 4</span>
+        <span>26 August 2026</span>
+      </div>
+    </div>
+  </header>
+
+  <nav aria-label="Plan sections">
+    <div class="wrap">
+      <a href="#rules">Rules</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="#stage-5">Stage 5</a>
+      <a href="#stage-5-gates">Exit gates</a>
+      <a href="#reanalysis">Reanalysis</a>
+      <a href="#stage-5-risks">Risks</a>
+      <a href="#stage-5-commit">Commit</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="rules">
+      <div class="wrap">
+        <h2>Execution rules</h2>
+        <div class="status-line">
+          <div>
+            <strong>Current stage</strong>
+            <span>Stage 5</span>
+          </div>
+          <div>
+            <strong>Plan state</strong>
+            <p>Stages 1 through 4 are complete. Stage 5 has the only active implementation checklist. Stage 6 and all renderer implementation stages remain locked and deliberately coarse.</p>
+          </div>
+        </div>
+
+        <div class="rule">
+          <strong>No parallel stages.</strong> A stage begins only after the previous stage passes its checks, updates this plan with actual results, expands exactly one next stage, and lands as a reviewable commit. If a stage grows too large for one commit, split it during the preceding reanalysis. Do not discover that halfway through implementation.
+        </div>
+
+        <div class="protocol">
+          <div><span class="number">01</span><h3>Execute</h3><p>Work only from the detailed checklist for the active stage. Preserve unrelated changes.</p></div>
+          <div><span class="number">02</span><h3>Verify</h3><p>Run the stage-specific tests and collect the evidence named in its exit gates.</p></div>
+          <div><span class="number">03</span><h3>Reanalyze</h3><p>Compare the result with the remaining roadmap. Remove assumptions that the evidence disproves.</p></div>
+          <div><span class="number">04</span><h3>Commit</h3><p>Update this same plan, detail the next stage, then commit the stage as one coherent change.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="roadmap">
+      <div class="wrap">
+        <h2>Sequential roadmap</h2>
+        <p class="section-intro">The evidence work is now split into reviewable commits. Only Stage 5 is detailed. Every later boundary remains provisional until the preceding stage updates this plan.</p>
+
+        <div class="overview">
+          <div class="stage-row completed">
+            <div class="id">Stage 1</div>
+            <div><h3>Build the benchmark suite</h3><p>Low-overhead phases, resources, manifests, runner, reporter, privacy, and native GL/Zink launch paths.</p></div>
+            <div><p>The first live matrix was invalid because destination, UI, cache, and asset work differed. No performance conclusion survived.</p></div>
+            <div class="commit"><span>Commit</span><code>771b86ba5e</code><span>Outcome</span>Measure first; require a controlled workload</div>
+          </div>
+
+          <div class="stage-row completed">
+            <div class="id">Stage 2</div>
+            <div><h3>Isolate macOS benchmark state</h3><p>Disposable profile, cache, settings, and first-use UI controls.</p></div>
+            <div><p>Benchmark launches no longer read or mutate the normal viewer profile. Smoke timings were explicitly discarded.</p></div>
+            <div class="commit"><span>Commit</span><code>cb376087bc</code><span>Outcome</span>Private, reproducible launch state</div>
+          </div>
+
+          <div class="stage-row completed">
+            <div class="id">Stage 3</div>
+            <div><h3>Normalize macOS display geometry</h3><p>1280×720 backing pixels and effective UI scale 1.0 on 1× and 2× displays.</p></div>
+            <div><p>A native Retina smoke proved the geometry contract. Its timing was discarded because display proof is not a baseline.</p></div>
+            <div class="commit"><span>Commit</span><code>6f726d9985</code><span>Outcome</span>Display contract complete</div>
+          </div>
+
+          <div class="stage-row completed">
+            <div class="id">Stage 4</div>
+            <div><h3>Make scene validity fail closed</h3><p>Schema 3, viewer facts, typed operator assertions, independent gate validation, and privacy.</p></div>
+            <div><p>This new reanalysis split supersedes the former combined Mac Stage 3. The contract landed without retained performance evidence.</p></div>
+            <div class="commit"><span>Commit</span><code>perf(renderer): enforce controlled scene validity</code><span>Outcome</span>Baseline may now run from a committed definition</div>
+          </div>
+
+          <div class="stage-row current">
+            <div class="id">Stage 5</div>
+            <div><h3>Capture Apple Silicon native OpenGL baseline</h3><p>One clean build, one warm prime, five valid measured repeats.</p></div>
+            <div><p>Characterize the current renderer on Apple Silicon. Stop if the controlled scene cannot pass every schema-3 gate. Keep raw results private.</p></div>
+            <div class="commit"><span>Depends on</span>Committed Stage 4 contract<span>Proposed commit</span><code>perf(renderer): capture Apple Silicon OpenGL baseline</code></div>
+          </div>
+
+          <div class="stage-row">
+            <div class="id">Stage 6</div>
+            <div><h3>Match an older hardware control</h3><p>Same platform, workload, commit, settings, and validity contract.</p></div>
+            <div><p>Provisional. Determine whether the report is a hardware-generation regression rather than a demanding scene or platform-wide behavior.</p></div>
+            <div class="commit"><span>Depends on</span>Stable Stage 5 baseline<span>Intent</span>Matched control evidence only</div>
+          </div>
+
+          <div class="stage-row">
+            <div class="id">Stage 7</div>
+            <div><h3>Trace the dominant slow-frame path</h3><p>Separate diagnostic capture, per-thread CPU, API waits, present, and GPU passes.</p></div>
+            <div><p>Provisional. Select one bounded current-path correction or one architecture experiment. Do not infer a Vulkan benefit from utilization alone.</p></div>
+            <div class="commit"><span>Depends on</span>Matched affected/control evidence<span>Intent</span>Diagnosis and next decision</div>
+          </div>
+
+          <div class="stage-row">
+            <div class="id">Stage 8</div>
+            <div><h3>Correct the measured path or prove a dual-API seam</h3><p>The Stage 7 evidence chooses exactly one.</p></div>
+            <div><p>Provisional. Prefer a bounded OpenGL fix when scene preparation or one current-path defect dominates. Use a tiny Vulkan spike only when the trace or a separately approved platform-longevity goal justifies it.</p></div>
+            <div class="commit"><span>Depends on</span>Stage 7 decision<span>Intent</span>One measured intervention</div>
+          </div>
+
+          <div class="stage-row">
+            <div class="id">Later</div>
+            <div><h3>Native backend migration, if approved</h3><p>Frame data, resources, shaders, platform shell, then rendering families.</p></div>
+            <div><p>Coarse sequence: immutable frame packets; typed resource lifetime and synchronization; shader variants and SPIR-V; Windows, Linux, and MoltenVK surfaces; basic presentation; opaque/PBR; shadows and lighting; alpha and particles; water and sky; avatars; UI/HUD; streaming, media, snapshots, readback; device loss; rollout and OpenGL retirement.</p></div>
+            <div class="commit"><span>Depends on</span>Evidence-backed approval and per-stage reanalysis<span>Rule</span>No big-bang rewrite or permanent translation layer by assumption</div>
+          </div>
+        </div>
+
+        <div class="rule">
+          <strong>Architecture decision remains open.</strong> Zink is useful Linux evidence and a possible bridge, not a cross-platform conclusion. MoltenVK is a Vulkan platform layer, not OpenGL compatibility. A native Vulkan backend should grow beside OpenGL through a narrow seam only after the measurements identify a benefit or a separate platform-support mandate funds it.
+        </div>
+      </div>
+    </section>
+
+
+
+
+
+
+    <section id="stage-5">
+      <div class="wrap">
+        <p class="eyebrow">Only detailed next stage</p>
+        <h2>Stage 5: controlled Apple Silicon native OpenGL baseline</h2>
+        <p class="section-intro">Collect five valid measurements from a clean build of the committed schema-3 contract. This stage characterizes the current path. It does not compare hardware classes, trace a diagnosis, change renderer code, or choose Vulkan.</p>
+
+        <div class="scope-grid">
+          <div>
+            <h3>Objective</h3>
+            <p>Answer two questions: can the controlled scene pass every gate without changing the contract, and what is the run-to-run shape of the current Apple Silicon OpenGL baseline?</p>
+          </div>
+          <div class="in-out">
+            <div>
+              <h3>In scope</h3>
+              <ul>
+                <li>Clean universal ReleaseOS build</li>
+                <li>One unmeasured warm prime</li>
+                <li>Five valid native OpenGL repeats</li>
+                <li>Sanitized aggregate and decision</li>
+              </ul>
+            </div>
+            <div class="out">
+              <h3>Out of scope</h3>
+              <ul>
+                <li>Older-hardware comparison</li>
+                <li>External GPU trace</li>
+                <li>OpenGL or Vulkan changes</li>
+                <li>Threshold tuning after seeing timing</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="workstream">
+          <div class="work-item">
+            <div class="box" aria-hidden="true">&nbsp;</div>
+            <div>
+              <h3>Start from the committed contract</h3>
+              <p>Pull the Stage 4 commit into a clean macOS checkout. Confirm no local renderer or benchmark edits and record the source revision.</p>
+              <ul>
+                <li>Do not run from an uncommitted gate definition.</li>
+                <li>Do not reuse results produced by schema 1 or 2.</li>
+                <li>Do not carry a temporary smoke manifest into the baseline.</li>
+              </ul>
+            </div>
+            <div class="proof"><strong>Proof</strong>Every result reports the Stage 4 commit, an empty tracked-diff hash, <code>git_dirty: false</code>, schema 3, and the checked-in manifest hash.</div>
+          </div>
+
+          <div class="work-item">
+            <div class="box" aria-hidden="true">&nbsp;</div>
+            <div>
+              <h3>Build and verify the Mac viewer</h3>
+              <p>Use the documented Xcode compiler and SDK route with a Nix-provided CMake executable. Configure ReleaseOS with benchmark instrumentation and tests on, signing and crash reporting off.</p>
+              <ul>
+                <li>Run the complete Python benchmark suite.</li>
+                <li>Validate both schemas, all six manifests, and the schema-3 fixture.</li>
+                <li>Run the focused display and macOS directory integration tests.</li>
+                <li>Compile and package the universal benchmark-enabled app.</li>
+              </ul>
+            </div>
+            <div class="proof"><strong>Proof</strong>The build and tests pass before login. A normal daily-driver profile, signing identity, and production channel are not touched.</div>
+          </div>
+
+          <div class="work-item">
+            <div class="box" aria-hidden="true">&nbsp;</div>
+            <div>
+              <h3>Prepare private inputs</h3>
+              <p>Keep credentials, SLURL, raw output, and any visual reference outside Git. Use <code>steady-warm-v1.json</code> unchanged and assign one stable, non-identifying workload slug.</p>
+              <ul>
+                <li>Set the credential file to mode <code>0600</code>.</li>
+                <li>Confirm the chosen SLURL reaches the controlled scene and intended fixed view.</li>
+                <li>Record truthful power source, low-power mode, thermal state, scene-event, UI, and camera assertions immediately before the batch.</li>
+                <li>Use the same power source for all five repeats. Stop on low-power mode, unknown state, or throttling.</li>
+              </ul>
+            </div>
+            <div class="proof"><strong>Proof</strong>A dry run prints neither login identity nor SLURL. No private input is inside the repository or plan.</div>
+          </div>
+
+          <div class="work-item">
+            <div class="box" aria-hidden="true">&nbsp;</div>
+            <div>
+              <h3>Run one prime and five measured repeats</h3>
+              <p>Use native Apple OpenGL with the expected Apple GPU. The runner performs a full unmeasured warm prime, then five 30-second warm-up and 120-second capture repeats in the same isolated warm state.</p>
+              <div class="commit-card" style="margin-top: 18px">
+                <pre>python3 scripts/perf/render_benchmark.py run \
+  --viewer "/path/to/Second Life Test.app/Contents/MacOS/Second Life Test" \
+  --manifest scripts/perf/scenarios/steady-warm-v1.json \
+  --credential-file /private/path/benchmark-account.txt \
+  --slurl secondlife://operator-supplied-location \
+  --hardware-label mac-apple-silicon-current \
+  --workload-id controlled-steady-scene \
+  --power-source ac \
+  --low-power-mode off \
+  --thermal-state nominal \
+  --scene-events none \
+  --ui-state approved \
+  --camera-state approved \
+  --expect-gpu-substring Apple \
+  --backend native-gl \
+  --output-dir /private/path/renderer-results</pre>
+              </div>
+              <p style="margin-top: 16px">The shown power and thermal values are examples, not defaults. Supply the truthful state. Do not touch the avatar, camera, focus, or controlled UI after the prime begins.</p>
+            </div>
+            <div class="proof"><strong>Proof</strong>Exactly five measured artifacts validate. Any rejected run is excluded and its failed-gate names are counted separately.</div>
+          </div>
+
+          <div class="work-item">
+            <div class="box" aria-hidden="true">&nbsp;</div>
+            <div>
+              <h3>Analyze without broadening the claim</h3>
+              <p>Generate the standard report without <code>--allow-mismatch</code>. Summarize distribution and existing phase/resource facts. A single baseline has no backend or hardware delta.</p>
+              <ul>
+                <li>Report median, p95, p99, worst frame, 1 percent low FPS, and run-to-run p95 range.</li>
+                <li>Summarize dominant CPU phases and resource-counter deltas.</li>
+                <li>List rejected-run counts and gate names without rejected timing.</li>
+                <li>Keep raw results and any image private; check in only a sanitized aggregate.</li>
+              </ul>
+            </div>
+            <div class="proof"><strong>Proof</strong>The report passes comparison guards and contains no location, account, absolute camera, host, or machine identifier.</div>
+          </div>
+
+          <div class="work-item">
+            <div class="box" aria-hidden="true">&nbsp;</div>
+            <div>
+              <h3>Decide and replan</h3>
+              <p>Write the Stage 5 decision, update this same URL, and detail exactly one next stage.</p>
+              <ul>
+                <li>If five valid runs are stable, select the matched older-hardware control as Stage 6.</li>
+                <li>If the scene cannot pass without changing the contract, record the blocking gates and detail one gate investigation instead.</li>
+                <li>If the data is stable but an unexpected existing phase dominates, record it without implementing a fix.</li>
+              </ul>
+            </div>
+            <div class="proof"><strong>Proof</strong>The stage ends with one privacy-safe commit and one detailed successor. No Stage 6 execution is included.</div>
+          </div>
+        </div>
+
+        <div id="stage-5-gates" style="margin-top: 54px">
+          <h3>Stage 5 exit gates</h3>
+          <div class="gate-list">
+            <div class="gate"><div class="mark">01</div><div><h3>Clean source and build</h3><p>All five results identify the committed Stage 4 source, ReleaseOS build, native Apple OpenGL backend, expected GPU, and clean tracked tree.</p></div></div>
+            <div class="gate"><div class="mark">02</div><div><h3>Five results pass every contract</h3><p>Display, placement, focus, camera, avatar, UI, assets, population, circuit, ping, power, thermal, and scene-event gates all pass.</p></div></div>
+            <div class="gate"><div class="mark">03</div><div><h3>Comparison identity holds</h3><p>Manifest, settings, source, workload, operator assertions, view hash, stable population, build, and instrumentation match without an override.</p></div></div>
+            <div class="gate"><div class="mark">04</div><div><h3>Evidence is privacy-safe</h3><p>Only a sanitized aggregate and decision enter Git. Raw results, SLURL, credentials, and visual material remain private.</p></div></div>
+            <div class="gate"><div class="mark">05</div><div><h3>The conclusion stays narrow</h3><p>The record describes one Apple Silicon native OpenGL baseline and its noise. It claims no hardware regression or Vulkan benefit.</p></div></div>
+            <div class="gate"><div class="mark">06</div><div><h3>One next stage is selected</h3><p>The updated plan details either the matched control or one blocking-gate investigation, never both.</p></div></div>
+          </div>
+        </div>
+
+        <div id="stage-5-risks" style="margin-top: 54px">
+          <h3>Stage 5 stop conditions</h3>
+          <div class="risk-list">
+            <div class="risk"><div><h3>The asset gate never settles</h3><p>The composite all-zero rule is intentionally stricter than the historical mesh-only horizon.</p></div><div class="control"><strong>Stop.</strong> Preserve failed sub-gate names and replan an asset-gate investigation. Do not loosen it after seeing timings.</div></div>
+            <div class="risk"><div><h3>The live scene changes</h3><p>Visitors, object updates, simulator events, or camera drift can invalidate the batch.</p></div><div class="control"><strong>Stop.</strong> Reject affected runs. Change the controlled scene only between complete batches and keep the workload slug honest.</div></div>
+            <div class="risk"><div><h3>Power or thermal state changes</h3><p>Battery/AC changes, low-power mode, or throttling can dominate a small frame-time delta.</p></div><div class="control"><strong>Stop.</strong> Do not mix states. Let the machine recover, start a new batch, and retain no rejected timing.</div></div>
+            <div class="risk"><div><h3>Five runs tempt a regression claim</h3><p>No older matched control exists yet.</p></div><div class="control"><strong>Limit.</strong> Publish baseline shape and noise only. Hardware-class comparison remains Stage 6.</div></div>
+          </div>
+        </div>
+
+        <div id="stage-5-commit" style="margin-top: 54px">
+          <h3>Stage 5 commit boundary</h3>
+          <div class="commit-card">
+            <h3><code>perf(renderer): capture Apple Silicon OpenGL baseline</code></h3>
+            <p>One commit contains a sanitized aggregate, the Stage 5 decision, and the replanned next stage. It contains no raw result, private location, threshold change, renderer fix, Vulkan dependency, external trace, or older-control execution.</p>
+            <pre>Before commit
+
+[ ] Clean Stage 4 source and universal ReleaseOS build verified
+[ ] Python, schema, display, and macOS integration checks pass
+[ ] One unmeasured prime and exactly five valid measured runs complete
+[ ] Standard report passes without --allow-mismatch
+[ ] Rejected runs contribute no timing
+[ ] Sanitized aggregate contains no private input or absolute view
+[ ] Decision makes no hardware or Vulkan comparison
+[ ] This same plan details exactly one next stage
+[ ] Working tree contains no unrelated user changes</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="reanalysis">
+      <div class="wrap">
+        <h2>Mandatory reanalysis at the end of every stage</h2>
+        <p class="section-intro">This is part of the stage, not a meeting after the commit. The commit lands only after the plan reflects what the stage taught us.</p>
+
+        <div class="replan">
+          <article>
+            <h3>Record actuals</h3>
+            <ul>
+              <li>What changed, including files and public interfaces</li>
+              <li>Which tests ran and on which platforms</li>
+              <li>Measured frame time, memory, visual, and stability effects</li>
+              <li>New constraints, failures, and unresolved questions</li>
+              <li>Work deliberately left for later</li>
+            </ul>
+          </article>
+          <article>
+            <h3>Challenge the roadmap</h3>
+            <ul>
+              <li>Does the next stage still address the highest-value dependency?</li>
+              <li>Did the completed work expose a smaller or safer boundary?</li>
+              <li>Must the next stage split to remain one reviewable commit?</li>
+              <li>Can any later stage disappear?</li>
+              <li>Do platform, shader, resource, or test assumptions need correction?</li>
+            </ul>
+          </article>
+          <article>
+            <h3>Update this document</h3>
+            <ul>
+              <li>Mark the completed stage and link its commit</li>
+              <li>Add an actual-results note and deviations from plan</li>
+              <li>Revise the coarse roadmap</li>
+              <li>Expand exactly one next stage to the level used for Stage 1</li>
+              <li>Upload the same local file so the Postplan URL remains stable</li>
+            </ul>
+          </article>
+          <article>
+            <h3>Commit only when ready</h3>
+            <ul>
+              <li>Working tree contains only the stage and plan update</li>
+              <li>Diff passes formatting and repository checks</li>
+              <li>Acceptance evidence is attached or referenced</li>
+              <li>Commit message describes the outcome, not the activity</li>
+              <li>No next-stage implementation has started</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+
+    <section id="history">
+      <div class="wrap">
+        <h2>Plan history</h2>
+        <div class="change-log">
+          <div class="change"><time datetime="2026-08-26">2026-08-26</time><div class="version">v3 · Stage 4 complete</div><div>Recorded macOS profile isolation and display normalization, then split the former combined baseline stage. Added the schema-3 scene-validity actuals and detailed only the controlled Apple Silicon native OpenGL baseline.</div></div>
+          <div class="change"><time datetime="2026-08-26">2026-08-26</time><div class="version">v2 · Stage 1 complete</div><div>Delivered the benchmark suite. Recorded the invalid live-world native/Zink matrix and limited Linux RX 480 coverage. Detailed Stage 2 around deterministic workload gates and affected-hardware traces.</div></div>
+          <div class="change"><time datetime="2026-08-26">2026-08-26</time><div class="version">v1 · Stage 1 ready</div><div>Created the sequential roadmap. Detailed the measurement stage. Later stages remain provisional until the Stage 1 commit and reanalysis.</div></div>
+        </div>
+        <p style="margin-top: 24px; color: var(--muted)">Architecture basis: <a href="https://plans.bylisa.dev/d/ufm9sf0d9gw9">OpenGL performance and Vulkan migration assessment</a>.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">Rolling plan v3. Stage 4 adds a local, compile-gated scene-validity contract. It changes no renderer backend, production service, normal viewer profile, Vulkan dependency, or performance conclusion.</div>
+  </footer>
+</body>
+</html>

@@ -373,7 +373,8 @@ void gl_draw_scaled_image_with_border(S32 x, S32 y, S32 width, S32 height, LLTex
 
     if (solid_color)
     {
-        gSolidColorProgram.bind();
+        if (gGL.isUIRecording()) gGL.setUIAlphaMask(true);
+        else gSolidColorProgram.bind();
     }
 
     if (center_rect.mLeft == 0.f
@@ -700,7 +701,8 @@ void gl_draw_scaled_image_with_border(S32 x, S32 y, S32 width, S32 height, LLTex
 
     if (solid_color)
     {
-        gUIProgram.bind();
+        if (gGL.isUIRecording()) gGL.setUIAlphaMask(false);
+        else gUIProgram.bind();
     }
 }
 
@@ -1858,4 +1860,3 @@ void LLImageProviderInterface::deleteOnRemovalCallback(callback_t func)
         mCallbackList.erase(iter);
     }
 }
-

@@ -27,6 +27,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llappviewer.h"
+#include "llcachemigration.h"
 
 // Viewer includes
 #include "llversioninfo.h"
@@ -72,6 +73,7 @@
 #include "lltrace.h"
 #include "lltracethreadrecorder.h"
 #include "llviewerwindow.h"
+#include "llfontfreetype.h"
 #include "llviewerdisplay.h"
 #include "llviewermedia.h"
 #include "llviewerparcelaskplay.h"
@@ -80,6 +82,7 @@
 #include "llviewermediafocus.h"
 #include "llviewermessage.h"
 #include "llviewerobjectlist.h"
+#include "llviewergraphicsapi.h"
 #include "llworldmap.h"
 #include "llmutelist.h"
 #include "llviewerhelp.h"
@@ -149,12 +152,18 @@
 #include "llwindowsdl.h"
 #endif
 
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
+#include "llviewervulkanruntime.h"
+#endif
+
 // Third party library includes
 #include <boost/bind.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/regex.hpp>
 #include <boost/throw_exception.hpp>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 #if LL_WINDOWS
 #   include <share.h> // For _SH_DENYWR in processMarkerFiles
@@ -795,7 +804,60 @@ bool LLAppViewer::init()
         return false;
     }
 
+    const bool tonemap_parity = gSavedSettings.getBOOL("RenderTonemapContractParityTest");
+    const bool material_parity = gSavedSettings.getBOOL("RenderMaterialContractParityTest");
+    const bool texture_upload_parity = gSavedSettings.getBOOL("RenderTextureUploadContractParityTest");
+    const char* isolated_user_dir = std::getenv("SECONDLIFE_USER_DIR");
+    if ((tonemap_parity || material_parity || texture_upload_parity)
+        && (!isolated_user_dir || isolated_user_dir[0] == '\0'))
+    {
+        std::fputs(
+            tonemap_parity
+                ? "TONEMAP_CONTRACT_PARITY result=fail reason=missing_SECONDLIFE_USER_DIR\n"
+                : material_parity
+                    ? "MATERIAL_CONTRACT_PARITY result=fail reason=missing_SECONDLIFE_USER_DIR\n"
+                    : "TEXTURE_UPLOAD_CONTRACT_PARITY result=fail reason=missing_SECONDLIFE_USER_DIR\n",
+            stderr);
+        std::fflush(stderr);
+        std::_Exit(EXIT_FAILURE);
+    }
+
     LL_INFOS("InitInfo") << "Configuration initialized." << LL_ENDL ;
+
+    const bool vulkan_requested = gSavedSettings.getBOOL("RenderVulkanDeveloper");
+    mGraphicsLifecycle = vulkan_requested ? GraphicsLifecycle::VulkanSelected : GraphicsLifecycle::Legacy;
+
+    constexpr bool vulkan_available =
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
+        true;
+#else
+        false;
+#endif
+    const LLViewerGraphicsAPISelection graphics_api =
+        selectViewerGraphicsAPI(gSavedSettings.getBOOL("HeadlessClient"),
+                                vulkan_requested,
+                                vulkan_available);
+    if (const auto* error = std::get_if<LLViewerGraphicsAPISelectionError>(&graphics_api))
+    {
+        LL_WARNS("VulkanViewerSlice")
+            << "failure="
+            << (*error == LLViewerGraphicsAPISelectionError::HeadlessVulkanConflict ? "headless-conflict" : "unsupported-platform")
+            << LL_ENDL;
+        cleanupVulkanSlice();
+        LL_PROFILER_FRAME_END;
+        return false;
+    }
+
+#if LL_SDL_WINDOW || LL_DARWIN
+    if (std::get<LLWindow::GraphicsAPI>(graphics_api) == LLWindow::GraphicsAPI::Vulkan)
+    {
+#if LL_DARWIN
+        armLLWindowMacOSXGLAudit();
+#else
+        armLLWindowSDLGLAudit();
+#endif
+    }
+#endif
 
     //set the max heap size.
     initMaxHeapSize() ;
@@ -839,6 +901,10 @@ bool LLAppViewer::init()
     settings_map["floater"] = &gSavedSettings; // *TODO: New settings file
     settings_map["account"] = &gSavedPerAccountSettings;
 
+    if (mGraphicsLifecycle == GraphicsLifecycle::VulkanSelected)
+    {
+        LLUIImageList::getInstance()->enableCPUImages();
+    }
     LLUI::createInstance(settings_map,
         LLUIImageList::getInstance(),
         ui_audio_callback,
@@ -1004,9 +1070,34 @@ bool LLAppViewer::init()
     //
     // Initialize the window
     //
-    gGLActive = true;
-    initWindow();
+    gGLActive = mGraphicsLifecycle == GraphicsLifecycle::Legacy;
+    if (!initWindow())
+    {
+        LL_WARNS("InitInfo") << "Window initialization failed." << LL_ENDL;
+        if (mGraphicsLifecycle != GraphicsLifecycle::Legacy)
+        {
+            cleanupVulkanSlice();
+        }
+        LL_PROFILER_FRAME_END;
+        return false;
+    }
     LL_INFOS("InitInfo") << "Window is initialized." << LL_ENDL ;
+
+    if (mGraphicsLifecycle == GraphicsLifecycle::VulkanSelected)
+    {
+        if (LLViewerShaderMgr::sInitialized || gGLManager.mInited)
+        {
+            LL_WARNS("VulkanViewerSlice")
+                << "failure=opengl-initialized shader_manager=" << LLViewerShaderMgr::sInitialized
+                << " gl_manager=" << gGLManager.mInited << LL_ENDL;
+            cleanupVulkanSlice();
+            LL_PROFILER_FRAME_END;
+            return false;
+        }
+        LL_INFOS("VulkanViewerSlice") << "shader_manager=0 gl_manager=0" << LL_ENDL;
+        LL_PROFILER_FRAME_END;
+        return true;
+    }
 
     // writeSystemInfo can be called after window is initialized (gViewerWindow non-null)
     writeSystemInfo();
@@ -1297,6 +1388,21 @@ LLTrace::BlockTimerStatHandle FTM_FRAME("Frame");
 
 bool LLAppViewer::frame()
 {
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
+    if (mVulkanRuntime)
+    {
+        if (LLApp::isRunning() && !mVulkanRuntime->tick(gViewerWindow->recordVulkanProgress()))
+        {
+            // Linux skips cleanup after an application error, so release the
+            // renderer while the app and SDL event environment are intact.
+            cleanupVulkanSlice();
+            LLApp::setError();
+        }
+        LL_PROFILER_FRAME_END;
+        return !LLApp::isRunning();
+    }
+#endif
+
     bool ret = false;
 
     if (gSimulateMemLeak)
@@ -1474,6 +1580,11 @@ bool LLAppViewer::doFrame()
 
                 {
                     LLPerfStats::RecordSceneTime T (LLPerfStats::StatType_t::RENDER_IDLE);
+#if defined(LL_RENDER_BENCHMARK)
+                    const LLTrace::BlockTimer& renderer_idle_timer(
+                        LLTrace::timeThisBlock(LLStatViewer::RENDER_IDLE));
+                    (void)renderer_idle_timer;
+#endif
                     LL_PROFILE_ZONE_NAMED_CATEGORY_APP("df idle");
                     idle();
                 }
@@ -1706,6 +1817,12 @@ void LLAppViewer::flushLFSIO()
 
 bool LLAppViewer::cleanup()
 {
+    if (mGraphicsLifecycle != GraphicsLifecycle::Legacy)
+    {
+        cleanupVulkanSlice();
+        return true;
+    }
+
 #if LL_VELOPACK
     // Apply any pending Velopack update before shutdown
     if (velopack_is_update_pending())
@@ -2213,6 +2330,121 @@ bool LLAppViewer::cleanup()
 
     // return 0;
     return true;
+}
+
+void LLAppViewer::cleanupVulkanSlice() noexcept
+{
+    if (mGraphicsLifecycle == GraphicsLifecycle::VulkanCleaned)
+    {
+        return;
+    }
+    mGraphicsLifecycle = GraphicsLifecycle::VulkanCleaned;
+
+    // This path now shares the normal application prefix through thread,
+    // cache, LLUI, and window construction. Stop every worker from that
+    // prefix before deleting the singleton services they can reach.
+    const bool common_threads_initialized = sTextureFetch && sTextureCache && sImageDecodeThread && sPurgeDiskCacheThread;
+    if (common_threads_initialized)
+    {
+        gMeshRepo.shutdown();
+        mAppCoreHttp.requestStop();
+        sTextureFetch->shutdown();
+        sTextureCache->shutdown();
+        sImageDecodeThread->shutdown();
+        sPurgeDiskCacheThread->shutdown();
+        if (mGeneralThreadPool)
+        {
+            mGeneralThreadPool->close();
+        }
+        sTextureFetch->shutDownTextureCacheThread();
+        if (LLLFSThread::sLocal)
+        {
+            LLLFSThread::sLocal->shutdown();
+        }
+    }
+
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
+    if (mVulkanRuntime)
+    {
+        mVulkanRuntime->shutdown();
+        mVulkanRuntime.reset();
+    }
+#endif
+    if (gViewerWindow)
+    {
+        gViewerWindow->shutdownViews();
+    }
+    if (gGL.isUIRecording())
+    {
+        LLFontGL::destroyDefaultFonts();
+        LLFontManager::cleanupClass();
+        gGL.shutdown();
+    }
+    if (gViewerWindow)
+    {
+        delete gViewerWindow;
+        gViewerWindow = nullptr;
+    }
+    delete gKeyboard;
+    gKeyboard = nullptr;
+
+#if LL_SDL_WINDOW || LL_DARWIN
+#if LL_DARWIN
+    const auto gl_audit = getLLWindowMacOSXGLAuditSnapshot();
+#else
+    const LLWindowSDLGLAuditSnapshot gl_audit = getLLWindowSDLGLAuditSnapshot();
+#endif
+    LL_INFOS("VulkanViewerSlice")
+        << "window_retired=1 live_windows=" << LLWindow::instanceCount()
+        << " gl_context_create_attempts=" << gl_audit.mContextCreateAttempts
+        << " gl_swap_attempts=" << gl_audit.mBufferSwapAttempts
+        << " gl_audit_armed=" << gl_audit.mArmed
+        << " gl_manager=" << gGLManager.mInited
+        << " gl_images=" << LLImageGL::sCount
+        << " media_initialized=" << LLViewerMedia::instanceExists()
+        << " shader_manager=" << LLViewerShaderMgr::sInitialized << LL_ENDL;
+#endif
+
+    if (common_threads_initialized)
+    {
+        gMeshRepo.shutdownDecomposition();
+        mAppCoreHttp.cleanup();
+        SUBSYSTEM_CLEANUP(LLFilePickerThread);
+        SUBSYSTEM_CLEANUP(LLDirPickerThread);
+
+        delete sTextureCache;
+        sTextureCache = nullptr;
+        sTextureFetch->shutdown();
+        sTextureFetch->waitOnPending(10.f);
+        delete sTextureFetch;
+        sTextureFetch = nullptr;
+        delete sImageDecodeThread;
+        sImageDecodeThread = nullptr;
+        delete mFastTimerLogThread;
+        mFastTimerLogThread = nullptr;
+        delete sPurgeDiskCacheThread;
+        sPurgeDiskCacheThread = nullptr;
+        delete mGeneralThreadPool;
+        mGeneralThreadPool = nullptr;
+
+        SUBSYSTEM_CLEANUP(LLImage);
+        if (LLLFSThread::sLocal)
+        {
+            SUBSYSTEM_CLEANUP(LLLFSThread);
+        }
+        LLViewerAssetStatsFF::cleanup();
+        LLCore::LLHttp::cleanup();
+    }
+
+    LLSplashScreen::hide();
+    LLPrimitive::cleanupVolumeManager();
+    LLViewerEventRecorder::deleteSingleton();
+    LLUI::deleteSingleton();
+    LLGridManager::deleteSingleton();
+    LLWatchdog::deleteSingleton();
+    LLSingletonBase::deleteAll();
+    LLUICtrlFactory::deleteSingleton();
+    cleanupConsole();
 }
 
 void LLAppViewer::initGeneralThread()
@@ -3364,9 +3596,34 @@ bool LLAppViewer::initWindow()
         .ignore_pixel_depth(ignorePixelDepth)
         .first_run(mIsFirstRun);
 
+    window_params.graphics_api = gHeadlessClient
+        ? LLWindow::GraphicsAPI::Headless
+        : mGraphicsLifecycle == GraphicsLifecycle::VulkanSelected
+            ? LLWindow::GraphicsAPI::Vulkan
+            : LLWindow::GraphicsAPI::OpenGL;
+
     gViewerWindow = new LLViewerWindow(window_params);
 
     LL_INFOS("AppInit") << "gViewerwindow created." << LL_ENDL;
+
+    if (mGraphicsLifecycle == GraphicsLifecycle::VulkanSelected)
+    {
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
+        LLUI::getInstance()->mWindow = gViewerWindow->getWindow();
+        mVulkanRuntime = std::make_unique<LLViewerVulkanRuntime>();
+        if (!mVulkanRuntime->initialize(*gViewerWindow->getWindow()))
+        {
+            return false;
+        }
+        if (!gViewerWindow->initVulkanProgress()) return false;
+        LL_INFOS("VulkanViewerSlice")
+            << "window_owner=viewer callbacks=viewer live_windows=" << LLWindow::instanceCount()
+            << LL_ENDL;
+        return true;
+#else
+        return false;
+#endif
+    }
 
     // Need to load feature table before cheking to start watchdog.
     bool use_watchdog = false;
@@ -3464,6 +3721,20 @@ bool LLAppViewer::initWindow()
     gSavedSettings.setBOOL("RenderInitError", true);
     gSavedSettings.saveToFile( gSavedSettings.getString("ClientSettingsFile"), true );
 
+    if (gSavedSettings.getBOOL("RenderMaterialContractParityTest"))
+    {
+        // Pin the diagnostic shader permutation without changing the isolated profile.
+        gSavedSettings.getControl("RenderShaderCacheEnabled")->setValue(false, false);
+        gSavedSettings.getControl("RenderEnableEmissiveBuffer")->setValue(false, false);
+        gSavedSettings.getControl("RenderShadowDetail")->setValue(LLSD::Integer(0), false);
+        gSavedSettings.getControl("RenderHDREnabled")->setValue(true, false);
+    }
+
+    if (gSavedSettings.getBOOL("RenderTextureUploadContractParityTest"))
+    {
+        gSavedSettings.getControl("RenderShaderCacheEnabled")->setValue(false, false);
+    }
+
     gPipeline.init();
     LL_INFOS("AppInit") << "gPipeline Initialized" << LL_ENDL;
 
@@ -3472,6 +3743,30 @@ bool LLAppViewer::initWindow()
 
     gSavedSettings.setBOOL("RenderInitError", false);
     gSavedSettings.saveToFile( gSavedSettings.getString("ClientSettingsFile"), true );
+
+    if (gSavedSettings.getBOOL("RenderTonemapContractParityTest"))
+    {
+        const bool success = gPipeline.runTonemapContractParity();
+        removeMarkerFiles();
+        std::fflush(nullptr);
+        std::_Exit(success ? EXIT_SUCCESS : EXIT_FAILURE);
+    }
+
+    if (gSavedSettings.getBOOL("RenderMaterialContractParityTest"))
+    {
+        const bool success = gPipeline.runMaterialContractParity();
+        removeMarkerFiles();
+        std::fflush(nullptr);
+        std::_Exit(success ? EXIT_SUCCESS : EXIT_FAILURE);
+    }
+
+    if (gSavedSettings.getBOOL("RenderTextureUploadContractParityTest"))
+    {
+        const bool success = gPipeline.runTextureUploadContractParity();
+        removeMarkerFiles();
+        std::fflush(nullptr);
+        std::_Exit(success ? EXIT_SUCCESS : EXIT_FAILURE);
+    }
 
     // If we have a startup crash, it's usually near GL initialization, so simulate that.
     if (gCrashOnStartup)
@@ -4633,7 +4928,8 @@ void LLAppViewer::migrateCacheDirectory()
         std::string old_cache_dir = gDirUtilp->add(gDirUtilp->getOSUserAppDir(), "cache");
         std::string new_cache_dir = gDirUtilp->getCacheDir(true);
 
-        if (gDirUtilp->fileExists(old_cache_dir))
+        if (gDirUtilp->fileExists(old_cache_dir)
+            && LLCacheMigration::required(old_cache_dir, new_cache_dir))
         {
             LL_INFOS() << "Migrating cache from " << old_cache_dir << " to " << new_cache_dir << LL_ENDL;
 

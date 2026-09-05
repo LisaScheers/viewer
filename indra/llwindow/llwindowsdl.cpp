@@ -29,6 +29,10 @@
 
 #include "llwindowsdl.h"
 
+#if defined(LL_VULKAN_SDL_WSI)
+#include "llwindowsdlvulkan.h"
+#endif
+
 #include "llwindowcallbacks.h"
 #include "llkeyboardsdl.h"
 
@@ -39,6 +43,9 @@
 #include "llfindlocale.h"
 #include "llpreeditor.h"
 #include "llsdl.h"
+
+#include <atomic>
+#include <limits>
 
 #if LL_LINUX
 #ifdef LL_GLIB
@@ -88,21 +95,51 @@ const S32 DEFAULT_REFRESH_RATE = 60;
 // be only one object of this class at any time.  Currently this is true.
 static LLWindowSDL *gWindowImplementation = nullptr;
 
+namespace
+{
+std::atomic<U64> sGLContextCreateAttempts{ 0 };
+std::atomic<U64> sGLBufferSwapAttempts{ 0 };
+std::atomic<bool> sGLAuditArmed{ false };
+}
+
+void armLLWindowSDLGLAudit() noexcept
+{
+    sGLAuditArmed.store(true, std::memory_order_release);
+}
+
+LLWindowSDLGLAuditSnapshot getLLWindowSDLGLAuditSnapshot() noexcept
+{
+    return { sGLContextCreateAttempts.load(std::memory_order_relaxed),
+             sGLBufferSwapAttempts.load(std::memory_order_relaxed),
+             sGLAuditArmed.load(std::memory_order_acquire) };
+}
+
+#if defined(LL_VULKAN_SDL_WSI)
+namespace
+{
+
+U64 nextNativeWindowGeneration() noexcept
+{
+    static U64 next_generation = 1;
+    if (next_generation == std::numeric_limits<U64>::max())
+    {
+        return 0;
+    }
+    return next_generation++;
+}
+
+} // namespace
+#endif
+
 LLWindowSDL::LLWindowSDL(LLWindowCallbacks* callbacks,
                          const std::string& title, const std::string& name, S32 x, S32 y, S32 width,
                          S32 height, U32 flags,
                          bool fullscreen, bool clearBg,
-                         bool enable_vsync, bool use_gl,
+                         bool enable_vsync, GraphicsAPI graphics_api,
                          bool ignore_pixel_depth, U32 fsaa_samples)
-        : LLWindow(callbacks, fullscreen, flags),
+        : LLWindow(callbacks, fullscreen, flags, graphics_api),
         mGamma(1.0f), mFlashing(false)
 {
-    SDL_GL_LoadLibrary(nullptr);
-
-    // Initialize the keyboard
-    gKeyboard = new LLKeyboardSDL();
-    gKeyboard->setCallbacks(callbacks);
-
     // Assume 4:3 aspect ratio until we know better
     mNativeAspectRatio = 1024.f / 768.f;
 
@@ -111,22 +148,210 @@ LLWindowSDL::LLWindowSDL(LLWindowCallbacks* callbacks,
     else
         mWindowTitle = title;
 
-    // Create the GL context and set it up for windowed or fullscreen, as appropriate.
-    if(createContext(x, y, width, height, 32, fullscreen, enable_vsync))
+#if defined(LL_VULKAN_SDL_WSI)
+    if (graphics_api == GraphicsAPI::Vulkan)
     {
-        gGLManager.initWGL();
-        gGLManager.initGL();
-
-        //start with arrow cursor
-        initCursors();
-        setCursor( UI_CURSOR_ARROW );
+        if (createVulkanWindow(x, y, width, height, fullscreen))
+        {
+            gKeyboard = new LLKeyboardSDL();
+            gKeyboard->setCallbacks(callbacks);
+        }
     }
+    else
+#endif
+    {
+        SDL_GL_LoadLibrary(nullptr);
 
-    stop_glerror();
+        // Initialize the keyboard
+        gKeyboard = new LLKeyboardSDL();
+        gKeyboard->setCallbacks(callbacks);
+
+        // Create the GL context and set it up for windowed or fullscreen, as appropriate.
+        if(createContext(x, y, width, height, 32, fullscreen, enable_vsync))
+        {
+            gGLManager.initWGL();
+            gGLManager.initGL();
+
+            //start with arrow cursor
+            initCursors();
+            setCursor( UI_CURSOR_ARROW );
+        }
+
+        stop_glerror();
+    }
 
     // Stash an object pointer for OSMessageBox()
     gWindowImplementation = this;
 }
+
+#if defined(LL_VULKAN_SDL_WSI)
+bool LLWindowSDL::createVulkanWindow(int x, int y, int width, int height, bool fullscreen)
+{
+    if (width == 0)
+    {
+        width = 1024;
+    }
+    if (height == 0)
+    {
+        height = 768;
+    }
+    if (x == 0)
+    {
+        x = SDL_WINDOWPOS_UNDEFINED;
+    }
+    if (y == 0)
+    {
+        y = SDL_WINDOWPOS_UNDEFINED;
+    }
+
+    const U64 native_window_generation = nextNativeWindowGeneration();
+    if (native_window_generation == 0)
+    {
+        LL_WARNS("Window") << "Vulkan native-window generations are exhausted." << LL_ENDL;
+        return false;
+    }
+
+    LLWindowSDLVulkanCreateInfo create_info;
+    create_info.mTitle            = mWindowTitle;
+    create_info.mX                = x;
+    create_info.mY                = y;
+    create_info.mWidth            = width;
+    create_info.mHeight           = height;
+    create_info.mFullscreen       = fullscreen;
+    create_info.mHidden           = true;
+    create_info.mHighPixelDensity = gHiDPISupport;
+
+    LLWindowSDLVulkanAcquireResult result = acquireLLWindowSDLVulkan(create_info, native_window_generation);
+    if (const auto* error = std::get_if<LLWindowSDLVulkanAcquireError>(&result))
+    {
+        LL_WARNS("Window") << "SDL Vulkan window acquisition failed with code " << static_cast<U32>(error->mCode) << LL_ENDL;
+        return false;
+    }
+
+    auto vulkan_window = std::make_unique<LLWindowSDLVulkan>(std::move(std::get<LLWindowSDLVulkan>(result)));
+    const auto instance_error = vulkan_window->acquireInstanceGeneration(
+        LLRenderVulkan::VulkanInstanceValidationMode::Required,
+        LLRenderVulkan::VulkanInstancePortabilityMode::EnableIfAvailable);
+    if (instance_error)
+    {
+        LL_WARNS("Window") << "Vulkan instance acquisition failed with code "
+                           << static_cast<U32>(instance_error->mCode) << LL_ENDL;
+        return false;
+    }
+
+    const auto surface_error = vulkan_window->acquireSurfaceGeneration();
+    if (surface_error)
+    {
+        LL_WARNS("Window") << "Vulkan surface acquisition failed with code "
+                           << static_cast<U32>(surface_error->mCode) << LL_ENDL;
+        return false;
+    }
+
+    const auto presentation_device_error = vulkan_window->acquirePresentationDeviceGeneration();
+    if (presentation_device_error)
+    {
+        LL_WARNS("Window") << "Vulkan presentation-device selection failed with code " << static_cast<U32>(presentation_device_error->mCode)
+                           << LL_ENDL;
+        return false;
+    }
+
+    const auto logical_device_error = vulkan_window->acquireLogicalDeviceGeneration();
+    if (logical_device_error)
+    {
+        LL_WARNS("Window") << "Vulkan logical-device acquisition failed with code " << static_cast<U32>(logical_device_error->mCode)
+                           << LL_ENDL;
+        return false;
+    }
+
+    const auto swapchain_configuration_error = vulkan_window->acquireSwapchainConfigurationGeneration();
+    if (swapchain_configuration_error)
+    {
+        LL_WARNS("Window") << "Vulkan swapchain-configuration acquisition failed with code "
+                           << static_cast<U32>(swapchain_configuration_error->mCode) << LL_ENDL;
+        return false;
+    }
+
+    const auto swapchain_error = vulkan_window->acquireSwapchainGeneration();
+    if (swapchain_error)
+    {
+        LL_WARNS("Window") << "Vulkan swapchain acquisition failed with code " << static_cast<U32>(swapchain_error->mCode) << LL_ENDL;
+        return false;
+    }
+
+    const auto swapchain_images_error = vulkan_window->acquireSwapchainImagesGeneration();
+    if (swapchain_images_error)
+    {
+        LL_WARNS("Window") << "Vulkan swapchain-image acquisition failed with code " << static_cast<U32>(swapchain_images_error->mCode)
+                           << LL_ENDL;
+        return false;
+    }
+
+    const auto swapchain_frame_slot_error = vulkan_window->acquireSwapchainFrameSlotGeneration();
+    if (swapchain_frame_slot_error)
+    {
+        LL_WARNS("Window") << "Vulkan swapchain frame-slot acquisition failed with code "
+                           << static_cast<U32>(swapchain_frame_slot_error->mCode) << LL_ENDL;
+        return false;
+    }
+
+    mVulkanWindow = std::move(vulkan_window);
+    mWindow       = mVulkanWindow->window();
+    mFullscreen   = fullscreen;
+    SDL_StartTextInput(mWindow);
+    return true;
+}
+
+void LLWindowSDL::destroyVulkanWindow() noexcept
+{
+    if (mWindow)
+    {
+        SDL_StopTextInput(mWindow);
+    }
+    mWindow = nullptr;
+    if (mVulkanWindow)
+    {
+        mVulkanWindow->reset();
+        mVulkanWindow.reset();
+    }
+}
+
+const LLWindowVulkanRequirements* LLWindowSDL::getVulkanRequirements() const noexcept
+{
+    return mVulkanWindow ? mVulkanWindow->requirements() : nullptr;
+}
+
+bool LLWindowSDL::isVulkanWindowGenerationCurrent(U64 generation) const noexcept
+{
+    return mVulkanWindow && mVulkanWindow->isGenerationCurrent(generation);
+}
+
+LLWindowSDLVulkan* LLWindowSDL::getVulkanOwner() noexcept
+{
+    return mVulkanWindow.get();
+}
+
+const LLWindowSDLVulkan* LLWindowSDL::getVulkanOwner() const noexcept
+{
+    return mVulkanWindow.get();
+}
+
+const LLRenderVulkan::VulkanInstanceGeneration* LLWindowSDL::getVulkanInstanceGeneration() const noexcept
+{
+    return mVulkanWindow ? mVulkanWindow->instanceGeneration() : nullptr;
+}
+
+bool LLWindowSDL::resetVulkanSurfaceGeneration() noexcept
+{
+    if (!mVulkanWindow)
+    {
+        return false;
+    }
+    mVulkanWindow->resetSwapchainFrameSlotGeneration();
+    mVulkanWindow->resetSwapchainImagesGeneration();
+    mVulkanWindow->resetSwapchainGeneration();
+    return mVulkanWindow->resetSurfaceGeneration();
+}
+#endif
 
 static SDL_Surface *Load_BMP_Resource(const char *basename)
 {
@@ -278,6 +503,10 @@ bool LLWindowSDL::createContext(int x, int y, int width, int height, int bits, b
     SDL_DestroyProperties(props); // Free properties once window is created
 
     // Create the context
+    if (sGLAuditArmed.load(std::memory_order_relaxed)) [[unlikely]]
+    {
+        sGLContextCreateAttempts.fetch_add(1, std::memory_order_relaxed);
+    }
     mContext = SDL_GL_CreateContext(mWindow);
     if(!mContext)
     {
@@ -429,6 +658,14 @@ bool LLWindowSDL::createContext(int x, int y, int width, int height, int bits, b
 
 void* LLWindowSDL::createSharedContext()
 {
+#if defined(LL_VULKAN_SDL_WSI)
+    if (mGraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        LL_WARNS("Window") << "Shared contexts are unavailable for a Vulkan window." << LL_ENDL;
+        return nullptr;
+    }
+#endif
+
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "Second Life OSR Utility");
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, 1);
@@ -447,6 +684,10 @@ void* LLWindowSDL::createSharedContext()
         return nullptr;
     }
     SDL_DestroyProperties(props); // Free properties once window is created
+    if (sGLAuditArmed.load(std::memory_order_relaxed)) [[unlikely]]
+    {
+        sGLContextCreateAttempts.fetch_add(1, std::memory_order_relaxed);
+    }
     SDL_GLContext pContext = SDL_GL_CreateContext(osr_window);
 
     // Hack to ensure main window context is bound
@@ -470,6 +711,14 @@ void* LLWindowSDL::createSharedContext()
 
 void LLWindowSDL::makeContextCurrent(void* contextPtr)
 {
+#if defined(LL_VULKAN_SDL_WSI)
+    if (mGraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        LL_WARNS("Window") << "OpenGL context binding is unavailable for a Vulkan window." << LL_ENDL;
+        return;
+    }
+#endif
+
     LLMutexLock osr_lock(&mOSRMutex);
     auto it = mOSRContexts.find((SDL_GLContext)contextPtr);
     if(it != mOSRContexts.end())
@@ -481,6 +730,14 @@ void LLWindowSDL::makeContextCurrent(void* contextPtr)
 
 void LLWindowSDL::destroySharedContext(void* contextPtr)
 {
+#if defined(LL_VULKAN_SDL_WSI)
+    if (mGraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        LL_WARNS("Window") << "Shared-context destruction is unavailable for a Vulkan window." << LL_ENDL;
+        return;
+    }
+#endif
+
     LLMutexLock osr_lock(&mOSRMutex);
     auto it = mOSRContexts.find((SDL_GLContext)contextPtr);
     if(it != mOSRContexts.end())
@@ -492,6 +749,14 @@ void LLWindowSDL::destroySharedContext(void* contextPtr)
 
 void LLWindowSDL::toggleVSync(bool enable_vsync)
 {
+#if defined(LL_VULKAN_SDL_WSI)
+    if (mGraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        LL_WARNS("Window") << "OpenGL VSync control is unavailable for a Vulkan window." << LL_ENDL;
+        return;
+    }
+#endif
+
     if (!enable_vsync)
     {
         LL_INFOS("Window") << "Disabling vertical sync" << LL_ENDL;
@@ -507,6 +772,14 @@ void LLWindowSDL::toggleVSync(bool enable_vsync)
 // changing fullscreen resolution, or switching between windowed and fullscreen mode.
 bool LLWindowSDL::switchContext(bool fullscreen, const LLCoordScreen &size, bool enable_vsync, const LLCoordScreen * const posp)
 {
+#if defined(LL_VULKAN_SDL_WSI)
+    if (mGraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        LL_WARNS("Window") << "Vulkan native-window recreation is not implemented." << LL_ENDL;
+        return false;
+    }
+#endif
+
     const bool needsRebuild = true;  // Just nuke the context and start over.
     bool result = true;
 
@@ -534,7 +807,21 @@ bool LLWindowSDL::switchContext(bool fullscreen, const LLCoordScreen &size, bool
 
 void LLWindowSDL::destroyContext()
 {
+#if defined(LL_VULKAN_SDL_WSI)
+    if (mGraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        destroyVulkanWindow();
+        return;
+    }
+#endif
+
     LL_INFOS() << "destroyContext begins" << LL_ENDL;
+
+    if (!mWindow && !mContext)
+    {
+        LL_INFOS() << "OpenGL context and SDL window already destroyed" << LL_ENDL;
+        return;
+    }
 
     {
         LLMutexLock osr_lock(&mOSRMutex);
@@ -546,7 +833,10 @@ void LLWindowSDL::destroyContext()
     }
 
     // Stop unicode input
-    SDL_StopTextInput(mWindow);
+    if (mWindow)
+    {
+        SDL_StopTextInput(mWindow);
+    }
 
     // Clean up remaining GL state before blowing away window
     LL_INFOS() << "shutdownGL begins" << LL_ENDL;
@@ -761,8 +1051,20 @@ bool LLWindowSDL::setSizeImpl(const LLCoordWindow size)
 
 void LLWindowSDL::swapBuffers()
 {
+#if defined(LL_VULKAN_SDL_WSI)
+    if (mGraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        LL_WARNS("Window") << "OpenGL buffer swapping is unavailable for a Vulkan window." << LL_ENDL;
+        return;
+    }
+#endif
+
     if (mWindow)
     {
+        if (sGLAuditArmed.load(std::memory_order_relaxed)) [[unlikely]]
+        {
+            sGLBufferSwapAttempts.fetch_add(1, std::memory_order_relaxed);
+        }
         SDL_GL_SwapWindow(mWindow);
     }
     LL_PROFILER_GPU_COLLECT;
@@ -1397,6 +1699,16 @@ SDL_AppResult LLWindowSDL::handleEvent(const SDL_Event& event)
             mCallbacks->handleResize(this, width, height);
             break;
         }
+#if defined(LL_VULKAN_SDL_WSI)
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        {
+            if (mGraphicsAPI == GraphicsAPI::Vulkan)
+            {
+                mCallbacks->handleResize(this, event.window.data1, event.window.data2);
+            }
+            break;
+        }
+#endif
         case SDL_EVENT_WINDOW_MOUSE_ENTER:
             break;
         case SDL_EVENT_WINDOW_MOUSE_LEAVE:
@@ -2024,4 +2336,3 @@ void LLWindowSDL::setUseMultGL(bool use_mult_gl)
     }
 }
 #endif
-

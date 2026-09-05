@@ -255,6 +255,7 @@ public:
     void cleanUp() override;
 
     bool initFromFile();
+    void enableCPUImages() { llassert_always(mUIImages.empty()); mCPUImages = true; }
 
     LLPointer<LLUIImage> preloadUIImage(const std::string& name, const std::string& filename, bool use_mips, const LLRect& scale_rect, const LLRect& clip_rect, LLUIImage::EScaleStyle stype);
 
@@ -283,6 +284,15 @@ private:
 
     typedef std::map< std::string, LLPointer<LLUIImage> > uuid_ui_image_map_t;
     uuid_ui_image_map_t mUIImages;
+    struct CPUImageDeclaration
+    {
+        std::string file;
+        LLRect scale, clip;
+        LLUIImage::EScaleStyle style;
+    };
+    bool mCPUImages = false;
+    bool mCPUDeclarationsLoaded = false;
+    std::map<std::string, CPUImageDeclaration> mCPUDeclarations;
 
     //
     //keep a copy of UI textures to prevent them to be deleted.

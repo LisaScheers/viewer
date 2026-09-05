@@ -39,6 +39,15 @@
 
 bool gSDLMainHandled = false;
 
+namespace
+{
+
+SDL_LogOutputFunction gPreviousSDLLogOutput   = nullptr;
+void*                 gPreviousSDLLogUserdata = nullptr;
+bool                  gOwnsSDLLogOutput       = false;
+
+}
+
 void sdl_logger(void *userdata, int category, SDL_LogPriority priority, const char *message)
 {
     switch (priority)
@@ -62,7 +71,7 @@ void sdl_logger(void *userdata, int category, SDL_LogPriority priority, const ch
     }
 }
 
-void init_sdl(const std::string& app_name)
+bool init_sdl(const std::string& app_name)
 {
 #ifndef LL_SDL_APP
     if (!gSDLMainHandled)
@@ -71,7 +80,12 @@ void init_sdl(const std::string& app_name)
     }
 #endif
 
-    SDL_SetLogOutputFunction(&sdl_logger, nullptr);
+    if (!gOwnsSDLLogOutput)
+    {
+        SDL_GetLogOutputFunction(&gPreviousSDLLogOutput, &gPreviousSDLLogUserdata);
+        SDL_SetLogOutputFunction(&sdl_logger, nullptr);
+        gOwnsSDLLogOutput = true;
+    }
 
     const int c_sdl_version = SDL_VERSION;
     LL_INFOS() << "Compiled against SDL "
@@ -134,10 +148,12 @@ void init_sdl(const std::string& app_name)
             if (std::get<2>(subSystem))
             {
                 OSMessageBox("SDL_Init() failure", "error", OSMB_OK);
-                return;
+                return false;
             }
         }
     }
+
+    return true;
 }
 
 void quit_sdl()
@@ -146,4 +162,12 @@ void quit_sdl()
     SDL_UnregisterApp();
 #endif
     SDL_Quit();
+
+    if (gOwnsSDLLogOutput)
+    {
+        SDL_SetLogOutputFunction(gPreviousSDLLogOutput, gPreviousSDLLogUserdata);
+        gPreviousSDLLogOutput   = nullptr;
+        gPreviousSDLLogUserdata = nullptr;
+        gOwnsSDLLogOutput       = false;
+    }
 }

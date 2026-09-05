@@ -101,8 +101,9 @@ S32 OSMessageBox(const std::string& text, const std::string& caption, U32 type)
 // LLWindow
 //
 
-LLWindow::LLWindow(LLWindowCallbacks* callbacks, bool fullscreen, U32 flags)
+LLWindow::LLWindow(LLWindowCallbacks* callbacks, bool fullscreen, U32 flags, GraphicsAPI graphics_api)
     : mCallbacks(callbacks),
+      mGraphicsAPI(graphics_api),
       mPostQuit(true),
       mFullscreen(fullscreen),
       mFullscreenWidth(0),
@@ -123,6 +124,33 @@ LLWindow::LLWindow(LLWindowCallbacks* callbacks, bool fullscreen, U32 flags)
       mHighSurrogate(0),
       mRefreshRate(0)
 {
+}
+
+bool LLWindow::getNativeContentSize(LLCoordWindow* size)
+{
+    LLCoordWindow backing_size;
+    if (!size || !getSize(&backing_size))
+    {
+        return false;
+    }
+
+    F32 scale_x;
+    F32 scale_y;
+    getBackingScale(scale_x, scale_y);
+    if (scale_x <= 0.f || scale_y <= 0.f)
+    {
+        return false;
+    }
+
+    size->mX = ll_round((F32)backing_size.mX / scale_x);
+    size->mY = ll_round((F32)backing_size.mY / scale_y);
+    return true;
+}
+
+void LLWindow::getBackingScale(F32& scale_x, F32& scale_y)
+{
+    scale_x = getSystemUISize();
+    scale_y = scale_x;
 }
 
 LLWindow::~LLWindow()
@@ -419,52 +447,103 @@ static std::set<LLWindow*> sWindowList;
 
 LLWindow* LLWindowManager::createWindow(
     LLWindowCallbacks* callbacks,
-    const std::string& title, const std::string& name, S32 x, S32 y, S32 width, S32 height, U32 flags,
+    const std::string& title, const std::string& name, S32 x, S32 y, S32 width, S32 height,
+    LLWindow::GraphicsAPI graphics_api,
+    U32 flags,
     bool fullscreen,
     bool clearBg,
     bool enable_vsync,
-    bool use_gl,
     bool ignore_pixel_depth,
     U32 fsaa_samples,
     U32 max_cores,
     F32 max_gl_version)
 {
-    LLWindow* new_window;
+    switch (graphics_api)
+    {
+    case LLWindow::GraphicsAPI::OpenGL:
+    case LLWindow::GraphicsAPI::Headless:
+        break;
+    case LLWindow::GraphicsAPI::Vulkan:
+#if (LL_SDL_WINDOW && defined(LL_VULKAN_SDL_WSI)) || (LL_DARWIN && defined(LL_VULKAN_MACOS_WSI))
+        break;
+#else
+        LL_WARNS("Window") << "Vulkan window creation is not implemented." << LL_ENDL;
+        return nullptr;
+#endif
+    default:
+        LL_WARNS("Window") << "Unknown graphics API selection: "
+                           << static_cast<U32>(graphics_api) << LL_ENDL;
+        return nullptr;
+    }
 
-#if LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)
-    init_sdl(name);
+    if (graphics_api != LLWindow::GraphicsAPI::Headless)
+    {
+        for (LLWindow* window : sWindowList)
+        {
+            const LLWindow::GraphicsAPI live_api = window->getGraphicsAPI();
+            if (live_api != LLWindow::GraphicsAPI::Headless && live_api != graphics_api)
+            {
+                LL_WARNS("Window") << "Cannot mix live OpenGL and Vulkan windows." << LL_ENDL;
+                return nullptr;
+            }
+        }
+    }
+
+#if (LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)) || LL_DARWIN
+    if (!sWindowList.empty())
+    {
+        LL_WARNS("Window") << "This native path supports one live window because its implementation and keyboard are process-global." << LL_ENDL;
+        return nullptr;
+    }
 #endif
 
-    if (use_gl)
+    LLWindow* new_window = nullptr;
+
+#if LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)
+    const bool uses_sdl = graphics_api != LLWindow::GraphicsAPI::Headless;
+    if (uses_sdl && !init_sdl(name))
+    {
+        quit_sdl();
+        return nullptr;
+    }
+#endif
+
+    if (graphics_api == LLWindow::GraphicsAPI::OpenGL || graphics_api == LLWindow::GraphicsAPI::Vulkan)
     {
 #if LL_MESA_HEADLESS
         new_window = new LLWindowMesaHeadless(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth);
+            fullscreen, clearBg, enable_vsync, true, ignore_pixel_depth);
 #elif LL_SDL_WINDOW
         new_window = new LLWindowSDL(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth, fsaa_samples);
+            fullscreen, clearBg, enable_vsync, graphics_api, ignore_pixel_depth, fsaa_samples);
 #elif LL_WINDOWS
         new_window = new LLWindowWin32(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth, fsaa_samples, max_cores, max_gl_version);
+            fullscreen, clearBg, enable_vsync, true, ignore_pixel_depth, fsaa_samples, max_cores, max_gl_version);
 #elif LL_DARWIN
         new_window = new LLWindowMacOSX(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth, fsaa_samples);
+            fullscreen, clearBg, enable_vsync, graphics_api, ignore_pixel_depth, fsaa_samples);
 #endif
     }
     else
     {
         new_window = new LLWindowHeadless(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, use_gl, ignore_pixel_depth);
+            fullscreen, clearBg, enable_vsync, false, ignore_pixel_depth);
     }
 
-    if (false == new_window->isValid())
+    if (!new_window || !new_window->isValid())
     {
         delete new_window;
+#if LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)
+        if (uses_sdl)
+        {
+            quit_sdl();
+        }
+#endif
         LL_WARNS() << "LLWindowManager::create() : Error creating window." << LL_ENDL;
         return NULL;
     }
@@ -481,14 +560,21 @@ bool LLWindowManager::destroyWindow(LLWindow* window)
         return false;
     }
 
+#if LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)
+    const bool uses_sdl = window->getGraphicsAPI() != LLWindow::GraphicsAPI::Headless;
+#endif
+
     window->close();
 
     sWindowList.erase(window);
-#if LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)
-    quit_sdl();
-#endif
-
     delete window;
+
+#if LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)
+    if (uses_sdl)
+    {
+        quit_sdl();
+    }
+#endif
 
     return true;
 }

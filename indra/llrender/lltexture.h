@@ -36,6 +36,7 @@
 #include "lltrace.h"
 
 class LLImageGL ;
+class LLImageRaw;
 class LLTexUnit ;
 class LLFontGL ;
 
@@ -67,9 +68,9 @@ public:
     virtual S32        getHeight(S32 discard_level = -1) const;
     virtual bool       isActiveFetching();
     virtual LLImageGL* getGLTexture() const;
+    virtual LLImageRaw* getRawImage() const { return nullptr; }
 
 private:
     virtual void updateBindStatsForTester();
 };
 #endif
-

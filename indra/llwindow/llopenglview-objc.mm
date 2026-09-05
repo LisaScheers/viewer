@@ -249,6 +249,7 @@ attributedStringInfo getSegments(NSAttributedString *str)
         return nil;
     }
 
+    recordMacOSXGLContextAttempt();
     NSOpenGLContext *glContext = [[NSOpenGLContext alloc] initWithFormat:pixelFormat shareContext:nil];
 
     if (glContext == nil)
@@ -290,6 +291,7 @@ attributedStringInfo getSegments(NSAttributedString *str)
 
 - (BOOL) rebuildContextWithFormat:(NSOpenGLPixelFormat *)format
 {
+    recordMacOSXGLContextAttempt();
     NSOpenGLContext *ctx = [self openGLContext];
 
     [ctx clearDrawable];

@@ -1,0 +1,4714 @@
+/**
+ * @file llwindowsdlvulkan_test.cpp
+ * @brief Tests for SDL Vulkan window and loader lifetime ownership.
+ *
+ * $LicenseInfo:firstyear=2026&license=viewerlgpl$
+ * Second Life Viewer Source Code
+ * Copyright (C) 2026, Linden Research, Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation;
+ * version 2.1 of the license only.
+ * $/LicenseInfo$
+ */
+
+#include "linden_common.h"
+
+#include "lltextureuploaddiagnostic.h"
+#include "llwindowsdlvulkan.h"
+#include "lltut.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <initializer_list>
+#include <limits>
+#include <new>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace
+{
+
+#if defined(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)
+constexpr std::string_view SURFACE_CAPABILITIES_2_EXTENSION = VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME;
+#else
+constexpr std::string_view SURFACE_CAPABILITIES_2_EXTENSION = "VK_KHR_get_surface_capabilities2";
+#endif
+#if defined(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
+constexpr std::string_view SURFACE_MAINTENANCE_EXTENSION = VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
+#else
+constexpr std::string_view SURFACE_MAINTENANCE_EXTENSION = "VK_KHR_surface_maintenance1";
+#endif
+
+enum class Event
+{
+    Load,
+    Create,
+    Flags,
+    DrawableSize,
+    Resolver,
+    Extensions,
+    CreateInstance,
+    CreateSurface,
+    DestroySurface,
+    DestroyInstance,
+    Destroy,
+    Unload
+};
+
+enum class Failure
+{
+    None,
+    Load,
+    Window,
+    Resolver,
+    Extensions
+};
+
+struct FakeState
+{
+    FakeState()
+    {
+        mPhysicalProperties.apiVersion = VK_API_VERSION_1_1;
+        mPhysicalProperties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        mPhysicalProperties.limits.maxFramebufferWidth  = 4096;
+        mPhysicalProperties.limits.maxFramebufferHeight = 2160;
+        mPhysicalProperties.limits.maxViewportDimensions[0] = 4096;
+        mPhysicalProperties.limits.maxViewportDimensions[1] = 4096;
+        mPhysicalProperties.limits.viewportBoundsRange[0]   = -8192.0f;
+        mPhysicalProperties.limits.viewportBoundsRange[1]   = 8191.0f;
+        std::memcpy(mPhysicalProperties.deviceName, "SDL adapter fake", sizeof("SDL adapter fake"));
+        mSurfaceCapabilities.minImageCount       = 2;
+        mSurfaceCapabilities.maxImageCount       = 3;
+        mSurfaceCapabilities.currentExtent       = { std::numeric_limits<std::uint32_t>::max(), std::numeric_limits<std::uint32_t>::max() };
+        mSurfaceCapabilities.minImageExtent      = { 64, 64 };
+        mSurfaceCapabilities.maxImageExtent      = { 4096, 2160 };
+        mSurfaceCapabilities.maxImageArrayLayers = 1;
+        mSurfaceCapabilities.supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+        mSurfaceCapabilities.currentTransform    = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+        mSurfaceCapabilities.supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        mSurfaceCapabilities.supportedUsageFlags =
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        mFormatProperties.optimalTilingFeatures = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                                  VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                                  VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        mImageFormatProperties.maxExtent       = { 4096, 4096, 1 };
+        mImageFormatProperties.maxMipLevels    = 12;
+        mImageFormatProperties.maxArrayLayers  = 1;
+        mImageFormatProperties.sampleCounts    = VK_SAMPLE_COUNT_1_BIT;
+        mImageFormatProperties.maxResourceSize = 64 * 1024 * 1024;
+        mMemoryProperties.memoryHeapCount     = 1;
+        mMemoryProperties.memoryHeaps[0].size = 64 * 1024 * 1024;
+        mMemoryProperties.memoryTypeCount     = 1;
+        mMemoryProperties.memoryTypes[0].propertyFlags =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        mMemoryProperties.memoryTypes[0].heapIndex = 0;
+    }
+
+    std::array<Event, 48>              mEvents{};
+    std::size_t                        mEventCount                 = 0;
+    Failure                            mFailure                    = Failure::None;
+    int                                mExplicitLoaderReferences   = 0;
+    int                                mWindowLoaderReferences     = 0;
+    SDL_WindowFlags                    mWindowFlags                = SDL_WINDOW_VULKAN;
+    SDL_Window*                        mWindow                     = reinterpret_cast<SDL_Window*>(static_cast<std::uintptr_t>(0x12340));
+    bool                               mDrawableSizeSucceeds       = true;
+    int                                mDrawableWidth              = 1280;
+    int                                mDrawableHeight             = 720;
+    std::size_t                        mDrawableSizeCalls          = 0;
+    const LLWindowSDLVulkanCreateInfo* mCreateInfo                 = nullptr;
+    const char*                        mExtensionNames[2]          = { "VK_KHR_surface", "VK_KHR_xlib_surface" };
+    std::size_t                        mExtensionCount             = 2;
+    const LLWindowSDLVulkan*           mOwnerDuringDestroy         = nullptr;
+    const LLWindowSDLVulkan*           mOwnerDuringInstanceDestroy = nullptr;
+    bool                               mRequirementsInvalidatedBeforeDestroy  = false;
+    bool                               mRequirementsLiveDuringInstanceDestroy = false;
+    bool                               mLoaderLiveDuringInstanceDestroy       = false;
+    bool                               mSurfaceAbsentDuringInstanceDestroy    = false;
+    bool                               mFailInstanceCreation                  = false;
+    bool                               mSurfaceCapabilities2Enabled           = false;
+    bool                               mSurfaceMaintenanceEnabled             = false;
+    bool                               mFailSurfaceCreation                   = false;
+    bool                               mNullSurfaceOnSuccess                  = false;
+    bool                               mPoisonSurfaceOnFailure                = false;
+    bool                               mExposeDestroySurface                  = true;
+    std::size_t                        mDestroyInstanceCount                  = 0;
+    std::size_t                        mCreateSurfaceCount                    = 0;
+    std::size_t                        mDestroySurfaceCount                   = 0;
+    std::size_t                        mLiveSurfaceCount                      = 0;
+    SDL_Window*                        mSurfaceWindow                         = nullptr;
+    VkInstance                         mSurfaceInstance                       = VK_NULL_HANDLE;
+    const VkAllocationCallbacks*       mSurfaceAllocator                      = reinterpret_cast<const VkAllocationCallbacks*>(1);
+    const LLWindowSDLVulkan*           mOwnerDuringSurfaceDestroy             = nullptr;
+    bool                               mRequirementsLiveDuringSurfaceDestroy  = false;
+    bool                               mInstanceLiveDuringSurfaceDestroy      = false;
+    bool                               mLoaderLiveDuringSurfaceDestroy        = false;
+
+    VkPhysicalDevice                 mPhysicalDevice = reinterpret_cast<VkPhysicalDevice>(static_cast<std::uintptr_t>(0x11110));
+    VkPhysicalDeviceProperties       mPhysicalProperties{};
+    VkFormatProperties               mFormatProperties{};
+    VkImageFormatProperties          mImageFormatProperties{};
+    VkDevice                         mDevice                = reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(0x22220));
+    VkQueue                          mQueue                 = reinterpret_cast<VkQueue>(static_cast<std::uintptr_t>(0x33330));
+    VkSwapchainKHR                   mSwapchain             = reinterpret_cast<VkSwapchainKHR>(static_cast<std::uintptr_t>(0x44440));
+    std::size_t                      mCreateSwapchainCalls  = 0;
+    std::size_t                      mDestroySwapchainCalls = 0;
+    VkSurfaceCapabilitiesKHR         mSurfaceCapabilities{};
+    std::array<VkImage, 3>           mImages{ reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x51000)),
+                                    reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x52000)),
+                                    reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x53000)) };
+    std::array<VkImageView, 3>       mImageViews{ reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x61000)),
+                                            reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x62000)),
+                                            reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x63000)) };
+    std::size_t                      mNextImageView               = 0;
+    std::size_t                      mCreateRenderPassCalls       = 0;
+    std::size_t                      mDestroyRenderPassCalls      = 0;
+    std::size_t                      mCreateFramebufferCalls      = 0;
+    std::size_t                      mDestroyFramebufferCalls     = 0;
+    std::size_t                      mCreateShaderModuleCalls     = 0;
+    std::size_t                      mDestroyShaderModuleCalls    = 0;
+    std::size_t                      mCreatePipelineLayoutCalls   = 0;
+    std::size_t                      mDestroyPipelineLayoutCalls  = 0;
+    std::size_t                      mCreateGraphicsPipelineCalls = 0;
+    std::size_t                      mDestroyPipelineCalls        = 0;
+    VkPipelineLayout                 mLastPipelineLayout          = VK_NULL_HANDLE;
+    VkPhysicalDeviceMemoryProperties mMemoryProperties{};
+    VkBuffer                         mReadbackBuffer          = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x81000));
+    VkDeviceMemory                   mReadbackMemory          = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x82000));
+    VkBuffer                         mUploadSourceBuffer      = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x83000));
+    VkDeviceMemory                   mUploadSourceMemory      = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x84000));
+    VkBuffer                         mUploadDestinationBuffer = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x85000));
+    VkDeviceMemory                   mUploadDestinationMemory = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x86000));
+    VkImage                          mTextureImage            = reinterpret_cast<VkImage>(static_cast<std::uintptr_t>(0x87000));
+    VkDeviceMemory                   mTextureMemory           = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x88000));
+    VkImageView                      mTextureImageView        = reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x89000));
+
+    VkBuffer       mTextureUploadSourceBuffer = reinterpret_cast<VkBuffer>(static_cast<std::uintptr_t>(0x8a000));
+    VkDeviceMemory mTextureUploadSourceMemory = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(0x8b000));
+
+    VkSampler             mTextureUploadSampleBindingSampler = reinterpret_cast<VkSampler>(static_cast<std::uintptr_t>(0x8c000));
+    VkDescriptorSetLayout mTextureUploadSampleBindingDescriptorSetLayout =
+        reinterpret_cast<VkDescriptorSetLayout>(static_cast<std::uintptr_t>(0x8d000));
+    VkPipelineLayout mTextureUploadSampleBindingPipelineLayout = reinterpret_cast<VkPipelineLayout>(static_cast<std::uintptr_t>(0x8e000));
+    VkDescriptorPool mTextureUploadSampleBindingDescriptorPool = reinterpret_cast<VkDescriptorPool>(static_cast<std::uintptr_t>(0x8f000));
+    VkDescriptorSet  mTextureUploadSampleBindingDescriptorSet  = reinterpret_cast<VkDescriptorSet>(static_cast<std::uintptr_t>(0x90000));
+
+    VkSamplerCreateInfo             mTextureUploadSampleBindingSamplerCreateInfo{};
+    VkDescriptorSetLayoutCreateInfo mTextureUploadSampleBindingDescriptorSetLayoutCreateInfo{};
+    VkDescriptorSetLayoutBinding    mTextureUploadSampleBindingDescriptorSetLayoutBinding{};
+    VkPipelineLayoutCreateInfo      mTextureUploadSampleBindingPipelineLayoutCreateInfo{};
+    VkDescriptorSetLayout           mTextureUploadSampleBindingPipelineSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPoolCreateInfo      mTextureUploadSampleBindingDescriptorPoolCreateInfo{};
+    VkDescriptorPoolSize            mTextureUploadSampleBindingDescriptorPoolSize{};
+    VkDescriptorSetAllocateInfo     mTextureUploadSampleBindingDescriptorSetAllocateInfo{};
+    VkDescriptorSetLayout           mTextureUploadSampleBindingAllocatedSetLayout = VK_NULL_HANDLE;
+    VkWriteDescriptorSet            mTextureUploadSampleBindingWrite{};
+    VkDescriptorImageInfo           mTextureUploadSampleBindingImageInfo{};
+    std::size_t                     mCreateTextureUploadSampleBindingSamplerCalls              = 0;
+    std::size_t                     mDestroyTextureUploadSampleBindingSamplerCalls             = 0;
+    std::size_t                     mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls  = 0;
+    std::size_t                     mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls = 0;
+    std::size_t                     mCreateTextureUploadSampleBindingPipelineLayoutCalls       = 0;
+    std::size_t                     mDestroyTextureUploadSampleBindingPipelineLayoutCalls      = 0;
+    std::size_t                     mCreateTextureUploadSampleBindingDescriptorPoolCalls       = 0;
+    std::size_t                     mDestroyTextureUploadSampleBindingDescriptorPoolCalls      = 0;
+    std::size_t                     mAllocateTextureUploadSampleBindingDescriptorSetCalls      = 0;
+    std::size_t                     mUpdateTextureUploadSampleBindingDescriptorSetCalls        = 0;
+    std::size_t                     mTextureUploadSampleBindingDescriptorPoolDestroyOrder      = 0;
+    std::size_t                     mTextureUploadSampleBindingPipelineLayoutDestroyOrder      = 0;
+    std::size_t                     mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder = 0;
+    std::size_t                     mTextureUploadSampleBindingSamplerDestroyOrder             = 0;
+    VkPipeline                      mTextureUploadSamplePipeline                               = VK_NULL_HANDLE;
+    VkPipelineLayout                mTextureUploadSamplePipelineLayout                         = VK_NULL_HANDLE;
+    VkRenderPass                    mTextureUploadSamplePipelineRenderPass                     = VK_NULL_HANDLE;
+    std::size_t                     mCreateTextureUploadSamplePipelineCalls                    = 0;
+    std::size_t                     mDestroyTextureUploadSamplePipelineCalls                   = 0;
+    std::size_t                     mTextureUploadSamplePipelineDestroyOrder                   = 0;
+    std::size_t                     mPresentationRenderPassDestroyOrder                        = 0;
+
+    VkMemoryRequirements             mTextureMemoryRequirements{ 4096, 256, 1 };
+    VkImageCreateInfo                mTextureImageCreateInfo{};
+    VkImageViewCreateInfo            mTextureImageViewCreateInfo{};
+    std::size_t                      mCreateTextureImageCalls      = 0;
+    std::size_t                      mDestroyTextureImageCalls     = 0;
+    std::size_t                      mTextureRequirementsCalls     = 0;
+    std::size_t                      mAllocateTextureMemoryCalls   = 0;
+    std::size_t                      mBindTextureMemoryCalls       = 0;
+    std::size_t                      mCreateTextureImageViewCalls  = 0;
+    std::size_t                      mDestroyTextureImageViewCalls = 0;
+    std::size_t                      mFreeTextureMemoryCalls       = 0;
+    std::size_t                      mTextureDestroySequence       = 0;
+    std::size_t                      mTextureViewDestroyOrder      = 0;
+    std::size_t                      mTextureImageDestroyOrder     = 0;
+    std::size_t                      mTextureMemoryFreeOrder       = 0;
+
+    std::size_t mTextureUploadSourceBufferDestroyOrder = 0;
+    std::size_t mTextureUploadSourceMemoryFreeOrder    = 0;
+    std::size_t mDeviceDestroyOrder                    = 0;
+
+    std::array<std::uint8_t, LLRenderContract::TEXTURE_UPLOAD_SOURCE_BYTE_COUNT> mTextureUploadMappedBytes{};
+    VkBufferCreateInfo                                                           mTextureUploadSourceCreateInfo{};
+    std::size_t                                                                  mDestroyTextureUploadSourceBufferCalls = 0;
+    std::size_t                                                                  mFreeTextureUploadSourceMemoryCalls    = 0;
+    std::size_t                                                                  mMapTextureUploadSourceMemoryCalls     = 0;
+    std::size_t                                                                  mFlushTextureUploadSourceMemoryCalls   = 0;
+    std::size_t                                                                  mUnmapTextureUploadSourceMemoryCalls   = 0;
+    std::size_t                                                                  mTextureUploadSourceOperationSequence  = 0;
+    std::size_t                                                                  mTextureUploadSourceMapOrder           = 0;
+    std::size_t                                                                  mTextureUploadSourceFlushOrder         = 0;
+    std::size_t                                                                  mTextureUploadSourceUnmapOrder         = 0;
+    bool                                                                         mTextureUploadSourceMapped             = false;
+    std::size_t                                                                  mTextureUploadCopyCalls                = 0;
+    std::size_t                                                                  mTextureUploadBlitCalls                = 0;
+    std::size_t                                                                  mTextureUploadImageBarrierCount        = 0;
+
+    VkBuffer                         mLastCreatedBuffer       = VK_NULL_HANDLE;
+    std::array<std::uint8_t, LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT> mUploadMappedBytes{};
+    std::uint8_t                                                              mReadbackMappedByte  = 0;
+    VkDeviceSize                                                              mReadbackBufferSize  = 0;
+    std::size_t                                                               mCreateBufferCalls   = 0;
+    std::size_t                                                               mAllocateMemoryCalls = 0;
+    std::size_t                                                               mMapMemoryCalls      = 0;
+    std::size_t                                                               mUnmapMemoryCalls    = 0;
+    std::size_t                                                               mDestroyBufferCalls  = 0;
+    std::size_t                                                               mFreeMemoryCalls     = 0;
+    VkCommandPool              mCommandPool                = reinterpret_cast<VkCommandPool>(static_cast<std::uintptr_t>(0x71000));
+    VkCommandBuffer            mCommandBuffer              = reinterpret_cast<VkCommandBuffer>(static_cast<std::uintptr_t>(0x72000));
+    VkSemaphore                mImageAvailableSemaphore    = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x73000));
+    VkFence                    mSubmissionFence            = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x74000));
+    VkSemaphore                mPresentationReadySemaphore = reinterpret_cast<VkSemaphore>(static_cast<std::uintptr_t>(0x75000));
+    VkFence                    mPresentCompletionFence     = reinterpret_cast<VkFence>(static_cast<std::uintptr_t>(0x76000));
+    bool                       mExposeWaitForFences        = true;
+    std::array<VkResult, 8>    mWaitResults{};
+    std::size_t                mWaitResultCount         = 0;
+    std::size_t                mWaitResultIndex         = 0;
+    std::size_t                mWaitCalls               = 0;
+    std::size_t                mQueueSubmitCalls        = 0;
+    std::size_t                mCreateSemaphoreCalls    = 0;
+    std::size_t                mCreateFenceCalls        = 0;
+    std::size_t                mAcquireNextImageCalls   = 0;
+    std::size_t                mPipelineBarrierCalls    = 0;
+    std::size_t                mClearColorImageCalls    = 0;
+    std::size_t                mBeginRenderPassCalls    = 0;
+    std::size_t                mEndRenderPassCalls      = 0;
+    VkCommandBuffer            mRenderPassCommandBuffer = VK_NULL_HANDLE;
+    VkRenderPass               mRenderPass              = VK_NULL_HANDLE;
+    VkFramebuffer              mRenderPassFramebuffer   = VK_NULL_HANDLE;
+    VkRect2D                   mRenderPassArea{};
+    VkClearValue               mRenderPassClear{};
+    VkSubpassContents          mRenderPassContents           = VK_SUBPASS_CONTENTS_MAX_ENUM;
+    std::size_t                mBindPipelineCalls            = 0;
+    std::size_t                mBindDescriptorSetsCalls      = 0;
+    std::size_t                mBindVertexBuffersCalls       = 0;
+    std::size_t                mSetViewportCalls             = 0;
+    std::size_t                mSetScissorCalls              = 0;
+    std::size_t                mDrawCalls                    = 0;
+    VkCommandBuffer            mDrawCommandBuffer            = VK_NULL_HANDLE;
+    VkPipelineBindPoint        mPipelineBindPoint            = VK_PIPELINE_BIND_POINT_MAX_ENUM;
+    VkPipeline                 mBoundPipeline                = VK_NULL_HANDLE;
+    VkPipelineBindPoint        mDescriptorPipelineBindPoint  = VK_PIPELINE_BIND_POINT_MAX_ENUM;
+    VkPipelineLayout           mBoundDescriptorPipelineLayout = VK_NULL_HANDLE;
+    std::uint32_t              mFirstDescriptorSet           = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t              mDescriptorSetCount           = 0;
+    VkDescriptorSet            mBoundDescriptorSet           = VK_NULL_HANDLE;
+    std::uint32_t              mDynamicOffsetCount           = std::numeric_limits<std::uint32_t>::max();
+    VkBuffer                   mBoundVertexBuffer            = VK_NULL_HANDLE;
+    VkDeviceSize               mBoundVertexOffset            = std::numeric_limits<VkDeviceSize>::max();
+    std::uint32_t              mFirstVertexBinding           = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t              mVertexBindingCount           = 0;
+    std::size_t                mCommandOrder                 = 0;
+    std::size_t                mBindPipelineOrder            = 0;
+    std::size_t                mBindDescriptorSetsOrder      = 0;
+    std::size_t                mBindVertexBuffersOrder       = 0;
+    std::size_t                mDrawOrder                    = 0;
+    std::uint32_t              mFirstViewport                = std::numeric_limits<std::uint32_t>::max();
+    VkViewport                 mViewport{};
+    std::uint32_t              mFirstScissor = std::numeric_limits<std::uint32_t>::max();
+    VkRect2D                   mScissor{};
+    std::uint32_t              mDrawVertexCount               = 0;
+    std::uint32_t              mDrawInstanceCount             = 0;
+    std::uint32_t              mDrawFirstVertex               = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t              mDrawFirstInstance             = std::numeric_limits<std::uint32_t>::max();
+    VkCommandBuffer            mClearCommandBuffer            = VK_NULL_HANDLE;
+    VkImage                    mClearedImage                  = VK_NULL_HANDLE;
+    VkImageLayout              mClearImageLayout             = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkClearColorValue          mClearColor{};
+    VkImageSubresourceRange    mClearRange{};
+    std::size_t                mQueuePresentCalls            = 0;
+    std::size_t                mReleaseSwapchainImagesCalls  = 0;
+    VkPipelineStageFlags       mSubmitWaitStage              = 0;
+    VkResult                   mEndCommandBufferResult       = VK_SUCCESS;
+    VkResult                   mAcquireNextImageResult       = VK_SUCCESS;
+    std::uint32_t              mAcquiredImageIndex           = 0;
+    VkResult                   mQueuePresentResult           = VK_SUCCESS;
+    VkResult                   mReleaseSwapchainImagesResult = VK_SUCCESS;
+
+    void record(Event event) noexcept { mEvents[mEventCount++] = event; }
+};
+
+FakeState* gVulkanState = nullptr;
+
+class ScopedVulkanState
+{
+public:
+    explicit ScopedVulkanState(FakeState& state) noexcept { gVulkanState = &state; }
+    ~ScopedVulkanState() noexcept { gVulkanState = nullptr; }
+
+    ScopedVulkanState(const ScopedVulkanState&)            = delete;
+    ScopedVulkanState& operator=(const ScopedVulkanState&) = delete;
+
+    void use(FakeState& state) noexcept { gVulkanState = &state; }
+};
+
+template<typename Function>
+PFN_vkVoidFunction eraseFunctionType(Function function) noexcept
+{
+    return reinterpret_cast<PFN_vkVoidFunction>(function);
+}
+
+VkInstance fakeInstance() noexcept
+{
+    return reinterpret_cast<VkInstance>(static_cast<std::uintptr_t>(0x98760));
+}
+
+VkSurfaceKHR fakeSurface() noexcept
+{
+    return reinterpret_cast<VkSurfaceKHR>(static_cast<std::uintptr_t>(0x76540));
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateInstanceVersion(std::uint32_t* version) noexcept
+{
+    if (!version)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *version = VK_API_VERSION_1_1;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateInstanceExtensionProperties(const char*, std::uint32_t* count,
+                                                                        VkExtensionProperties* properties) noexcept
+{
+    if (!count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    constexpr std::array<const char*, 4> extensions{ "VK_KHR_surface", "VK_KHR_xlib_surface", "VK_KHR_get_surface_capabilities2",
+                                                     "VK_KHR_surface_maintenance1" };
+    if (!properties)
+    {
+        *count = static_cast<std::uint32_t>(extensions.size());
+        return VK_SUCCESS;
+    }
+
+    const std::size_t copied = std::min<std::size_t>(*count, extensions.size());
+    for (std::size_t index = 0; index < copied; ++index)
+    {
+        std::memcpy(properties[index].extensionName, extensions[index], std::strlen(extensions[index]) + 1);
+    }
+    *count = static_cast<std::uint32_t>(copied);
+    return copied == extensions.size() ? VK_SUCCESS : VK_INCOMPLETE;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateInstanceLayerProperties(std::uint32_t* count, VkLayerProperties*) noexcept
+{
+    if (!count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *count = 0;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateInstance(const VkInstanceCreateInfo* create_info,
+                                                  const VkAllocationCallbacks*,
+                                                  VkInstance* instance) noexcept
+{
+    if (!gVulkanState || !create_info || !instance)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    gVulkanState->record(Event::CreateInstance);
+    gVulkanState->mSurfaceCapabilities2Enabled = false;
+    gVulkanState->mSurfaceMaintenanceEnabled   = false;
+    for (std::uint32_t index = 0; index < create_info->enabledExtensionCount; ++index)
+    {
+        if (create_info->ppEnabledExtensionNames[index] == SURFACE_CAPABILITIES_2_EXTENSION)
+        {
+            gVulkanState->mSurfaceCapabilities2Enabled = true;
+        }
+        if (create_info->ppEnabledExtensionNames[index] == SURFACE_MAINTENANCE_EXTENSION)
+        {
+            gVulkanState->mSurfaceMaintenanceEnabled = true;
+        }
+    }
+    if (gVulkanState->mFailInstanceCreation)
+    {
+        *instance = VK_NULL_HANDLE;
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *instance = fakeInstance();
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyInstance(VkInstance instance, const VkAllocationCallbacks*) noexcept
+{
+    if (!gVulkanState || instance != fakeInstance())
+    {
+        return;
+    }
+
+    gVulkanState->record(Event::DestroyInstance);
+    ++gVulkanState->mDestroyInstanceCount;
+    if (gVulkanState->mOwnerDuringInstanceDestroy)
+    {
+        gVulkanState->mRequirementsLiveDuringInstanceDestroy = gVulkanState->mOwnerDuringInstanceDestroy->hasRequirements();
+        gVulkanState->mSurfaceAbsentDuringInstanceDestroy    = gVulkanState->mLiveSurfaceCount == 0;
+    }
+    gVulkanState->mLoaderLiveDuringInstanceDestroy =
+        gVulkanState->mExplicitLoaderReferences == 1 && gVulkanState->mWindowLoaderReferences == 1;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroySurface(VkInstance instance, VkSurfaceKHR surface, const VkAllocationCallbacks* allocator) noexcept
+{
+    if (!gVulkanState || instance != fakeInstance() || surface != fakeSurface() || allocator)
+    {
+        return;
+    }
+
+    gVulkanState->record(Event::DestroySurface);
+    ++gVulkanState->mDestroySurfaceCount;
+    if (gVulkanState->mLiveSurfaceCount != 0)
+    {
+        --gVulkanState->mLiveSurfaceCount;
+    }
+    if (gVulkanState->mOwnerDuringSurfaceDestroy)
+    {
+        gVulkanState->mRequirementsLiveDuringSurfaceDestroy = gVulkanState->mOwnerDuringSurfaceDestroy->hasRequirements();
+        gVulkanState->mInstanceLiveDuringSurfaceDestroy     = instance == fakeInstance();
+    }
+    gVulkanState->mLoaderLiveDuringSurfaceDestroy =
+        gVulkanState->mExplicitLoaderReferences == 1 && gVulkanState->mWindowLoaderReferences == 1;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEnumeratePhysicalDevices(VkInstance instance, std::uint32_t* count, VkPhysicalDevice* devices) noexcept
+{
+    if (!gVulkanState || instance != fakeInstance() || !count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (!devices)
+    {
+        *count = 1;
+        return VK_SUCCESS;
+    }
+    if (*count == 0)
+    {
+        return VK_INCOMPLETE;
+    }
+    devices[0] = gVulkanState->mPhysicalDevice;
+    *count     = 1;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceProperties(VkPhysicalDevice device, VkPhysicalDeviceProperties* properties) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mPhysicalDevice && properties)
+    {
+        *properties = gVulkanState->mPhysicalProperties;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFormatProperties(VkPhysicalDevice device,
+                                                                  VkFormat         format,
+                                                                  VkFormatProperties* properties) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mPhysicalDevice &&
+        (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_R8G8B8A8_UNORM) && properties)
+    {
+        *properties = gVulkanState->mFormatProperties;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice         physical_device,
+                                                                          VkFormat                 format,
+                                                                          VkImageType              image_type,
+                                                                          VkImageTiling            tiling,
+                                                                          VkImageUsageFlags        usage,
+                                                                          VkImageCreateFlags       flags,
+                                                                          VkImageFormatProperties* properties) noexcept
+{
+    constexpr VkImageUsageFlags expected_usage =
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (!gVulkanState || physical_device != gVulkanState->mPhysicalDevice || format != VK_FORMAT_R8G8B8A8_UNORM ||
+        image_type != VK_IMAGE_TYPE_2D || tiling != VK_IMAGE_TILING_OPTIMAL || usage != expected_usage || flags != 0 || !properties)
+    {
+        return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    }
+    *properties = gVulkanState->mImageFormatProperties;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice         device,
+                                                                      std::uint32_t*           count,
+                                                                      VkQueueFamilyProperties* properties) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mPhysicalDevice || !count)
+    {
+        return;
+    }
+    if (!properties)
+    {
+        *count = 1;
+        return;
+    }
+    if (*count != 0)
+    {
+        properties[0]            = {};
+        properties[0].queueFlags = VK_QUEUE_GRAPHICS_BIT;
+        properties[0].queueCount = 1;
+        *count                   = 1;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetPhysicalDeviceSurfaceSupport(VkPhysicalDevice device,
+                                                                   std::uint32_t    queue_family,
+                                                                   VkSurfaceKHR     surface,
+                                                                   VkBool32*        supported) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mPhysicalDevice || queue_family != 0 || surface != fakeSurface() || !supported)
+    {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    *supported = VK_TRUE;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEnumerateDeviceExtensionProperties(VkPhysicalDevice       device,
+                                                                      const char*            layer,
+                                                                      std::uint32_t*         count,
+                                                                      VkExtensionProperties* properties) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mPhysicalDevice || layer || !count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (!properties)
+    {
+        *count = 2;
+        return VK_SUCCESS;
+    }
+    if (*count < 2)
+    {
+        return VK_INCOMPLETE;
+    }
+    properties[0] = {};
+    std::memcpy(properties[0].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME, sizeof(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
+    properties[1] = {};
+    std::memcpy(properties[1].extensionName, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+                sizeof(VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME));
+    *count = 2;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures2(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures2* features) noexcept
+{
+    if (!gVulkanState || physical_device != gVulkanState->mPhysicalDevice || !features)
+    {
+        return;
+    }
+    for (VkBaseOutStructure* extension = static_cast<VkBaseOutStructure*>(features->pNext); extension; extension = extension->pNext)
+    {
+        if (extension->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR)
+        {
+            reinterpret_cast<VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR*>(extension)->swapchainMaintenance1 = VK_TRUE;
+        }
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceFeatures(VkPhysicalDevice device, VkPhysicalDeviceFeatures* features) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mPhysicalDevice && features)
+    {
+        *features                  = {};
+        features->independentBlend = VK_TRUE;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice device,
+                                                const VkDeviceCreateInfo*,
+                                                const VkAllocationCallbacks*,
+                                                VkDevice* logical_device) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mPhysicalDevice || !logical_device)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *logical_device = gVulkanState->mDevice;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyDevice(VkDevice device, const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice)
+    {
+        gVulkanState->mDeviceDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetDeviceQueue(VkDevice      device,
+                                              std::uint32_t queue_family,
+                                              std::uint32_t queue_index,
+                                              VkQueue*      queue) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && queue_family == 0 && queue_index == 0 && queue)
+    {
+        *queue = gVulkanState->mQueue;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfaceCapabilities(VkPhysicalDevice          device,
+                                                          VkSurfaceKHR              surface,
+                                                          VkSurfaceCapabilitiesKHR* capabilities) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mPhysicalDevice || surface != fakeSurface() || !capabilities)
+    {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    *capabilities = gVulkanState->mSurfaceCapabilities;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfaceFormats(VkPhysicalDevice    device,
+                                                     VkSurfaceKHR        surface,
+                                                     std::uint32_t*      count,
+                                                     VkSurfaceFormatKHR* formats) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mPhysicalDevice || surface != fakeSurface() || !count)
+    {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    if (!formats)
+    {
+        *count = 1;
+        return VK_SUCCESS;
+    }
+    if (*count == 0)
+    {
+        return VK_INCOMPLETE;
+    }
+    formats[0] = { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
+    *count     = 1;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetSurfacePresentModes(VkPhysicalDevice  device,
+                                                          VkSurfaceKHR      surface,
+                                                          std::uint32_t*    count,
+                                                          VkPresentModeKHR* modes) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mPhysicalDevice || surface != fakeSurface() || !count)
+    {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    if (!modes)
+    {
+        *count = 1;
+        return VK_SUCCESS;
+    }
+    if (*count == 0)
+    {
+        return VK_INCOMPLETE;
+    }
+    modes[0] = VK_PRESENT_MODE_FIFO_KHR;
+    *count   = 1;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSwapchain(VkDevice device,
+                                                   const VkSwapchainCreateInfoKHR*,
+                                                   const VkAllocationCallbacks*,
+                                                   VkSwapchainKHR* swapchain) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !swapchain)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateSwapchainCalls;
+    *swapchain = gVulkanState->mSwapchain;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroySwapchain(VkDevice device,
+                                                VkSwapchainKHR swapchain,
+                                                const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && swapchain == gVulkanState->mSwapchain)
+    {
+        ++gVulkanState->mDestroySwapchainCalls;
+        gVulkanState->mNextImageView = 0;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeGetSwapchainImages(VkDevice       device,
+                                                      VkSwapchainKHR swapchain,
+                                                      std::uint32_t* count,
+                                                      VkImage*       images) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || swapchain != gVulkanState->mSwapchain || !count)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (!images)
+    {
+        *count = static_cast<std::uint32_t>(gVulkanState->mImages.size());
+        return VK_SUCCESS;
+    }
+    const std::size_t written = std::min<std::size_t>(*count, gVulkanState->mImages.size());
+    std::copy_n(gVulkanState->mImages.begin(), written, images);
+    *count = static_cast<std::uint32_t>(written);
+    return written == gVulkanState->mImages.size() ? VK_SUCCESS : VK_INCOMPLETE;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateImageView(VkDevice                     device,
+                                                   const VkImageViewCreateInfo* create_info,
+                                                   const VkAllocationCallbacks*,
+                                                   VkImageView* image_view) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || !image_view)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (create_info->image == gVulkanState->mTextureImage)
+    {
+        ++gVulkanState->mCreateTextureImageViewCalls;
+        gVulkanState->mTextureImageViewCreateInfo = *create_info;
+        *image_view                               = gVulkanState->mTextureImageView;
+        return VK_SUCCESS;
+    }
+    if (gVulkanState->mNextImageView >= gVulkanState->mImageViews.size())
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *image_view = gVulkanState->mImageViews[gVulkanState->mNextImageView++];
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyImageView(VkDevice device, VkImageView image_view, const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && image_view == gVulkanState->mTextureImageView)
+    {
+        ++gVulkanState->mDestroyTextureImageViewCalls;
+        gVulkanState->mTextureViewDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateRenderPass(VkDevice device,
+                                                     const VkRenderPassCreateInfo*,
+                                                     const VkAllocationCallbacks*,
+                                                     VkRenderPass* render_pass) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !render_pass)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateRenderPassCalls;
+    *render_pass = reinterpret_cast<VkRenderPass>(static_cast<std::uintptr_t>(0x80000 + gVulkanState->mCreateRenderPassCalls));
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyRenderPass(VkDevice device,
+                                                  VkRenderPass render_pass,
+                                                  const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && render_pass != VK_NULL_HANDLE)
+    {
+        ++gVulkanState->mDestroyRenderPassCalls;
+        gVulkanState->mPresentationRenderPassDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateFramebuffer(VkDevice device,
+                                                      const VkFramebufferCreateInfo*,
+                                                      const VkAllocationCallbacks*,
+                                                      VkFramebuffer* framebuffer) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !framebuffer)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateFramebufferCalls;
+    *framebuffer = reinterpret_cast<VkFramebuffer>(static_cast<std::uintptr_t>(0x81000 + gVulkanState->mCreateFramebufferCalls));
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyFramebuffer(VkDevice device,
+                                                   VkFramebuffer framebuffer,
+                                                   const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && framebuffer != VK_NULL_HANDLE)
+    {
+        ++gVulkanState->mDestroyFramebufferCalls;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateShaderModule(VkDevice                        device,
+                                                       const VkShaderModuleCreateInfo* create_info,
+                                                       const VkAllocationCallbacks*,
+                                                       VkShaderModule*                  shader_module) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || !shader_module ||
+        create_info->sType != VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO || create_info->codeSize == 0 ||
+        create_info->codeSize % sizeof(std::uint32_t) != 0 || !create_info->pCode)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateShaderModuleCalls;
+    *shader_module = reinterpret_cast<VkShaderModule>(
+        static_cast<std::uintptr_t>(0x82000 + gVulkanState->mCreateShaderModuleCalls));
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyShaderModule(VkDevice device,
+                                                    VkShaderModule shader_module,
+                                                    const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && shader_module != VK_NULL_HANDLE)
+    {
+        ++gVulkanState->mDestroyShaderModuleCalls;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSampler(VkDevice                     device,
+                                                 const VkSamplerCreateInfo*   create_info,
+                                                 const VkAllocationCallbacks* allocator,
+                                                 VkSampler*                   sampler) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || allocator || !sampler ||
+        create_info->sType != VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO || create_info->pNext || create_info->flags != 0 ||
+        create_info->magFilter != VK_FILTER_LINEAR || create_info->minFilter != VK_FILTER_LINEAR ||
+        create_info->mipmapMode != VK_SAMPLER_MIPMAP_MODE_LINEAR || create_info->addressModeU != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE ||
+        create_info->addressModeV != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE ||
+        create_info->addressModeW != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE || create_info->mipLodBias != 0.f ||
+        create_info->anisotropyEnable != VK_FALSE || create_info->maxAnisotropy != 1.f || create_info->compareEnable != VK_FALSE ||
+        create_info->compareOp != VK_COMPARE_OP_ALWAYS || create_info->minLod != 0.f || create_info->maxLod != 2.f ||
+        create_info->borderColor != VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK || create_info->unnormalizedCoordinates != VK_FALSE)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateTextureUploadSampleBindingSamplerCalls;
+    gVulkanState->mTextureUploadSampleBindingSamplerCreateInfo = *create_info;
+    *sampler                                                   = gVulkanState->mTextureUploadSampleBindingSampler;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroySampler(VkDevice device, VkSampler sampler, const VkAllocationCallbacks* allocator) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && sampler == gVulkanState->mTextureUploadSampleBindingSampler && !allocator)
+    {
+        ++gVulkanState->mDestroyTextureUploadSampleBindingSamplerCalls;
+        gVulkanState->mTextureUploadSampleBindingSamplerDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDescriptorSetLayout(VkDevice                               device,
+                                                             const VkDescriptorSetLayoutCreateInfo* create_info,
+                                                             const VkAllocationCallbacks*           allocator,
+                                                             VkDescriptorSetLayout*                 descriptor_set_layout) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || allocator || !descriptor_set_layout ||
+        create_info->sType != VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO || create_info->pNext || create_info->flags != 0 ||
+        create_info->bindingCount != 1 || !create_info->pBindings || create_info->pBindings[0].binding != 0 ||
+        create_info->pBindings[0].descriptorType != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+        create_info->pBindings[0].descriptorCount != 1 || create_info->pBindings[0].stageFlags != VK_SHADER_STAGE_FRAGMENT_BIT ||
+        create_info->pBindings[0].pImmutableSamplers)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetLayoutCreateInfo           = *create_info;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetLayoutCreateInfo.pBindings = nullptr;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetLayoutBinding              = create_info->pBindings[0];
+    *descriptor_set_layout = gVulkanState->mTextureUploadSampleBindingDescriptorSetLayout;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyDescriptorSetLayout(VkDevice                     device,
+                                                          VkDescriptorSetLayout        descriptor_set_layout,
+                                                          const VkAllocationCallbacks* allocator) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice &&
+        descriptor_set_layout == gVulkanState->mTextureUploadSampleBindingDescriptorSetLayout && !allocator)
+    {
+        ++gVulkanState->mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls;
+        gVulkanState->mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreatePipelineLayout(VkDevice                          device,
+                                                        const VkPipelineLayoutCreateInfo* create_info,
+                                                        const VkAllocationCallbacks*      allocator,
+                                                        VkPipelineLayout*                 pipeline_layout) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || allocator || !pipeline_layout ||
+        create_info->sType != VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO || create_info->pNext || create_info->flags != 0 ||
+        create_info->pushConstantRangeCount != 0 || create_info->pPushConstantRanges)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    if (create_info->setLayoutCount == 1 && create_info->pSetLayouts &&
+        create_info->pSetLayouts[0] == gVulkanState->mTextureUploadSampleBindingDescriptorSetLayout)
+    {
+        ++gVulkanState->mCreateTextureUploadSampleBindingPipelineLayoutCalls;
+        gVulkanState->mTextureUploadSampleBindingPipelineLayoutCreateInfo             = *create_info;
+        gVulkanState->mTextureUploadSampleBindingPipelineLayoutCreateInfo.pSetLayouts = nullptr;
+        gVulkanState->mTextureUploadSampleBindingPipelineSetLayout                    = create_info->pSetLayouts[0];
+        *pipeline_layout = gVulkanState->mTextureUploadSampleBindingPipelineLayout;
+        return VK_SUCCESS;
+    }
+    if (create_info->setLayoutCount != 0 || create_info->pSetLayouts)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreatePipelineLayoutCalls;
+    gVulkanState->mLastPipelineLayout = reinterpret_cast<VkPipelineLayout>(
+        static_cast<std::uintptr_t>(0x83000 + gVulkanState->mCreatePipelineLayoutCalls));
+    *pipeline_layout = gVulkanState->mLastPipelineLayout;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyPipelineLayout(VkDevice                     device,
+                                                     VkPipelineLayout             pipeline_layout,
+                                                     const VkAllocationCallbacks* allocator) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && pipeline_layout == gVulkanState->mTextureUploadSampleBindingPipelineLayout &&
+        !allocator)
+    {
+        ++gVulkanState->mDestroyTextureUploadSampleBindingPipelineLayoutCalls;
+        gVulkanState->mTextureUploadSampleBindingPipelineLayoutDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+    else if (gVulkanState && device == gVulkanState->mDevice && pipeline_layout != VK_NULL_HANDLE && !allocator)
+    {
+        ++gVulkanState->mDestroyPipelineLayoutCalls;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDescriptorPool(VkDevice                          device,
+                                                        const VkDescriptorPoolCreateInfo* create_info,
+                                                        const VkAllocationCallbacks*      allocator,
+                                                        VkDescriptorPool*                 descriptor_pool) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || allocator || !descriptor_pool ||
+        create_info->sType != VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO || create_info->pNext || create_info->flags != 0 ||
+        create_info->maxSets != 1 || create_info->poolSizeCount != 1 || !create_info->pPoolSizes ||
+        create_info->pPoolSizes[0].type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || create_info->pPoolSizes[0].descriptorCount != 1)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateTextureUploadSampleBindingDescriptorPoolCalls;
+    gVulkanState->mTextureUploadSampleBindingDescriptorPoolCreateInfo            = *create_info;
+    gVulkanState->mTextureUploadSampleBindingDescriptorPoolCreateInfo.pPoolSizes = nullptr;
+    gVulkanState->mTextureUploadSampleBindingDescriptorPoolSize                  = create_info->pPoolSizes[0];
+    *descriptor_pool                                                             = gVulkanState->mTextureUploadSampleBindingDescriptorPool;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyDescriptorPool(VkDevice                     device,
+                                                     VkDescriptorPool             descriptor_pool,
+                                                     const VkAllocationCallbacks* allocator) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && descriptor_pool == gVulkanState->mTextureUploadSampleBindingDescriptorPool &&
+        !allocator)
+    {
+        ++gVulkanState->mDestroyTextureUploadSampleBindingDescriptorPoolCalls;
+        gVulkanState->mTextureUploadSampleBindingDescriptorPoolDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateDescriptorSets(VkDevice                           device,
+                                                          const VkDescriptorSetAllocateInfo* allocate_info,
+                                                          VkDescriptorSet*                   descriptor_set) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !allocate_info || !descriptor_set ||
+        allocate_info->sType != VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO || allocate_info->pNext ||
+        allocate_info->descriptorPool != gVulkanState->mTextureUploadSampleBindingDescriptorPool ||
+        allocate_info->descriptorSetCount != 1 || !allocate_info->pSetLayouts ||
+        allocate_info->pSetLayouts[0] != gVulkanState->mTextureUploadSampleBindingDescriptorSetLayout)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mAllocateTextureUploadSampleBindingDescriptorSetCalls;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetAllocateInfo             = *allocate_info;
+    gVulkanState->mTextureUploadSampleBindingDescriptorSetAllocateInfo.pSetLayouts = nullptr;
+    gVulkanState->mTextureUploadSampleBindingAllocatedSetLayout                    = allocate_info->pSetLayouts[0];
+    *descriptor_set                                                                = gVulkanState->mTextureUploadSampleBindingDescriptorSet;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeUpdateDescriptorSets(VkDevice                    device,
+                                                    std::uint32_t               descriptor_write_count,
+                                                    const VkWriteDescriptorSet* descriptor_writes,
+                                                    std::uint32_t               descriptor_copy_count,
+                                                    const VkCopyDescriptorSet*  descriptor_copies) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || descriptor_write_count != 1 || !descriptor_writes ||
+        descriptor_copy_count != 0 || descriptor_copies || descriptor_writes[0].sType != VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET ||
+        descriptor_writes[0].pNext || descriptor_writes[0].dstSet != gVulkanState->mTextureUploadSampleBindingDescriptorSet ||
+        descriptor_writes[0].dstBinding != 0 || descriptor_writes[0].dstArrayElement != 0 || descriptor_writes[0].descriptorCount != 1 ||
+        descriptor_writes[0].descriptorType != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || !descriptor_writes[0].pImageInfo ||
+        descriptor_writes[0].pBufferInfo || descriptor_writes[0].pTexelBufferView ||
+        descriptor_writes[0].pImageInfo[0].sampler != gVulkanState->mTextureUploadSampleBindingSampler ||
+        descriptor_writes[0].pImageInfo[0].imageView != gVulkanState->mTextureImageView ||
+        descriptor_writes[0].pImageInfo[0].imageLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    {
+        return;
+    }
+    ++gVulkanState->mUpdateTextureUploadSampleBindingDescriptorSetCalls;
+    gVulkanState->mTextureUploadSampleBindingWrite            = descriptor_writes[0];
+    gVulkanState->mTextureUploadSampleBindingWrite.pImageInfo = nullptr;
+    gVulkanState->mTextureUploadSampleBindingImageInfo        = descriptor_writes[0].pImageInfo[0];
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateGraphicsPipelines(VkDevice device,
+                                                            VkPipelineCache pipeline_cache,
+                                                            std::uint32_t create_info_count,
+                                                            const VkGraphicsPipelineCreateInfo* create_infos,
+                                                            const VkAllocationCallbacks*,
+                                                            VkPipeline* pipelines) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || pipeline_cache != VK_NULL_HANDLE || create_info_count != 1 || !create_infos ||
+        !pipelines || create_infos[0].sType != VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO || create_infos[0].stageCount != 2 ||
+        create_infos[0].renderPass == VK_NULL_HANDLE || create_infos[0].subpass != 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    const bool sampled = create_infos[0].layout == gVulkanState->mTextureUploadSampleBindingPipelineLayout;
+    if (!sampled && create_infos[0].layout != gVulkanState->mLastPipelineLayout)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    ++gVulkanState->mCreateGraphicsPipelineCalls;
+    if (sampled)
+    {
+        ++gVulkanState->mCreateTextureUploadSamplePipelineCalls;
+        gVulkanState->mTextureUploadSamplePipelineLayout     = create_infos[0].layout;
+        gVulkanState->mTextureUploadSamplePipelineRenderPass = create_infos[0].renderPass;
+        gVulkanState->mTextureUploadSamplePipeline =
+            reinterpret_cast<VkPipeline>(static_cast<std::uintptr_t>(0x91000 + gVulkanState->mCreateTextureUploadSamplePipelineCalls));
+        pipelines[0] = gVulkanState->mTextureUploadSamplePipeline;
+        return VK_SUCCESS;
+    }
+    pipelines[0] = reinterpret_cast<VkPipeline>(
+        static_cast<std::uintptr_t>(0x84000 + gVulkanState->mCreateGraphicsPipelineCalls));
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyPipeline(VkDevice device,
+                                                VkPipeline pipeline,
+                                                const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && pipeline != VK_NULL_HANDLE)
+    {
+        ++gVulkanState->mDestroyPipelineCalls;
+        if (pipeline == gVulkanState->mTextureUploadSamplePipeline)
+        {
+            ++gVulkanState->mDestroyTextureUploadSamplePipelineCalls;
+            gVulkanState->mTextureUploadSamplePipelineDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+        }
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateCommandPool(VkDevice device,
+                                                     const VkCommandPoolCreateInfo*,
+                                                     const VkAllocationCallbacks*,
+                                                     VkCommandPool* command_pool) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !command_pool)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *command_pool = gVulkanState->mCommandPool;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyCommandPool(VkDevice, VkCommandPool, const VkAllocationCallbacks*) noexcept
+{
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateCommandBuffers(VkDevice device,
+                                                          const VkCommandBufferAllocateInfo*,
+                                                          VkCommandBuffer* command_buffer) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !command_buffer)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *command_buffer = gVulkanState->mCommandBuffer;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateSemaphore(VkDevice device,
+                                                   const VkSemaphoreCreateInfo*,
+                                                   const VkAllocationCallbacks*,
+                                                   VkSemaphore* semaphore) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !semaphore)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    const std::size_t create_index = gVulkanState->mCreateSemaphoreCalls++;
+    *semaphore = create_index % 2 == 0 ? gVulkanState->mImageAvailableSemaphore : gVulkanState->mPresentationReadySemaphore;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroySemaphore(VkDevice, VkSemaphore, const VkAllocationCallbacks*) noexcept
+{
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateFence(VkDevice device,
+                                               const VkFenceCreateInfo*,
+                                               const VkAllocationCallbacks*,
+                                               VkFence* fence) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !fence)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    const std::size_t create_index = gVulkanState->mCreateFenceCalls++;
+    *fence                         = create_index % 2 == 0 ? gVulkanState->mSubmissionFence : gVulkanState->mPresentCompletionFence;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyFence(VkDevice, VkFence, const VkAllocationCallbacks*) noexcept
+{
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeWaitForFences(VkDevice device, std::uint32_t fence_count, const VkFence* fences, VkBool32,
+                                                 std::uint64_t) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || fence_count == 0 || fence_count > 2 || !fences)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (std::uint32_t index = 0; index < fence_count; ++index)
+    {
+        if (fences[index] != gVulkanState->mSubmissionFence && fences[index] != gVulkanState->mPresentCompletionFence)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    ++gVulkanState->mWaitCalls;
+    const std::size_t index = gVulkanState->mWaitResultIndex++;
+    return index < gVulkanState->mWaitResultCount ? gVulkanState->mWaitResults[index] : VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeResetCommandBuffer(VkCommandBuffer command_buffer, VkCommandBufferResetFlags flags) noexcept
+{
+    return gVulkanState && command_buffer == gVulkanState->mCommandBuffer && flags == 0 ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeBeginCommandBuffer(VkCommandBuffer command_buffer, const VkCommandBufferBeginInfo* begin_info) noexcept
+{
+    return gVulkanState && command_buffer == gVulkanState->mCommandBuffer && begin_info ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeEndCommandBuffer(VkCommandBuffer command_buffer) noexcept
+{
+    return gVulkanState && command_buffer == gVulkanState->mCommandBuffer ? gVulkanState->mEndCommandBufferResult
+                                                                          : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeResetFences(VkDevice device, std::uint32_t fence_count, const VkFence* fences) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || fence_count == 0 || fence_count > 2 || !fences)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (std::uint32_t index = 0; index < fence_count; ++index)
+    {
+        if (fences[index] != gVulkanState->mSubmissionFence && fences[index] != gVulkanState->mPresentCompletionFence)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeQueueSubmit(VkQueue             queue,
+                                               std::uint32_t       submit_count,
+                                               const VkSubmitInfo* submits,
+                                               VkFence             fence) noexcept
+{
+    if (!gVulkanState || queue != gVulkanState->mQueue || submit_count != 1 || !submits ||
+        (fence != gVulkanState->mSubmissionFence && fence != gVulkanState->mPresentCompletionFence))
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mQueueSubmitCalls;
+    if (submits[0].waitSemaphoreCount != 0 && submits[0].pWaitDstStageMask)
+    {
+        gVulkanState->mSubmitWaitStage = submits[0].pWaitDstStageMask[0];
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAcquireNextImage(VkDevice       device,
+                                                    VkSwapchainKHR swapchain,
+                                                    std::uint64_t  timeout,
+                                                    VkSemaphore    semaphore,
+                                                    VkFence        fence,
+                                                    std::uint32_t* image_index) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || swapchain != gVulkanState->mSwapchain ||
+        timeout != LLRenderVulkan::VULKAN_SWAPCHAIN_FRAME_ACQUIRE_TIMEOUT_NS || semaphore != gVulkanState->mImageAvailableSemaphore ||
+        fence != VK_NULL_HANDLE || !image_index)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mAcquireNextImageCalls;
+    *image_index = gVulkanState->mAcquiredImageIndex;
+    return gVulkanState->mAcquireNextImageResult;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdPipelineBarrier(VkCommandBuffer      command_buffer,
+                                                  VkPipelineStageFlags source_stage,
+                                                  VkPipelineStageFlags destination_stage,
+                                                  VkDependencyFlags,
+                                                  std::uint32_t,
+                                                  const VkMemoryBarrier*,
+                                                  std::uint32_t,
+                                                  const VkBufferMemoryBarrier*,
+                                                  std::uint32_t               image_barrier_count,
+                                                  const VkImageMemoryBarrier* image_barriers) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && source_stage != 0 && destination_stage != 0 &&
+        image_barrier_count != 0 && image_barriers)
+    {
+        if (image_barrier_count == 1)
+        {
+            ++gVulkanState->mPipelineBarrierCalls;
+        }
+        for (std::uint32_t index = 0; index < image_barrier_count; ++index)
+        {
+            if (image_barriers[index].image == gVulkanState->mTextureImage)
+            {
+                ++gVulkanState->mTextureUploadImageBarrierCount;
+            }
+        }
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdCopyBufferToImage(VkCommandBuffer          command_buffer,
+                                                    VkBuffer                 source,
+                                                    VkImage                  destination,
+                                                    VkImageLayout            layout,
+                                                    std::uint32_t            region_count,
+                                                    const VkBufferImageCopy* regions) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && source == gVulkanState->mTextureUploadSourceBuffer &&
+        destination == gVulkanState->mTextureImage && layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && region_count == 4 && regions)
+    {
+        ++gVulkanState->mTextureUploadCopyCalls;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBlitImage(VkCommandBuffer    command_buffer,
+                                            VkImage            source,
+                                            VkImageLayout      source_layout,
+                                            VkImage            destination,
+                                            VkImageLayout      destination_layout,
+                                            std::uint32_t      region_count,
+                                            const VkImageBlit* regions,
+                                            VkFilter           filter) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && source == gVulkanState->mTextureImage &&
+        destination == gVulkanState->mTextureImage && source_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
+        destination_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && region_count == 1 && regions && filter == VK_FILTER_LINEAR)
+    {
+        ++gVulkanState->mTextureUploadBlitCalls;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdCopyBuffer(VkCommandBuffer     command_buffer,
+                                             VkBuffer            source,
+                                             VkBuffer            destination,
+                                             std::uint32_t       region_count,
+                                             const VkBufferCopy* regions) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && source == gVulkanState->mUploadSourceBuffer &&
+        destination == gVulkanState->mUploadDestinationBuffer && region_count == 1 && regions && regions[0].srcOffset == 0 &&
+        regions[0].dstOffset == 0 && regions[0].size == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT)
+    {
+        // The aggregate transfer tests authenticate publication and lifetime; no fake device bytes are exposed.
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdClearColorImage(VkCommandBuffer                command_buffer,
+                                                  VkImage                        image,
+                                                  VkImageLayout                  image_layout,
+                                                  const VkClearColorValue*       color,
+                                                  std::uint32_t                  range_count,
+                                                  const VkImageSubresourceRange* ranges) noexcept
+{
+    if (gVulkanState && color && range_count == 1 && ranges)
+    {
+        ++gVulkanState->mClearColorImageCalls;
+        gVulkanState->mClearCommandBuffer = command_buffer;
+        gVulkanState->mClearedImage       = image;
+        gVulkanState->mClearImageLayout   = image_layout;
+        gVulkanState->mClearColor         = *color;
+        gVulkanState->mClearRange         = ranges[0];
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBeginRenderPass(VkCommandBuffer              command_buffer,
+                                                  const VkRenderPassBeginInfo* begin_info,
+                                                  VkSubpassContents            contents) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && begin_info &&
+        begin_info->sType == VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO && begin_info->clearValueCount == 1 && begin_info->pClearValues)
+    {
+        ++gVulkanState->mBeginRenderPassCalls;
+        gVulkanState->mRenderPassCommandBuffer = command_buffer;
+        gVulkanState->mRenderPass              = begin_info->renderPass;
+        gVulkanState->mRenderPassFramebuffer   = begin_info->framebuffer;
+        gVulkanState->mRenderPassArea          = begin_info->renderArea;
+        gVulkanState->mRenderPassClear         = begin_info->pClearValues[0];
+        gVulkanState->mRenderPassContents      = contents;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdEndRenderPass(VkCommandBuffer command_buffer) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer)
+    {
+        ++gVulkanState->mEndRenderPassCalls;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindPipeline(VkCommandBuffer     command_buffer,
+                                               VkPipelineBindPoint pipeline_bind_point,
+                                               VkPipeline          pipeline) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer)
+    {
+        ++gVulkanState->mBindPipelineCalls;
+        gVulkanState->mDrawCommandBuffer = command_buffer;
+        gVulkanState->mPipelineBindPoint = pipeline_bind_point;
+        gVulkanState->mBoundPipeline     = pipeline;
+        gVulkanState->mBindPipelineOrder = ++gVulkanState->mCommandOrder;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindDescriptorSets(VkCommandBuffer        command_buffer,
+                                                     VkPipelineBindPoint    pipeline_bind_point,
+                                                     VkPipelineLayout       layout,
+                                                     std::uint32_t          first_set,
+                                                     std::uint32_t          descriptor_set_count,
+                                                     const VkDescriptorSet* descriptor_sets,
+                                                     std::uint32_t          dynamic_offset_count,
+                                                     const std::uint32_t*) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer)
+    {
+        ++gVulkanState->mBindDescriptorSetsCalls;
+        gVulkanState->mDescriptorPipelineBindPoint   = pipeline_bind_point;
+        gVulkanState->mBoundDescriptorPipelineLayout = layout;
+        gVulkanState->mFirstDescriptorSet            = first_set;
+        gVulkanState->mDescriptorSetCount            = descriptor_set_count;
+        gVulkanState->mBoundDescriptorSet = descriptor_set_count != 0 && descriptor_sets ? descriptor_sets[0] : VK_NULL_HANDLE;
+        gVulkanState->mDynamicOffsetCount      = dynamic_offset_count;
+        gVulkanState->mBindDescriptorSetsOrder = ++gVulkanState->mCommandOrder;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdBindVertexBuffers(VkCommandBuffer     command_buffer,
+                                                    std::uint32_t       first_binding,
+                                                    std::uint32_t       binding_count,
+                                                    const VkBuffer*     buffers,
+                                                    const VkDeviceSize* offsets) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && binding_count == 1 && buffers && offsets)
+    {
+        ++gVulkanState->mBindVertexBuffersCalls;
+        gVulkanState->mDrawCommandBuffer      = command_buffer;
+        gVulkanState->mFirstVertexBinding     = first_binding;
+        gVulkanState->mVertexBindingCount     = binding_count;
+        gVulkanState->mBoundVertexBuffer      = buffers[0];
+        gVulkanState->mBoundVertexOffset      = offsets[0];
+        gVulkanState->mBindVertexBuffersOrder = ++gVulkanState->mCommandOrder;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdSetViewport(VkCommandBuffer   command_buffer,
+                                              std::uint32_t     first_viewport,
+                                              std::uint32_t     viewport_count,
+                                              const VkViewport* viewports) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && viewport_count == 1 && viewports)
+    {
+        ++gVulkanState->mSetViewportCalls;
+        gVulkanState->mFirstViewport = first_viewport;
+        gVulkanState->mViewport      = viewports[0];
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdSetScissor(VkCommandBuffer command_buffer,
+                                             std::uint32_t   first_scissor,
+                                             std::uint32_t   scissor_count,
+                                             const VkRect2D* scissors) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer && scissor_count == 1 && scissors)
+    {
+        ++gVulkanState->mSetScissorCalls;
+        gVulkanState->mFirstScissor = first_scissor;
+        gVulkanState->mScissor      = scissors[0];
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeCmdDraw(VkCommandBuffer command_buffer,
+                                       std::uint32_t   vertex_count,
+                                       std::uint32_t   instance_count,
+                                       std::uint32_t   first_vertex,
+                                       std::uint32_t   first_instance) noexcept
+{
+    if (gVulkanState && command_buffer == gVulkanState->mCommandBuffer)
+    {
+        ++gVulkanState->mDrawCalls;
+        gVulkanState->mDrawOrder         = ++gVulkanState->mCommandOrder;
+        gVulkanState->mDrawVertexCount   = vertex_count;
+        gVulkanState->mDrawInstanceCount = instance_count;
+        gVulkanState->mDrawFirstVertex   = first_vertex;
+        gVulkanState->mDrawFirstInstance = first_instance;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) noexcept
+{
+    const auto* fence_info = present_info ? static_cast<const VkSwapchainPresentFenceInfoKHR*>(present_info->pNext) : nullptr;
+    if (!gVulkanState || queue != gVulkanState->mQueue || !present_info || present_info->waitSemaphoreCount != 1 ||
+        !present_info->pWaitSemaphores || present_info->pWaitSemaphores[0] != gVulkanState->mPresentationReadySemaphore ||
+        present_info->swapchainCount != 1 || !present_info->pSwapchains || present_info->pSwapchains[0] != gVulkanState->mSwapchain ||
+        !present_info->pImageIndices || present_info->pImageIndices[0] != gVulkanState->mAcquiredImageIndex || !fence_info ||
+        fence_info->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR || fence_info->swapchainCount != 1 ||
+        !fence_info->pFences || fence_info->pFences[0] != gVulkanState->mPresentCompletionFence)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mQueuePresentCalls;
+    return gVulkanState->mQueuePresentResult;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeReleaseSwapchainImages(VkDevice device, const VkReleaseSwapchainImagesInfoKHR* release_info) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !release_info || release_info->swapchain != gVulkanState->mSwapchain ||
+        release_info->imageIndexCount != 1 || !release_info->pImageIndices ||
+        release_info->pImageIndices[0] != gVulkanState->mAcquiredImageIndex)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mReleaseSwapchainImagesCalls;
+    return gVulkanState->mReleaseSwapchainImagesResult;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetPhysicalDeviceMemoryProperties(VkPhysicalDevice                  physical_device,
+                                                                 VkPhysicalDeviceMemoryProperties* properties) noexcept
+{
+    if (gVulkanState && physical_device == gVulkanState->mPhysicalDevice && properties)
+    {
+        *properties = gVulkanState->mMemoryProperties;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateImage(VkDevice                 device,
+                                               const VkImageCreateInfo* create_info,
+                                               const VkAllocationCallbacks*,
+                                               VkImage* image) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !create_info || !image)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateTextureImageCalls;
+    gVulkanState->mTextureImageCreateInfo = *create_info;
+    *image                                = gVulkanState->mTextureImage;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && device == gVulkanState->mDevice && image == gVulkanState->mTextureImage)
+    {
+        ++gVulkanState->mDestroyTextureImageCalls;
+        gVulkanState->mTextureImageDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetImageMemoryRequirements2(VkDevice                              device,
+                                                           const VkImageMemoryRequirementsInfo2* info,
+                                                           VkMemoryRequirements2*                requirements) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !info || info->sType != VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2 ||
+        info->image != gVulkanState->mTextureImage || !requirements || requirements->sType != VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2)
+    {
+        return;
+    }
+    ++gVulkanState->mTextureRequirementsCalls;
+    requirements->memoryRequirements = gVulkanState->mTextureMemoryRequirements;
+    for (VkBaseOutStructure* extension = static_cast<VkBaseOutStructure*>(requirements->pNext); extension; extension = extension->pNext)
+    {
+        if (extension->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS)
+        {
+            auto* dedicated                        = reinterpret_cast<VkMemoryDedicatedRequirements*>(extension);
+            dedicated->prefersDedicatedAllocation  = VK_TRUE;
+            dedicated->requiresDedicatedAllocation = VK_TRUE;
+        }
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize offset) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || image != gVulkanState->mTextureImage ||
+        memory != gVulkanState->mTextureMemory || offset != 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mBindTextureMemoryCalls;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeCreateBuffer(VkDevice,
+                                                const VkBufferCreateInfo* create_info,
+                                                const VkAllocationCallbacks*,
+                                                VkBuffer* buffer) noexcept
+{
+    if (!gVulkanState || !create_info || !buffer)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mCreateBufferCalls;
+    gVulkanState->mReadbackBufferSize = create_info->size;
+    if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT && create_info->size == LLRenderVulkan::VULKAN_UPLOAD_SOURCE_BYTE_COUNT)
+    {
+        *buffer = gVulkanState->mUploadSourceBuffer;
+    }
+    else if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT &&
+             create_info->size == LLRenderContract::TEXTURE_UPLOAD_SOURCE_BYTE_COUNT)
+    {
+        *buffer                                      = gVulkanState->mTextureUploadSourceBuffer;
+        gVulkanState->mTextureUploadSourceCreateInfo = *create_info;
+    }
+    else if (create_info->usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    else if (create_info->usage == (VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+    {
+        *buffer = gVulkanState->mUploadDestinationBuffer;
+    }
+    else
+    {
+        *buffer = gVulkanState->mReadbackBuffer;
+    }
+    gVulkanState->mLastCreatedBuffer = *buffer;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeDestroyBuffer(VkDevice, VkBuffer buffer, const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && buffer == gVulkanState->mTextureUploadSourceBuffer)
+    {
+        ++gVulkanState->mDestroyTextureUploadSourceBufferCalls;
+        gVulkanState->mTextureUploadSourceBufferDestroyOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+    else if (gVulkanState && buffer == gVulkanState->mReadbackBuffer)
+    {
+        ++gVulkanState->mDestroyBufferCalls;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeGetBufferMemoryRequirements(VkDevice, VkBuffer buffer, VkMemoryRequirements* requirements) noexcept
+{
+    if (gVulkanState &&
+        (buffer == gVulkanState->mReadbackBuffer || buffer == gVulkanState->mUploadSourceBuffer ||
+         buffer == gVulkanState->mUploadDestinationBuffer || buffer == gVulkanState->mTextureUploadSourceBuffer) &&
+        requirements)
+    {
+        *requirements = { gVulkanState->mReadbackBufferSize, 256, 1 };
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeAllocateMemory(VkDevice,
+                                                  const VkMemoryAllocateInfo* allocate_info,
+                                                  const VkAllocationCallbacks*,
+                                                  VkDeviceMemory* memory) noexcept
+{
+    if (!gVulkanState || !allocate_info || !memory || allocate_info->memoryTypeIndex != 0)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    ++gVulkanState->mAllocateMemoryCalls;
+    const auto* dedicated = static_cast<const VkMemoryDedicatedAllocateInfo*>(allocate_info->pNext);
+    if (dedicated && dedicated->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO &&
+        dedicated->image == gVulkanState->mTextureImage && dedicated->buffer == VK_NULL_HANDLE &&
+        allocate_info->allocationSize == gVulkanState->mTextureMemoryRequirements.size)
+    {
+        ++gVulkanState->mAllocateTextureMemoryCalls;
+        *memory = gVulkanState->mTextureMemory;
+        return VK_SUCCESS;
+    }
+    if (allocate_info->allocationSize < gVulkanState->mReadbackBufferSize)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *memory = gVulkanState->mLastCreatedBuffer == gVulkanState->mUploadSourceBuffer
+                  ? gVulkanState->mUploadSourceMemory
+                  : (gVulkanState->mLastCreatedBuffer == gVulkanState->mUploadDestinationBuffer
+                         ? gVulkanState->mUploadDestinationMemory
+                         : (gVulkanState->mLastCreatedBuffer == gVulkanState->mTextureUploadSourceBuffer
+                                ? gVulkanState->mTextureUploadSourceMemory
+                                : gVulkanState->mReadbackMemory));
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks*) noexcept
+{
+    if (gVulkanState && memory == gVulkanState->mTextureUploadSourceMemory)
+    {
+        ++gVulkanState->mFreeTextureUploadSourceMemoryCalls;
+        gVulkanState->mTextureUploadSourceMemoryFreeOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+    else if (gVulkanState && memory == gVulkanState->mTextureMemory)
+    {
+        ++gVulkanState->mFreeTextureMemoryCalls;
+        gVulkanState->mTextureMemoryFreeOrder = ++gVulkanState->mTextureDestroySequence;
+    }
+    else if (gVulkanState && memory == gVulkanState->mReadbackMemory)
+    {
+        ++gVulkanState->mFreeMemoryCalls;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeBindBufferMemory(VkDevice, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset) noexcept
+{
+    const bool matching_pair =
+        gVulkanState && ((buffer == gVulkanState->mReadbackBuffer && memory == gVulkanState->mReadbackMemory) ||
+                         (buffer == gVulkanState->mUploadSourceBuffer && memory == gVulkanState->mUploadSourceMemory) ||
+                         (buffer == gVulkanState->mUploadDestinationBuffer && memory == gVulkanState->mUploadDestinationMemory) ||
+                         (buffer == gVulkanState->mTextureUploadSourceBuffer && memory == gVulkanState->mTextureUploadSourceMemory));
+    return matching_pair && offset == 0 ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size,
+                                             VkMemoryMapFlags flags, void** data) noexcept
+{
+    if (!gVulkanState ||
+        (memory != gVulkanState->mReadbackMemory && memory != gVulkanState->mUploadSourceMemory &&
+         memory != gVulkanState->mTextureUploadSourceMemory) ||
+        offset != 0 || size != VK_WHOLE_SIZE || flags != 0 || !data)
+    {
+        return VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    ++gVulkanState->mMapMemoryCalls;
+    if (memory == gVulkanState->mTextureUploadSourceMemory)
+    {
+        ++gVulkanState->mMapTextureUploadSourceMemoryCalls;
+        gVulkanState->mTextureUploadSourceMapOrder = ++gVulkanState->mTextureUploadSourceOperationSequence;
+        gVulkanState->mTextureUploadSourceMapped   = true;
+        *data                                      = static_cast<void*>(gVulkanState->mTextureUploadMappedBytes.data());
+    }
+    else
+    {
+        *data = memory == gVulkanState->mUploadSourceMemory ? static_cast<void*>(gVulkanState->mUploadMappedBytes.data())
+                                                            : static_cast<void*>(&gVulkanState->mReadbackMappedByte);
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL fakeFlushMappedMemoryRanges(VkDevice device, std::uint32_t range_count,
+                                                           const VkMappedMemoryRange* ranges) noexcept
+{
+    const bool valid =
+        gVulkanState && device == gVulkanState->mDevice && range_count == 1 && ranges &&
+        ranges[0].sType == VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE &&
+        (ranges[0].memory == gVulkanState->mUploadSourceMemory || ranges[0].memory == gVulkanState->mTextureUploadSourceMemory) &&
+        ranges[0].offset == 0 && ranges[0].size == VK_WHOLE_SIZE;
+    if (valid && ranges[0].memory == gVulkanState->mTextureUploadSourceMemory)
+    {
+        if (!gVulkanState->mTextureUploadSourceMapped)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        ++gVulkanState->mFlushTextureUploadSourceMemoryCalls;
+        gVulkanState->mTextureUploadSourceFlushOrder = ++gVulkanState->mTextureUploadSourceOperationSequence;
+    }
+    return valid ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR void VKAPI_CALL fakeUnmapMemory(VkDevice, VkDeviceMemory memory) noexcept
+{
+    if (gVulkanState && (memory == gVulkanState->mReadbackMemory || memory == gVulkanState->mUploadSourceMemory ||
+                         memory == gVulkanState->mTextureUploadSourceMemory))
+    {
+        ++gVulkanState->mUnmapMemoryCalls;
+        if (memory == gVulkanState->mTextureUploadSourceMemory)
+        {
+            ++gVulkanState->mUnmapTextureUploadSourceMemoryCalls;
+            gVulkanState->mTextureUploadSourceUnmapOrder = ++gVulkanState->mTextureUploadSourceOperationSequence;
+            gVulkanState->mTextureUploadSourceMapped     = false;
+        }
+    }
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetDeviceProcAddr(VkDevice device, const char* name) noexcept
+{
+    if (!gVulkanState || device != gVulkanState->mDevice || !name)
+    {
+        return nullptr;
+    }
+#define LL_SDL_VULKAN_DEVICE_COMMAND(command)  \
+    if (std::strcmp(name, "vk" #command) == 0) \
+    return eraseFunctionType(fake##command)
+    if (std::strcmp(name, "vkCreateSwapchainKHR") == 0)
+        return eraseFunctionType(fakeCreateSwapchain);
+    if (std::strcmp(name, "vkDestroySwapchainKHR") == 0)
+        return eraseFunctionType(fakeDestroySwapchain);
+    if (std::strcmp(name, "vkGetSwapchainImagesKHR") == 0)
+        return eraseFunctionType(fakeGetSwapchainImages);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateImageView);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyImageView);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(GetImageMemoryRequirements2);
+    LL_SDL_VULKAN_DEVICE_COMMAND(BindImageMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateRenderPass);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyRenderPass);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateFramebuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyFramebuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateShaderModule);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyShaderModule);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateSampler);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroySampler);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateDescriptorSetLayout);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyDescriptorSetLayout);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreatePipelineLayout);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyPipelineLayout);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateDescriptorPool);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyDescriptorPool);
+    LL_SDL_VULKAN_DEVICE_COMMAND(AllocateDescriptorSets);
+    LL_SDL_VULKAN_DEVICE_COMMAND(UpdateDescriptorSets);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateGraphicsPipelines);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyPipeline);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateCommandPool);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyCommandPool);
+    LL_SDL_VULKAN_DEVICE_COMMAND(AllocateCommandBuffers);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateSemaphore);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroySemaphore);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateFence);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyFence);
+    if (std::strcmp(name, "vkWaitForFences") == 0)
+        return gVulkanState->mExposeWaitForFences ? eraseFunctionType(fakeWaitForFences) : nullptr;
+    LL_SDL_VULKAN_DEVICE_COMMAND(ResetCommandBuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(BeginCommandBuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(EndCommandBuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(ResetFences);
+    LL_SDL_VULKAN_DEVICE_COMMAND(QueueSubmit);
+    if (std::strcmp(name, "vkAcquireNextImageKHR") == 0)
+        return eraseFunctionType(fakeAcquireNextImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdPipelineBarrier);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdCopyBuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdCopyBufferToImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdBlitImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdClearColorImage);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdBeginRenderPass);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdEndRenderPass);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdBindPipeline);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdBindDescriptorSets);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdBindVertexBuffers);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdSetViewport);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdSetScissor);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CmdDraw);
+    if (std::strcmp(name, "vkQueuePresentKHR") == 0)
+        return eraseFunctionType(fakeQueuePresent);
+    if (std::strcmp(name, "vkReleaseSwapchainImagesKHR") == 0)
+        return eraseFunctionType(fakeReleaseSwapchainImages);
+    LL_SDL_VULKAN_DEVICE_COMMAND(CreateBuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(DestroyBuffer);
+    LL_SDL_VULKAN_DEVICE_COMMAND(GetBufferMemoryRequirements);
+    LL_SDL_VULKAN_DEVICE_COMMAND(AllocateMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(FreeMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(BindBufferMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(MapMemory);
+    LL_SDL_VULKAN_DEVICE_COMMAND(FlushMappedMemoryRanges);
+    LL_SDL_VULKAN_DEVICE_COMMAND(UnmapMemory);
+#undef LL_SDL_VULKAN_DEVICE_COMMAND
+    return nullptr;
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeGetInstanceProcAddr(VkInstance instance, const char* name) noexcept
+{
+    if (!name)
+    {
+        return nullptr;
+    }
+    if (std::strcmp(name, "vkCreateInstance") == 0)
+    {
+        return eraseFunctionType(fakeCreateInstance);
+    }
+    if (std::strcmp(name, "vkEnumerateInstanceExtensionProperties") == 0)
+    {
+        return eraseFunctionType(fakeEnumerateInstanceExtensionProperties);
+    }
+    if (std::strcmp(name, "vkEnumerateInstanceLayerProperties") == 0)
+    {
+        return eraseFunctionType(fakeEnumerateInstanceLayerProperties);
+    }
+    if (std::strcmp(name, "vkEnumerateInstanceVersion") == 0)
+    {
+        return eraseFunctionType(fakeEnumerateInstanceVersion);
+    }
+    if (instance == fakeInstance() && std::strcmp(name, "vkDestroyInstance") == 0)
+    {
+        return eraseFunctionType(fakeDestroyInstance);
+    }
+    if (instance == fakeInstance() && std::strcmp(name, "vkDestroySurfaceKHR") == 0)
+    {
+        return gVulkanState && gVulkanState->mExposeDestroySurface ? eraseFunctionType(fakeDestroySurface) : nullptr;
+    }
+    if (instance == fakeInstance() && std::strcmp(name, "vkEnumeratePhysicalDevices") == 0)
+        return eraseFunctionType(fakeEnumeratePhysicalDevices);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceFormatProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFormatProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceImageFormatProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceImageFormatProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceMemoryProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceMemoryProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceQueueFamilyProperties") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceQueueFamilyProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceSurfaceSupport);
+    if (instance == fakeInstance() && std::strcmp(name, "vkEnumerateDeviceExtensionProperties") == 0)
+        return eraseFunctionType(fakeEnumerateDeviceExtensionProperties);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceFeatures2") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFeatures2);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceFeatures") == 0)
+        return eraseFunctionType(fakeGetPhysicalDeviceFeatures);
+    if (instance == fakeInstance() && std::strcmp(name, "vkCreateDevice") == 0)
+        return eraseFunctionType(fakeCreateDevice);
+    if (instance == fakeInstance() && std::strcmp(name, "vkDestroyDevice") == 0)
+        return eraseFunctionType(fakeDestroyDevice);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetDeviceQueue") == 0)
+        return eraseFunctionType(fakeGetDeviceQueue);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == 0)
+        return eraseFunctionType(fakeGetSurfaceCapabilities);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceSurfaceFormatsKHR") == 0)
+        return eraseFunctionType(fakeGetSurfaceFormats);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetPhysicalDeviceSurfacePresentModesKHR") == 0)
+        return eraseFunctionType(fakeGetSurfacePresentModes);
+    if (instance == fakeInstance() && std::strcmp(name, "vkGetDeviceProcAddr") == 0)
+        return eraseFunctionType(fakeGetDeviceProcAddr);
+    return nullptr;
+}
+
+LLWindowVulkanFunction fakeResolver() noexcept
+{
+    return reinterpret_cast<LLWindowVulkanFunction>(fakeGetInstanceProcAddr);
+}
+
+bool loadLibrary(void* userdata) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::Load);
+    if (state.mFailure == Failure::Load)
+    {
+        return false;
+    }
+    ++state.mExplicitLoaderReferences;
+    return true;
+}
+
+void unloadLibrary(void* userdata) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::Unload);
+    --state.mExplicitLoaderReferences;
+}
+
+SDL_Window* createWindow(void* userdata, const LLWindowSDLVulkanCreateInfo& info) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::Create);
+    state.mCreateInfo = &info;
+    if (state.mFailure == Failure::Window)
+    {
+        return nullptr;
+    }
+    ++state.mWindowLoaderReferences;
+    return state.mWindow;
+}
+
+void destroyWindow(void* userdata, SDL_Window* window) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::Destroy);
+    if (state.mOwnerDuringDestroy)
+    {
+        state.mRequirementsInvalidatedBeforeDestroy = !state.mOwnerDuringDestroy->hasRequirements();
+    }
+    if (window == state.mWindow)
+    {
+        --state.mWindowLoaderReferences;
+    }
+}
+
+SDL_WindowFlags getWindowFlags(void* userdata, SDL_Window*) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::Flags);
+    return state.mWindowFlags;
+}
+
+bool getWindowSizeInPixels(void* userdata, SDL_Window* window, int* width, int* height) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::DrawableSize);
+    ++state.mDrawableSizeCalls;
+    if (!state.mDrawableSizeSucceeds || window != state.mWindow || !width || !height)
+    {
+        return false;
+    }
+    *width  = state.mDrawableWidth;
+    *height = state.mDrawableHeight;
+    return true;
+}
+
+LLWindowVulkanFunction getResolver(void* userdata) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::Resolver);
+    return state.mFailure == Failure::Resolver ? nullptr : fakeResolver();
+}
+
+const char* const* getInstanceExtensions(void* userdata, std::size_t* count) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::Extensions);
+    if (state.mFailure == Failure::Extensions)
+    {
+        return nullptr;
+    }
+    *count = state.mExtensionCount;
+    return state.mExtensionNames;
+}
+
+bool createSurface(void*                        userdata,
+                   SDL_Window*                  window,
+                   VkInstance                   instance,
+                   const VkAllocationCallbacks* allocator,
+                   VkSurfaceKHR*                surface) noexcept
+{
+    auto& state = *static_cast<FakeState*>(userdata);
+    state.record(Event::CreateSurface);
+    ++state.mCreateSurfaceCount;
+    state.mSurfaceWindow    = window;
+    state.mSurfaceInstance  = instance;
+    state.mSurfaceAllocator = allocator;
+
+    if (!surface)
+    {
+        return false;
+    }
+    if (state.mFailSurfaceCreation)
+    {
+        *surface = state.mPoisonSurfaceOnFailure ? fakeSurface() : VK_NULL_HANDLE;
+        return false;
+    }
+    *surface = state.mNullSurfaceOnSuccess ? VK_NULL_HANDLE : fakeSurface();
+    if (*surface != VK_NULL_HANDLE)
+    {
+        ++state.mLiveSurfaceCount;
+    }
+    return true;
+}
+
+LLWindowSDLVulkanOperations fakeOperations(FakeState& state) noexcept
+{
+    return { &state,         loadLibrary,           unloadLibrary, createWindow,          destroyWindow,
+             getWindowFlags, getWindowSizeInPixels, getResolver,   getInstanceExtensions, createSurface };
+}
+
+LLWindowSDLVulkanCreateInfo createInfo()
+{
+    return { "Vulkan test window", 13, 17, 1280, 720, false, true, false, true };
+}
+
+void ensureEvents(const char* message, const FakeState& state, std::initializer_list<Event> expected)
+{
+    bool equal = state.mEventCount == expected.size();
+    if (equal)
+    {
+        std::size_t index = 0;
+        for (Event event : expected)
+        {
+            equal = equal && state.mEvents[index++] == event;
+        }
+    }
+    tut::ensure(message, equal);
+}
+
+const LLWindowSDLVulkanAcquireError* acquireError(const LLWindowSDLVulkanAcquireResult& result) noexcept
+{
+    return std::get_if<LLWindowSDLVulkanAcquireError>(&result);
+}
+
+LLWindowSDLVulkan* acquiredWindow(LLWindowSDLVulkanAcquireResult& result) noexcept
+{
+    return std::get_if<LLWindowSDLVulkan>(&result);
+}
+
+void ensureAcquireError(const char* message, const LLWindowSDLVulkanAcquireResult& result, LLWindowSDLVulkanAcquireCode code)
+{
+    const auto* error = acquireError(result);
+    tut::ensure(message, error && error->mCode == code);
+}
+
+void ensureSurfaceError(const char*                                       message,
+                        const LLRenderVulkan::VulkanSurfaceAcquireResult& result,
+                        LLRenderVulkan::VulkanSurfaceAcquireCode          code)
+{
+    tut::ensure(message, result && result->mCode == code);
+}
+
+const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError* operationError(
+    const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult& result) noexcept
+{
+    return std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result);
+}
+
+bool operationSucceeded(const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult& result,
+                        LLRenderVulkan::VulkanSwapchainFrameSlotDisposition                  disposition) noexcept
+{
+    const auto* value = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotDisposition>(&result);
+    return value && *value == disposition;
+}
+
+const LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError* presentationError(
+    const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result) noexcept
+{
+    return std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationError>(&result);
+}
+
+bool presentationSucceeded(const LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult& result,
+                           LLRenderVulkan::VulkanSwapchainFrameSlotPresentationOutcome             outcome,
+                           std::uint32_t                                                           image_index) noexcept
+{
+    const auto* success = std::get_if<LLRenderVulkan::VulkanSwapchainFrameSlotPresentationSuccess>(&result);
+    return success && success->mOutcome == outcome && success->mImageIndex == image_index;
+}
+
+bool acquireCompleteFrameSlot(LLWindowSDLVulkan& owner) noexcept
+{
+    using namespace LLRenderVulkan;
+    return !owner.acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
+           !owner.acquireSurfaceGeneration() && !owner.acquirePresentationDeviceGeneration() && !owner.acquireLogicalDeviceGeneration() &&
+           !owner.acquireSwapchainConfigurationGeneration() && !owner.acquireSwapchainGeneration() &&
+           !owner.acquireSwapchainImagesGeneration() && !owner.acquireSwapchainPresentationTargetGeneration() &&
+           !owner.acquireSwapchainPresentationPipelineGeneration() && !owner.acquireSwapchainReadbackGeneration() &&
+           !owner.acquireSwapchainFrameSlotGeneration();
+}
+
+struct UploadOperationContext
+{
+    const LLWindowSDLVulkan*                        mOwner      = nullptr;
+    const LLRenderVulkan::VulkanInstanceGeneration* mGeneration = nullptr;
+};
+
+bool uploadInstanceOwnerIsCurrent(void* userdata, const LLRenderVulkan::VulkanInstanceGeneration& generation) noexcept
+{
+    const auto* context = static_cast<const UploadOperationContext*>(userdata);
+    return context && context->mOwner && context->mGeneration == &generation && context->mOwner->instanceGeneration() == &generation;
+}
+
+bool uploadWindowGenerationIsCurrent(void* userdata, std::uint64_t native_window_generation) noexcept
+{
+    const auto* context = static_cast<const UploadOperationContext*>(userdata);
+    return context && context->mOwner && context->mOwner->isGenerationCurrent(native_window_generation);
+}
+
+struct ResidentUploadDestination
+{
+    LLRenderContract::BufferHandle mHandle;
+    std::uint64_t                  mExpectedIdentity = 0;
+    std::uint64_t                  mResidentIdentity = 0;
+    VkBuffer                       mBuffer           = VK_NULL_HANDLE;
+    VkDeviceMemory                 mMemory           = VK_NULL_HANDLE;
+};
+
+bool acquireResidentUploadDestination(LLWindowSDLVulkan& owner, ResidentUploadDestination& retained) noexcept
+{
+    using namespace LLRenderVulkan;
+
+    auto* generation = owner.instanceGeneration();
+    if (!generation)
+    {
+        return false;
+    }
+
+    const LLRenderContract::TextureUploadFixture fixture = LLRenderContract::makeTextureUploadFixture();
+    static_assert(sizeof(fixture.mScreenTriangle) == VULKAN_UPLOAD_SOURCE_BYTE_COUNT);
+    VulkanUploadSourceDescription description;
+    description.mHandle = LLRenderContract::StreamingUploadHandles{}.mScreenTriangle;
+    std::memcpy(description.mBytes.data(), fixture.mScreenTriangle.data(), description.mBytes.size());
+
+    UploadOperationContext                     context{ &owner, generation };
+    const VulkanUploadSourceRequest            source_request{ generation->nativeWindowGeneration(),
+                                                    description,
+                                                               { &context, uploadInstanceOwnerIsCurrent },
+                                                               { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanUploadDestinationRequest       destination_request{ generation->nativeWindowGeneration(),
+                                                              description,
+                                                                    { &context, uploadInstanceOwnerIsCurrent },
+                                                                    { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanUploadTransferRequest          transfer_request{ generation->nativeWindowGeneration(),
+                                                        description,
+                                                                 { &context, uploadInstanceOwnerIsCurrent },
+                                                                 { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanUploadTransferOperationRequest operation_request{ generation->nativeWindowGeneration(),
+                                                                  description,
+                                                                  { &context, uploadInstanceOwnerIsCurrent },
+                                                                  { &context, uploadWindowGenerationIsCurrent } };
+    if (generation->acquireUploadSourceGeneration(source_request) || generation->acquireUploadDestinationGeneration(destination_request) ||
+        generation->acquireUploadTransferGeneration(transfer_request))
+    {
+        return false;
+    }
+
+    const auto  result      = generation->executeUploadTransfer(operation_request);
+    const auto* disposition = std::get_if<VulkanUploadTransferDisposition>(&result);
+    if (!disposition || *disposition != VulkanUploadTransferDisposition::Complete)
+    {
+        return false;
+    }
+
+    retained = { generation->uploadDestinationResourceHandle(), generation->uploadDestinationExpectedContentIdentity(),
+                 generation->uploadDestinationResidentContentIdentity(), generation->uploadDestinationBuffer(),
+                 generation->uploadDestinationMemory() };
+    const bool completed_exactly_once =
+        generation->uploadTransferSubmissionCount() == 1 && generation->uploadTransferCompletionWaitCount() == 1 &&
+        generation->uploadDestinationIsResident() && retained.mHandle == description.mHandle && retained.mExpectedIdentity != 0 &&
+        retained.mExpectedIdentity == retained.mResidentIdentity && retained.mBuffer != VK_NULL_HANDLE &&
+        retained.mMemory != VK_NULL_HANDLE && generation->uploadDestinationByteCount() == VULKAN_UPLOAD_SOURCE_BYTE_COUNT &&
+        generation->uploadDestinationIsDeviceLocal();
+    const bool source_reset = generation->resetUploadSourceGeneration();
+    return completed_exactly_once && source_reset && !generation->hasUploadSourceGeneration() &&
+           !generation->hasUploadTransferGeneration() && generation->hasUploadDestinationGeneration() &&
+           generation->uploadDestinationResourceHandle() == retained.mHandle &&
+           generation->uploadDestinationExpectedContentIdentity() == retained.mExpectedIdentity &&
+           generation->uploadDestinationResidentContentIdentity() == retained.mResidentIdentity &&
+           generation->uploadDestinationBuffer() == retained.mBuffer && generation->uploadDestinationMemory() == retained.mMemory;
+}
+
+void failAllocation()
+{
+    throw std::bad_alloc();
+}
+
+} // namespace
+
+namespace tut
+{
+
+struct window_sdl_vulkan_test
+{
+};
+
+using window_sdl_vulkan_group  = test_group<window_sdl_vulkan_test>;
+using window_sdl_vulkan_object = window_sdl_vulkan_group::object;
+window_sdl_vulkan_group window_sdl_vulkan_tests("window SDL Vulkan ownership");
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<1>()
+{
+    static_assert(!std::is_copy_constructible_v<LLWindowSDLVulkan>);
+    static_assert(!std::is_copy_assignable_v<LLWindowSDLVulkan>);
+    static_assert(std::is_nothrow_move_constructible_v<LLWindowSDLVulkan>);
+    static_assert(std::is_nothrow_move_assignable_v<LLWindowSDLVulkan>);
+    static_assert(std::is_nothrow_destructible_v<LLWindowSDLVulkan>);
+    static_assert(std::is_same_v<decltype(std::declval<const LLWindowSDLVulkan&>().requirements()), const LLWindowVulkanRequirements*>);
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().instanceGeneration()),
+                                 LLRenderVulkan::VulkanInstanceGeneration*>);
+    static_assert(std::is_same_v<decltype(std::declval<const LLWindowSDLVulkan&>().instanceGeneration()),
+                                 const LLRenderVulkan::VulkanInstanceGeneration*>);
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainImagesGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainImagesAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainImagesGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainPresentationTargetGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainPresentationTargetAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainPresentationTargetGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainPresentationPipelineGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainPresentationPipelineAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainPresentationPipelineGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainReadbackGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainReadbackAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainReadbackGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().resetSwapchainReadbackGeneration()), bool>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainReadbackGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireSwapchainFrameSlotGeneration()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotAcquireResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireSwapchainFrameSlotGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain()),
+                                 LLRenderVulkan::VulkanSwapchainChainRebuildResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain(VkExtent2D{})),
+                                 LLRenderVulkan::VulkanSwapchainChainRebuildResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().rebuildSwapchainChain(VkExtent2D{})));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().roundTripEmptySwapchainFrameSlot()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().roundTripEmptySwapchainFrameSlot()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().retryEmptySwapchainFrameSlotCompletion()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retryEmptySwapchainFrameSlotCompletion()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireToPresentSwapchainFrameSlot()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireToPresentSwapchainFrameSlot()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireClearToPresentSwapchainFrameSlot(
+                                     std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireClearToPresentSwapchainFrameSlot(
+        std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireRenderPassClearToPresentSwapchainFrameSlot(
+                                     std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireRenderPassClearToPresentSwapchainFrameSlot(
+        std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireRenderPassDrawToPresentSwapchainFrameSlot(
+                                     std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireRenderPassDrawToPresentSwapchainFrameSlot(
+        std::declval<const LLRenderVulkan::VulkanSwapchainFrameClearColor&>())));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().acquireRenderPassSampleDrawToPresentSwapchainFrameSlot()),
+                                 LLRenderVulkan::VulkanSwapchainFrameSlotParentPresentationResult>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().acquireRenderPassSampleDrawToPresentSwapchainFrameSlot()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentation()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotPresentationCompletion()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().cancelSwapchainFrameSlotPresentation()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().retrySwapchainFrameSlotCancellationCompletion()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainFrameSlotGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().resetSwapchainPresentationPipelineGeneration()), bool>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainPresentationPipelineGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().resetSwapchainPresentationTargetGeneration()), bool>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainPresentationTargetGeneration()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainImagesGeneration()));
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().resetSwapchainGeneration()));
+    static_assert(std::is_same_v<decltype(std::declval<LLWindowSDLVulkan&>().reset()), bool>);
+    static_assert(noexcept(std::declval<LLWindowSDLVulkan&>().reset()));
+    static_assert(noexcept(acquireLLWindowSDLVulkan(std::declval<const LLWindowSDLVulkanCreateInfo&>(), U64{},
+                                                    std::declval<const LLWindowSDLVulkanOperations&>())));
+
+    ensure("the production operation table is complete",
+           defaultLLWindowSDLVulkanOperations().mLoadLibrary && defaultLLWindowSDLVulkanOperations().mUnloadLibrary &&
+               defaultLLWindowSDLVulkanOperations().mCreateWindow && defaultLLWindowSDLVulkanOperations().mDestroyWindow &&
+               defaultLLWindowSDLVulkanOperations().mGetWindowFlags && defaultLLWindowSDLVulkanOperations().mGetWindowSizeInPixels &&
+               defaultLLWindowSDLVulkanOperations().mGetResolver && defaultLLWindowSDLVulkanOperations().mGetInstanceExtensions &&
+               defaultLLWindowSDLVulkanOperations().mCreateSurface);
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<2>()
+{
+    FakeState state;
+    auto      info   = createInfo();
+    auto      result = acquireLLWindowSDLVulkan(info, 41, fakeOperations(state));
+    auto*     owner  = acquiredWindow(result);
+
+    ensure("acquisition succeeds", owner != nullptr);
+    ensureEvents("acquisition follows the SDL loader and query order", state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions });
+    ensure_equals("the explicit loader reference is held", state.mExplicitLoaderReferences, 1);
+    ensure_equals("the Vulkan window loader reference is held", state.mWindowLoaderReferences, 1);
+    ensure("the fake receives the exact create description", state.mCreateInfo == &info);
+    ensure("the create description preserves title, placement, size, and flags",
+           state.mCreateInfo->mTitle == "Vulkan test window" && state.mCreateInfo->mX == 13 && state.mCreateInfo->mY == 17 &&
+               state.mCreateInfo->mWidth == 1280 && state.mCreateInfo->mHeight == 720 && !state.mCreateInfo->mResizable &&
+               state.mCreateInfo->mFullscreen && !state.mCreateInfo->mHidden && state.mCreateInfo->mHighPixelDensity);
+    ensure("the created window is verified as Vulkan-only",
+           (state.mWindowFlags & SDL_WINDOW_VULKAN) != 0 && (state.mWindowFlags & SDL_WINDOW_OPENGL) == 0);
+    ensure("requirements are published after every native query", owner->hasRequirements());
+    ensure("the resolver identity is retained", owner->requirements() && owner->requirements()->resolver() == fakeResolver());
+    ensure("the generation is current", owner->isGenerationCurrent(41));
+    ensure("zero and another generation are stale", !owner->isGenerationCurrent(0) && !owner->isGenerationCurrent(42));
+
+    state.mExtensionNames[0] = "changed_after_acquire";
+    state.mExtensionNames[1] = "changed_too";
+    const auto& extensions   = owner->requirements()->requiredInstanceExtensions();
+    ensure("SDL extension storage is deep-copied in order",
+           extensions.size() == 2 && extensions[0] == "VK_KHR_surface" && extensions[1] == "VK_KHR_xlib_surface");
+
+    state.mOwnerDuringDestroy = owner;
+    owner->reset();
+    ensureEvents("reset destroys the window before releasing the explicit loader reference", state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::Destroy, Event::Unload });
+    ensure("requirements are invalid before SDL destroys the window", state.mRequirementsInvalidatedBeforeDestroy);
+    ensure("reset exposes no requirements pointer", owner->requirements() == nullptr);
+    ensure_equals("reset releases the explicit loader reference", state.mExplicitLoaderReferences, 0);
+    ensure_equals("reset releases the window loader reference", state.mWindowLoaderReferences, 0);
+
+    owner->reset();
+    ensure_equals("a second reset performs no SDL operation", state.mEventCount, std::size_t{ 7 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<3>()
+{
+    const auto info = createInfo();
+
+    LLWindowSDLVulkanOperations invalid_operations;
+    auto                        invalid = acquireLLWindowSDLVulkan(info, 1, invalid_operations);
+    ensureAcquireError("an incomplete operation table is rejected", invalid, LLWindowSDLVulkanAcquireCode::InvalidOperations);
+
+    FakeState surface_operation_state;
+    auto      missing_surface_operation      = fakeOperations(surface_operation_state);
+    missing_surface_operation.mCreateSurface = nullptr;
+    auto missing_surface                     = acquireLLWindowSDLVulkan(info, 1, missing_surface_operation);
+    ensureAcquireError("a missing SDL surface operation is rejected", missing_surface, LLWindowSDLVulkanAcquireCode::InvalidOperations);
+    ensure_equals("a missing SDL surface operation is rejected before loading Vulkan", surface_operation_state.mEventCount,
+                  std::size_t{ 0 });
+
+    FakeState size_operation_state;
+    auto      missing_size_operation              = fakeOperations(size_operation_state);
+    missing_size_operation.mGetWindowSizeInPixels = nullptr;
+    auto missing_size                             = acquireLLWindowSDLVulkan(info, 1, missing_size_operation);
+    ensureAcquireError("a missing SDL drawable-size operation is rejected", missing_size, LLWindowSDLVulkanAcquireCode::InvalidOperations);
+    ensure_equals("a missing SDL drawable-size operation is rejected before loading Vulkan", size_operation_state.mEventCount,
+                  std::size_t{ 0 });
+
+    FakeState load_state;
+    load_state.mFailure = Failure::Load;
+    auto load           = acquireLLWindowSDLVulkan(info, 1, fakeOperations(load_state));
+    ensureAcquireError("loader failure is typed", load, LLWindowSDLVulkanAcquireCode::LoaderFailure);
+    ensureEvents("loader failure makes no later call", load_state, { Event::Load });
+
+    FakeState window_state;
+    window_state.mFailure = Failure::Window;
+    auto window           = acquireLLWindowSDLVulkan(info, 1, fakeOperations(window_state));
+    ensureAcquireError("window failure is typed", window, LLWindowSDLVulkanAcquireCode::WindowFailure);
+    ensureEvents("window failure only releases the explicit reference", window_state, { Event::Load, Event::Create, Event::Unload });
+
+    FakeState resolver_state;
+    resolver_state.mFailure = Failure::Resolver;
+    auto resolver           = acquireLLWindowSDLVulkan(info, 1, fakeOperations(resolver_state));
+    ensureAcquireError("resolver failure is typed", resolver, LLWindowSDLVulkanAcquireCode::ResolverFailure);
+    ensureEvents("resolver failure stops before extension query and rolls back in order", resolver_state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Destroy, Event::Unload });
+
+    FakeState extension_state;
+    extension_state.mFailure = Failure::Extensions;
+    auto extension           = acquireLLWindowSDLVulkan(info, 1, fakeOperations(extension_state));
+    ensureAcquireError("extension query failure is typed", extension, LLWindowSDLVulkanAcquireCode::ExtensionQueryFailure);
+    ensureEvents("extension query failure rolls back in order", extension_state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::Destroy, Event::Unload });
+
+    FakeState requirements_state;
+    requirements_state.mExtensionNames[1] = requirements_state.mExtensionNames[0];
+    auto requirements                     = acquireLLWindowSDLVulkan(info, 1, fakeOperations(requirements_state));
+    ensureAcquireError("requirements failure is typed", requirements, LLWindowSDLVulkanAcquireCode::RequirementsFailure);
+    const auto* requirements_error = acquireError(requirements);
+    ensure("the exact requirements error is retained",
+           requirements_error && requirements_error->mRequirementsError &&
+               requirements_error->mRequirementsError->mCode == LLWindowVulkanRequirementsBuildCode::DuplicateExtensionName &&
+               requirements_error->mRequirementsError->mIndex == 1);
+    ensureEvents("requirements failure rolls back in order", requirements_state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::Destroy, Event::Unload });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<4>()
+{
+    const auto info = createInfo();
+
+    FakeState missing_vulkan_state;
+    missing_vulkan_state.mWindowFlags = 0;
+    auto missing_vulkan               = acquireLLWindowSDLVulkan(info, 1, fakeOperations(missing_vulkan_state));
+    ensureAcquireError("a window without the Vulkan flag is rejected", missing_vulkan, LLWindowSDLVulkanAcquireCode::WindowFlagsFailure);
+    ensureEvents("a missing Vulkan flag stops before resolver lookup", missing_vulkan_state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Destroy, Event::Unload });
+
+    FakeState opengl_state;
+    opengl_state.mWindowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_OPENGL;
+    auto opengl               = acquireLLWindowSDLVulkan(info, 1, fakeOperations(opengl_state));
+    ensureAcquireError("a Vulkan and OpenGL window is rejected", opengl, LLWindowSDLVulkanAcquireCode::WindowFlagsFailure);
+    ensureEvents("an OpenGL-marked window stops before resolver lookup", opengl_state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Destroy, Event::Unload });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<5>()
+{
+    FakeState  state;
+    const auto info   = createInfo();
+    auto       result = acquireLLWindowSDLVulkan(info, 9, fakeOperations(state));
+    auto*      owner  = acquiredWindow(result);
+    ensure("move fixture acquired a window", owner != nullptr);
+
+    LLWindowSDLVulkan moved(std::move(*owner));
+    ensure("move construction transfers requirements", moved.hasRequirements() && moved.isGenerationCurrent(9));
+    ensure("the moved-from owner publishes no requirements", !owner->hasRequirements());
+    ensure_equals("move construction performs no SDL cleanup", state.mEventCount, std::size_t{ 5 });
+
+    state.mOwnerDuringDestroy = &moved;
+    moved.reset();
+    ensure_equals("the moved owner releases each reference once", state.mExplicitLoaderReferences, 0);
+    ensure_equals("the moved owner releases the window reference once", state.mWindowLoaderReferences, 0);
+
+    state.mOwnerDuringDestroy = nullptr;
+    state.mEventCount         = 0;
+    auto  reused              = acquireLLWindowSDLVulkan(info, 10, fakeOperations(state));
+    auto* reused_owner        = acquiredWindow(reused);
+    ensure("the fake may reuse the same native address", reused_owner != nullptr);
+    ensure("the new generation is current at a reused address",
+           reused_owner->isGenerationCurrent(10) && !reused_owner->isGenerationCurrent(9));
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<6>()
+{
+    const auto info = createInfo();
+
+    FakeState source_state;
+    auto      source_result = acquireLLWindowSDLVulkan(info, 21, fakeOperations(source_state));
+    auto*     source        = acquiredWindow(source_result);
+    ensure("move-assignment source acquired a window", source != nullptr);
+
+    FakeState destination_state;
+    destination_state.mWindow = reinterpret_cast<SDL_Window*>(static_cast<std::uintptr_t>(0x56780));
+    auto  destination_result  = acquireLLWindowSDLVulkan(info, 22, fakeOperations(destination_state));
+    auto* destination         = acquiredWindow(destination_result);
+    ensure("move-assignment destination acquired a window", destination != nullptr);
+
+    destination_state.mOwnerDuringDestroy = destination;
+    *destination                          = std::move(*source);
+
+    ensure("move assignment invalidates the source", !source->hasRequirements());
+    ensure("move assignment transfers the source generation",
+           destination->hasRequirements() && destination->isGenerationCurrent(21) && !destination->isGenerationCurrent(22));
+    ensure("move assignment invalidates destination requirements before replacement cleanup",
+           destination_state.mRequirementsInvalidatedBeforeDestroy);
+    ensure_equals("move assignment releases the replaced explicit reference", destination_state.mExplicitLoaderReferences, 0);
+    ensure_equals("move assignment releases the replaced window reference", destination_state.mWindowLoaderReferences, 0);
+    ensureEvents("move assignment destroys the replaced window before unloading it", destination_state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::Destroy, Event::Unload });
+
+    source_state.mOwnerDuringDestroy = destination;
+    destination->reset();
+    ensure("transferred requirements are invalid before source-window destruction", source_state.mRequirementsInvalidatedBeforeDestroy);
+    ensure_equals("the transferred explicit reference is released once", source_state.mExplicitLoaderReferences, 0);
+    ensure_equals("the transferred window reference is released once", source_state.mWindowLoaderReferences, 0);
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<7>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 31, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("instance fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto acquire_error =
+        owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled);
+    ensure("a validation-disabled fake Vulkan 1.1 instance is acquired", !acquire_error);
+    ensure("the instance generation is owned by the SDL window",
+           owner->instanceGeneration() && owner->instanceGeneration()->instance() == fakeInstance() &&
+               owner->instanceGeneration()->apiVersion() == VK_API_VERSION_1_1 &&
+               owner->instanceGeneration()->nativeWindowGeneration() == 31 && !owner->instanceGeneration()->validationEnabled());
+    const auto& enabled_extensions = owner->instanceGeneration()->enabledExtensions();
+    ensure("explicit diagnostic instance acquisition adds surface maintenance dependencies in exact order",
+           state.mSurfaceCapabilities2Enabled && state.mSurfaceMaintenanceEnabled && enabled_extensions.size() == 4 &&
+               enabled_extensions[0] == "VK_KHR_surface" && enabled_extensions[1] == "VK_KHR_xlib_surface" &&
+               enabled_extensions[2] == SURFACE_CAPABILITIES_2_EXTENSION && enabled_extensions[3] == SURFACE_MAINTENANCE_EXTENSION &&
+               owner->requirements()->requiredInstanceExtensions() == std::vector<std::string>{ "VK_KHR_surface", "VK_KHR_xlib_surface" });
+
+    const auto surface_error = owner->acquireSurfaceGeneration();
+    ensure("the fake SDL surface is acquired", !surface_error);
+    ensure("the instance parent owns the exact fake surface generation",
+           owner->instanceGeneration()->hasSurfaceGeneration() && owner->instanceGeneration()->surface() == fakeSurface() &&
+               owner->instanceGeneration()->surfaceNativeWindowGeneration() == 31);
+    ensure("SDL receives the exact private window, instance, and null allocator",
+           state.mSurfaceWindow == state.mWindow && state.mSurfaceInstance == fakeInstance() && !state.mSurfaceAllocator);
+
+    const auto duplicate_surface = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("a duplicate surface acquisition is rejected", duplicate_surface, VulkanSurfaceAcquireCode::SurfaceAlreadyOwned);
+    ensure_equals("duplicate acquisition makes no second SDL call", state.mCreateSurfaceCount, std::size_t{ 1 });
+
+    const auto duplicate =
+        owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled);
+    ensure("a duplicate instance acquisition is rejected without replacing the owner",
+           duplicate && duplicate->mCode == VulkanInstanceAcquireCode::InstanceAlreadyOwned && owner->instanceGeneration() &&
+               owner->instanceGeneration()->instance() == fakeInstance());
+
+    LLWindowSDLVulkan moved(std::move(*owner));
+    ensure("move construction transfers the instance and surface generations",
+           moved.instanceGeneration() && moved.instanceGeneration()->instance() == fakeInstance() &&
+               moved.instanceGeneration()->surface() == fakeSurface());
+    ensure("the moved-from SDL owner publishes no instance generation", owner->instanceGeneration() == nullptr);
+
+    state.mOwnerDuringSurfaceDestroy  = &moved;
+    state.mOwnerDuringInstanceDestroy = &moved;
+    state.mOwnerDuringDestroy         = &moved;
+    moved.reset();
+
+    ensureEvents("reset destroys the Vulkan surface and instance before requirements, window, and loader teardown", state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
+                   Event::CreateSurface, Event::DestroySurface, Event::DestroyInstance, Event::Destroy, Event::Unload });
+    ensure_equals("the Vulkan surface is destroyed exactly once", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("the Vulkan instance is destroyed exactly once", state.mDestroyInstanceCount, std::size_t{ 1 });
+    ensure("requirements and the parent instance remain live while Vulkan destroys the surface",
+           state.mRequirementsLiveDuringSurfaceDestroy && state.mInstanceLiveDuringSurfaceDestroy);
+    ensure("both SDL loader references remain live while Vulkan destroys the surface", state.mLoaderLiveDuringSurfaceDestroy);
+    ensure("requirements remain live while Vulkan destroys the instance", state.mRequirementsLiveDuringInstanceDestroy);
+    ensure("the surface child is absent before Vulkan destroys the instance", state.mSurfaceAbsentDuringInstanceDestroy);
+    ensure("both SDL loader references remain live while Vulkan destroys the instance", state.mLoaderLiveDuringInstanceDestroy);
+    ensure("requirements are invalidated before SDL destroys the window", state.mRequirementsInvalidatedBeforeDestroy);
+    ensure_equals("instance reset releases the explicit loader reference", state.mExplicitLoaderReferences, 0);
+    ensure_equals("instance reset releases the window loader reference", state.mWindowLoaderReferences, 0);
+
+    moved.reset();
+    ensure_equals("a second instance-owner reset performs no teardown", state.mEventCount, std::size_t{ 11 });
+    ensure_equals("a second instance-owner reset does not destroy the surface again", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("a second instance-owner reset does not destroy the instance again", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<8>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         source_state;
+    FakeState         destination_state;
+    ScopedVulkanState vulkan_state(source_state);
+    const auto        info = createInfo();
+
+    auto  source_result = acquireLLWindowSDLVulkan(info, 51, fakeOperations(source_state));
+    auto* source        = acquiredWindow(source_result);
+    ensure("move-assignment source acquired a Vulkan window", source != nullptr);
+    ensure("move-assignment source acquired an instance",
+           !source->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    ensure("move-assignment source acquired a surface", !source->acquireSurfaceGeneration());
+
+    destination_state.mWindow = reinterpret_cast<SDL_Window*>(static_cast<std::uintptr_t>(0x56780));
+    vulkan_state.use(destination_state);
+    auto  destination_result = acquireLLWindowSDLVulkan(info, 52, fakeOperations(destination_state));
+    auto* destination        = acquiredWindow(destination_result);
+    ensure("move-assignment destination acquired a Vulkan window", destination != nullptr);
+    ensure("move-assignment destination acquired an instance",
+           !destination->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    ensure("move-assignment destination acquired a surface", !destination->acquireSurfaceGeneration());
+
+    destination_state.mOwnerDuringSurfaceDestroy  = destination;
+    destination_state.mOwnerDuringInstanceDestroy = destination;
+    destination_state.mOwnerDuringDestroy         = destination;
+    *destination                                  = std::move(*source);
+
+    ensure("move assignment clears both source generations", !source->hasRequirements() && source->instanceGeneration() == nullptr);
+    ensure("move assignment transfers the source window, instance, and surface generations",
+           destination->isGenerationCurrent(51) && destination->instanceGeneration() &&
+               destination->instanceGeneration()->nativeWindowGeneration() == 51 &&
+               destination->instanceGeneration()->surfaceNativeWindowGeneration() == 51);
+    ensureEvents("move assignment tears down the replaced surface and instance before its SDL resources", destination_state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
+                   Event::CreateSurface, Event::DestroySurface, Event::DestroyInstance, Event::Destroy, Event::Unload });
+    ensure("replaced requirements and instance remain live while the replaced surface is destroyed",
+           destination_state.mRequirementsLiveDuringSurfaceDestroy && destination_state.mInstanceLiveDuringSurfaceDestroy);
+    ensure("replaced loader references remain live while the replaced surface is destroyed",
+           destination_state.mLoaderLiveDuringSurfaceDestroy);
+    ensure("replaced requirements remain live while the replaced instance is destroyed",
+           destination_state.mRequirementsLiveDuringInstanceDestroy);
+    ensure("the replaced surface is absent before its instance is destroyed", destination_state.mSurfaceAbsentDuringInstanceDestroy);
+    ensure("replaced loader references remain live while the replaced instance is destroyed",
+           destination_state.mLoaderLiveDuringInstanceDestroy);
+    ensure("replaced requirements are invalid before the replaced SDL window is destroyed",
+           destination_state.mRequirementsInvalidatedBeforeDestroy);
+    ensure_equals("move assignment destroys the replaced surface once", destination_state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("move assignment destroys the replaced instance once", destination_state.mDestroyInstanceCount, std::size_t{ 1 });
+
+    vulkan_state.use(source_state);
+    source_state.mOwnerDuringSurfaceDestroy  = destination;
+    source_state.mOwnerDuringInstanceDestroy = destination;
+    source_state.mOwnerDuringDestroy         = destination;
+    destination->reset();
+    ensureEvents("the transferred owner preserves surface-first teardown for the source resources", source_state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
+                   Event::CreateSurface, Event::DestroySurface, Event::DestroyInstance, Event::Destroy, Event::Unload });
+    ensure("transferred requirements and instance remain live while the transferred surface is destroyed",
+           source_state.mRequirementsLiveDuringSurfaceDestroy && source_state.mInstanceLiveDuringSurfaceDestroy);
+    ensure("transferred loader references remain live while the transferred surface is destroyed",
+           source_state.mLoaderLiveDuringSurfaceDestroy);
+    ensure("transferred requirements remain live while the transferred instance is destroyed",
+           source_state.mRequirementsLiveDuringInstanceDestroy);
+    ensure("the transferred surface is absent before its instance is destroyed", source_state.mSurfaceAbsentDuringInstanceDestroy);
+    ensure("transferred loader references remain live while the transferred instance is destroyed",
+           source_state.mLoaderLiveDuringInstanceDestroy);
+    ensure("transferred requirements are invalid before the source SDL window is destroyed",
+           source_state.mRequirementsInvalidatedBeforeDestroy);
+    ensure_equals("the transferred surface is destroyed once", source_state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("the transferred instance is destroyed once", source_state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<9>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    state.mFailInstanceCreation = true;
+    const auto info             = createInfo();
+    auto       result           = acquireLLWindowSDLVulkan(info, 61, fakeOperations(state));
+    auto*      owner            = acquiredWindow(result);
+    ensure("instance-failure fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto error = owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled);
+    ensure("instance creation failure is returned without publishing an owner",
+           error && error->mCode == VulkanInstanceAcquireCode::InstanceCreationFailure &&
+               error->mResult == VK_ERROR_INITIALIZATION_FAILED && owner->instanceGeneration() == nullptr);
+
+    state.mOwnerDuringDestroy = owner;
+    owner->reset();
+    ensureEvents("a failed instance acquisition still releases the SDL window and explicit loader", state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance, Event::Destroy,
+                   Event::Unload });
+    ensure_equals("a failed instance acquisition never destroys an unowned instance", state.mDestroyInstanceCount, std::size_t{ 0 });
+    ensure("failed acquisition invalidates requirements before SDL destroys the window", state.mRequirementsInvalidatedBeforeDestroy);
+    ensure_equals("failed acquisition releases the explicit loader reference", state.mExplicitLoaderReferences, 0);
+    ensure_equals("failed acquisition releases the window loader reference", state.mWindowLoaderReferences, 0);
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<10>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 71, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("surface-reset fixture acquired a Vulkan window", owner != nullptr);
+    ensure("surface-reset fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+    ensure("surface-reset fixture acquired a surface", !owner->acquireSurfaceGeneration());
+
+    state.mOwnerDuringSurfaceDestroy = owner;
+    ensure("explicit surface reset reports an owned generation", owner->resetSurfaceGeneration());
+    ensureEvents("explicit surface reset destroys only the surface", state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
+                   Event::CreateSurface, Event::DestroySurface });
+    ensure("explicit surface reset leaves the parent instance and requirements live",
+           owner->instanceGeneration() && owner->instanceGeneration()->instance() == fakeInstance() && owner->hasRequirements());
+    ensure("explicit surface reset publishes no child", !owner->instanceGeneration()->hasSurfaceGeneration());
+    ensure("a second explicit surface reset is idempotent", !owner->resetSurfaceGeneration());
+    ensure_equals("idempotent surface reset performs no Vulkan call", state.mEventCount, std::size_t{ 8 });
+
+    ensure("the same current generations may reacquire a surface", !owner->acquireSurfaceGeneration());
+    ensure("the reacquired surface is published", owner->instanceGeneration()->surface() == fakeSurface());
+
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensureEvents("full reset destroys the reacquired surface before its parent and SDL resources", state,
+                 { Event::Load, Event::Create, Event::Flags, Event::Resolver, Event::Extensions, Event::CreateInstance,
+                   Event::CreateSurface, Event::DestroySurface, Event::CreateSurface, Event::DestroySurface, Event::DestroyInstance,
+                   Event::Destroy, Event::Unload });
+    ensure_equals("both earned surface generations are destroyed once", state.mDestroySurfaceCount, std::size_t{ 2 });
+    ensure_equals("the shared parent instance is destroyed once", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<11>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 81, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("surface-failure fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto missing_parent = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("surface acquisition rejects a missing instance parent", missing_parent, VulkanSurfaceAcquireCode::InstanceNotLive);
+    ensure_equals("a missing instance parent makes no SDL surface call", state.mCreateSurfaceCount, std::size_t{ 0 });
+
+    ensure("surface-failure fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mExposeDestroySurface = false;
+    const auto missing_destroy  = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("a missing surface destroy command fails before SDL creation", missing_destroy,
+                       VulkanSurfaceAcquireCode::MissingRequiredInstanceCommand);
+    ensure("the exact missing destroy command is retained",
+           missing_destroy && missing_destroy->mCommand && *missing_destroy->mCommand == VulkanSurfaceCommand::DestroySurface);
+    ensure_equals("a missing destroy command makes no SDL surface call", state.mCreateSurfaceCount, std::size_t{ 0 });
+
+    state.mExposeDestroySurface   = true;
+    state.mFailSurfaceCreation    = true;
+    state.mPoisonSurfaceOnFailure = true;
+    const auto platform_failure   = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("SDL false maps to a platform failure", platform_failure, VulkanSurfaceAcquireCode::PlatformCreationFailure);
+    ensure("SDL platform failure carries no invented Vulkan result", platform_failure && !platform_failure->mResult);
+    ensure("a poisoned failed output is neither published nor destroyed",
+           !owner->instanceGeneration()->hasSurfaceGeneration() && state.mDestroySurfaceCount == 0);
+
+    state.mFailSurfaceCreation  = false;
+    state.mNullSurfaceOnSuccess = true;
+    const auto null_success     = owner->acquireSurfaceGeneration();
+    ensureSurfaceError("SDL success with a null handle is rejected", null_success, VulkanSurfaceAcquireCode::NullSurfaceOnSuccess);
+    ensure("a null success publishes no child and destroys no surface",
+           !owner->instanceGeneration()->hasSurfaceGeneration() && state.mDestroySurfaceCount == 0);
+
+    state.mNullSurfaceOnSuccess = false;
+    ensure("a prior platform or null-output failure does not poison later acquisition", !owner->acquireSurfaceGeneration());
+    ensure_equals("the three creator paths call SDL exactly three times", state.mCreateSurfaceCount, std::size_t{ 3 });
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("only the earned surface is destroyed", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("failure recovery retains one parent destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<12>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 91, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("surface-allocation fixture acquired a Vulkan window", owner != nullptr);
+    ensure("surface-allocation fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    const auto allocation_failure = LLWindowSDLVulkanDetail::acquireSurfaceGeneration(*owner, failAllocation);
+    ensureSurfaceError("child allocation failure is returned through the SDL adapter", allocation_failure,
+                       VulkanSurfaceAcquireCode::AllocationFailure);
+    ensure("allocation failure leaves the existing parent and requirements live",
+           owner->instanceGeneration() && owner->instanceGeneration()->instance() == fakeInstance() && owner->hasRequirements());
+    ensure("allocation failure runs no SDL creator and publishes no child",
+           state.mCreateSurfaceCount == 0 && !owner->instanceGeneration()->hasSurfaceGeneration());
+
+    ensure("normal acquisition still succeeds after allocation failure", !owner->acquireSurfaceGeneration());
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("post-allocation recovery destroys one surface", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("post-allocation recovery destroys one instance", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<13>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 101, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("swapchain-adapter fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainConfigurationGeneration();
+    ensure("swapchain configuration requires a live instance before querying drawable pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainConfigurationAcquireCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("swapchain-adapter fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mDrawableSizeSucceeds = false;
+    const auto failed_size      = owner->acquireSwapchainConfigurationGeneration();
+    ensure("an SDL drawable-size failure is mapped before parent acquisition",
+           failed_size && failed_size->mCode == VulkanSwapchainConfigurationAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 1);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = 0;
+    const auto zero_size        = owner->acquireSwapchainConfigurationGeneration();
+    ensure("a zero SDL drawable width is rejected",
+           zero_size && zero_size->mCode == VulkanSwapchainConfigurationAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 2);
+
+    state.mDrawableWidth       = 1600;
+    state.mDrawableHeight      = 900;
+    const auto missing_surface = owner->acquireSwapchainConfigurationGeneration();
+    ensure("valid SDL backing pixels are forwarded to the live instance parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainConfigurationAcquireCode::SurfaceNotLive &&
+               state.mDrawableSizeCalls == 3);
+
+    ensure("swapchain-adapter fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const auto missing_selection = owner->acquireSwapchainConfigurationGeneration();
+    ensure("the SDL adapter forwards current pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainConfigurationAcquireCode::PresentationDeviceNotLive &&
+               state.mDrawableSizeCalls == 4);
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<14>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 111, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("swapchain-owner fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainGeneration();
+    ensure("swapchain acquisition requires a live instance before querying drawable pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainAcquireCode::InstanceNotLive && state.mDrawableSizeCalls == 0);
+
+    ensure("swapchain-owner fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mDrawableSizeSucceeds = false;
+    const auto failed_size      = owner->acquireSwapchainGeneration();
+    ensure("an SDL drawable-size failure is mapped before swapchain acquisition",
+           failed_size && failed_size->mCode == VulkanSwapchainAcquireCode::InvalidDrawableExtent && state.mDrawableSizeCalls == 1);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableHeight       = 0;
+    const auto zero_size        = owner->acquireSwapchainGeneration();
+    ensure("a zero SDL drawable height is rejected before swapchain acquisition",
+           zero_size && zero_size->mCode == VulkanSwapchainAcquireCode::InvalidDrawableExtent && state.mDrawableSizeCalls == 2);
+
+    state.mDrawableWidth       = 1920;
+    state.mDrawableHeight      = 1080;
+    const auto missing_surface = owner->acquireSwapchainGeneration();
+    ensure("current SDL backing pixels are forwarded to the swapchain parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainAcquireCode::SurfaceNotLive && state.mDrawableSizeCalls == 3);
+
+    ensure("swapchain-owner fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const auto missing_selection = owner->acquireSwapchainGeneration();
+    ensure("the swapchain adapter re-queries pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainAcquireCode::PresentationDeviceNotLive &&
+               state.mDrawableSizeCalls == 4);
+    ensure("an unowned swapchain reports no explicit reset", !owner->resetSwapchainGeneration());
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("swapchain adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("swapchain adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<15>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 121, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("swapchain-image adapter fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainImagesGeneration();
+    ensure("swapchain-image acquisition requires a live instance before querying drawable pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainImagesAcquireCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("swapchain-image adapter fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mDrawableSizeSucceeds = false;
+    const auto failed_size      = owner->acquireSwapchainImagesGeneration();
+    ensure("an SDL drawable-size failure is mapped before swapchain-image acquisition",
+           failed_size && failed_size->mCode == VulkanSwapchainImagesAcquireCode::InvalidDrawableExtent && state.mDrawableSizeCalls == 1);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = -1;
+    const auto invalid_size     = owner->acquireSwapchainImagesGeneration();
+    ensure("a negative SDL drawable width is rejected before swapchain-image acquisition",
+           invalid_size && invalid_size->mCode == VulkanSwapchainImagesAcquireCode::InvalidDrawableExtent && state.mDrawableSizeCalls == 2);
+
+    state.mDrawableWidth       = 2560;
+    state.mDrawableHeight      = 1440;
+    const auto missing_surface = owner->acquireSwapchainImagesGeneration();
+    ensure("current SDL backing pixels are forwarded to the swapchain-image parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainImagesAcquireCode::SurfaceNotLive && state.mDrawableSizeCalls == 3);
+
+    ensure("swapchain-image adapter fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const auto missing_selection = owner->acquireSwapchainImagesGeneration();
+    ensure("the swapchain-image adapter re-queries pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainImagesAcquireCode::PresentationDeviceNotLive &&
+               state.mDrawableSizeCalls == 4);
+    ensure("an unowned swapchain-image generation reports no explicit reset", !owner->resetSwapchainImagesGeneration());
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("swapchain-image adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("swapchain-image adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<16>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    const auto        info   = createInfo();
+    auto              result = acquireLLWindowSDLVulkan(info, 131, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("frame-slot adapter fixture acquired a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("frame-slot acquisition requires a live instance before querying drawable pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotAcquireCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+    const auto  missing_result    = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* missing_operation = operationError(missing_result);
+    ensure("empty submission requires a live instance before querying drawable pixels",
+           missing_operation && missing_operation->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("frame-slot adapter fixture acquired an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mDrawableSizeSucceeds = false;
+    const auto failed_size      = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("an SDL drawable-size failure is mapped before frame-slot acquisition",
+           failed_size && failed_size->mCode == VulkanSwapchainFrameSlotAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 1);
+    const auto  failed_result    = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* failed_operation = operationError(failed_result);
+    ensure("an SDL drawable-size failure is typed before empty submission",
+           failed_operation && failed_operation->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 2);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableHeight       = -1;
+    const auto invalid_size     = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("a negative SDL drawable height is rejected before frame-slot acquisition",
+           invalid_size && invalid_size->mCode == VulkanSwapchainFrameSlotAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 3);
+
+    state.mDrawableWidth       = 3840;
+    state.mDrawableHeight      = 2160;
+    const auto missing_surface = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("current SDL backing pixels are forwarded to the frame-slot parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainFrameSlotAcquireCode::SurfaceNotLive &&
+               state.mDrawableSizeCalls == 4);
+    const auto  missing_surface_result    = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* missing_surface_operation = operationError(missing_surface_result);
+    ensure("current SDL pixels reach the empty-submission parent before a surface exists",
+           missing_surface_operation && missing_surface_operation->mCode == VulkanSwapchainFrameSlotParentOperationCode::SurfaceNotLive &&
+               state.mDrawableSizeCalls == 5);
+
+    ensure("frame-slot adapter fixture acquired a surface", !owner->acquireSurfaceGeneration());
+    const auto missing_selection = owner->acquireSwapchainFrameSlotGeneration();
+    ensure("the frame-slot adapter re-queries pixels through the exact surface parent",
+           missing_selection && missing_selection->mCode == VulkanSwapchainFrameSlotAcquireCode::PresentationDeviceNotLive &&
+               state.mDrawableSizeCalls == 6);
+    const auto  missing_selection_result = owner->retryEmptySwapchainFrameSlotCompletion();
+    const auto* missing_selection_retry  = operationError(missing_selection_result);
+    ensure("completion retry does not query current pixels when no configuration has retained an extent",
+           missing_selection_retry &&
+               missing_selection_retry->mCode == VulkanSwapchainFrameSlotParentOperationCode::PresentationDeviceNotLive &&
+               state.mDrawableSizeCalls == 6);
+    ensure("an unowned frame-slot generation reports no explicit reset", !owner->resetSwapchainFrameSlotGeneration());
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    owner->reset();
+    ensure_equals("frame-slot adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("frame-slot adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<17>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 141, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("empty-submission adapter fixture acquired a Vulkan window", owner != nullptr);
+    ensure("the adapter fixture acquires the complete frame-slot parent chain", owner && acquireCompleteFrameSlot(*owner));
+    const auto* instance = owner->instanceGeneration();
+    ensure("frame-slot acquisition remains inert until the explicit adapter call",
+           instance && instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               state.mWaitCalls == 0 && state.mQueueSubmitCalls == 0);
+    const VkSemaphore image_available = instance ? instance->swapchainFrameImageAvailableSemaphore() : VK_NULL_HANDLE;
+    ensure("the adapter fixture owns one exact non-null image-available semaphore", image_available != VK_NULL_HANDLE);
+
+    state.mExposeWaitForFences          = false;
+    const auto  missing_dispatch_result = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* missing_dispatch        = operationError(missing_dispatch_result);
+    ensure("a missing execution command remains a typed nested parent failure",
+           missing_dispatch && missing_dispatch->mCode == VulkanSwapchainFrameSlotParentOperationCode::OperationFailure &&
+               missing_dispatch->mOperationError &&
+               missing_dispatch->mOperationError->mCode == VulkanSwapchainFrameSlotOperationCode::MissingRequiredCommand &&
+               missing_dispatch->mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+               missing_dispatch->mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::Reusable && state.mWaitCalls == 0 &&
+               state.mQueueSubmitCalls == 0);
+
+    state.mExposeWaitForFences = true;
+    ensure("the first explicit empty round trip succeeds",
+           operationSucceeded(owner->roundTripEmptySwapchainFrameSlot(), VulkanSwapchainFrameSlotDisposition::Reusable));
+    ensure("the second explicit empty round trip proves reuse",
+           operationSucceeded(owner->roundTripEmptySwapchainFrameSlot(), VulkanSwapchainFrameSlotDisposition::Reusable));
+    ensure("two adapter cycles cross the queue exactly twice without replacing the image semaphore",
+           state.mWaitCalls == 4 && state.mQueueSubmitCalls == 2 && instance->swapchainFrameImageAvailableSemaphore() == image_available);
+
+    state.mWaitResultIndex     = 0;
+    state.mWaitResultCount     = 2;
+    state.mWaitResults[0]      = VK_SUCCESS;
+    state.mWaitResults[1]      = VK_TIMEOUT;
+    const auto  pending_result = owner->roundTripEmptySwapchainFrameSlot();
+    const auto* pending        = operationError(pending_result);
+    ensure("an unknown completion remains a typed nested Pending failure",
+           pending && pending->mCode == VulkanSwapchainFrameSlotParentOperationCode::OperationFailure && pending->mOperationError &&
+               pending->mOperationError->mCode == VulkanSwapchainFrameSlotOperationCode::CommandFailure &&
+               pending->mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+               pending->mOperationError->mResult == VK_TIMEOUT &&
+               pending->mOperationError->mDisposition == VulkanSwapchainFrameSlotDisposition::Pending &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Pending);
+    ensure("every direct and transitive adapter reset refuses Pending without releasing ownership",
+           !owner->resetSwapchainFrameSlotGeneration() && !owner->resetSwapchainImagesGeneration() && !owner->resetSwapchainGeneration() &&
+               !owner->resetSurfaceGeneration() && !owner->reset() && owner->hasRequirements() && owner->instanceGeneration() == instance &&
+               instance->hasSwapchainFrameSlotGeneration());
+
+    const std::size_t drawable_queries_before_retry = state.mDrawableSizeCalls;
+    state.mDrawableWidth                            = 0;
+    state.mDrawableHeight                           = 0;
+    ensure("the explicit completion retry restores reusable state",
+           operationSucceeded(owner->retryEmptySwapchainFrameSlotCompletion(), VulkanSwapchainFrameSlotDisposition::Reusable) &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable && state.mWaitCalls == 7 &&
+               state.mQueueSubmitCalls == 3 && state.mDrawableSizeCalls == drawable_queries_before_retry &&
+               instance->swapchainFrameImageAvailableSemaphore() == image_available);
+    ensure("child-first reset succeeds after completion retry", owner->resetSwapchainFrameSlotGeneration());
+    ensure("the recovered adapter owner completes full teardown", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<18>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 151, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("presentation adapter fixture acquires the complete frame-slot chain", owner && acquireCompleteFrameSlot(*owner));
+    const auto* instance = owner->instanceGeneration();
+    ensure("the adapter exposes all presentation synchronization handles",
+           instance && instance->swapchainFrameImageAvailableSemaphore() == state.mImageAvailableSemaphore &&
+               instance->swapchainFramePresentationReadySemaphore() == state.mPresentationReadySemaphore &&
+               instance->swapchainFrameSubmissionFence() == state.mSubmissionFence &&
+               instance->swapchainFramePresentCompletionFence() == state.mPresentCompletionFence);
+
+    const std::size_t drawable_queries_before_cycles = state.mDrawableSizeCalls;
+    state.mAcquiredImageIndex                        = 0;
+    ensure("the first acquire-to-present adapter cycle succeeds",
+           presentationSucceeded(owner->acquireToPresentSwapchainFrameSlot(), VulkanSwapchainFrameSlotPresentationOutcome::Presented, 0));
+    state.mAcquiredImageIndex = 1;
+    ensure("the second acquire-to-present adapter cycle proves reuse",
+           presentationSucceeded(owner->acquireToPresentSwapchainFrameSlot(), VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1));
+    ensure("each new cycle samples current geometry and reuses one frame slot",
+           state.mDrawableSizeCalls == drawable_queries_before_cycles + 2 && state.mAcquireNextImageCalls == 2 &&
+               state.mPipelineBarrierCalls == 2 && state.mQueuePresentCalls == 2 && state.mQueueSubmitCalls == 2 &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+
+    state.mAcquiredImageIndex   = 2;
+    state.mQueuePresentResult   = VK_ERROR_OUT_OF_HOST_MEMORY;
+    const auto  present_failure = owner->acquireToPresentSwapchainFrameSlot();
+    const auto* present_error   = presentationError(present_failure);
+    ensure("a retryable present failure retains exact image ownership",
+           present_error && present_error->mOperationError &&
+               present_error->mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::QueuePresent &&
+               present_error->mOperationError->mResult == VK_ERROR_OUT_OF_HOST_MEMORY &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::PresentationReady &&
+               instance->swapchainFrameAcquiredImageIndex() == 2 && !owner->resetSwapchainFrameSlotGeneration());
+    const std::size_t drawable_queries_before_retry = state.mDrawableSizeCalls;
+    state.mDrawableWidth                            = 0;
+    state.mDrawableHeight                           = 0;
+    state.mQueuePresentResult                       = VK_SUCCESS;
+    ensure("presentation retry uses the retained identity and extent",
+           presentationSucceeded(owner->retrySwapchainFrameSlotPresentation(), VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2) &&
+               state.mDrawableSizeCalls == drawable_queries_before_retry &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable);
+
+    state.mDrawableWidth          = 1280;
+    state.mDrawableHeight         = 720;
+    state.mAcquiredImageIndex     = 1;
+    state.mEndCommandBufferResult = VK_ERROR_UNKNOWN;
+    state.mWaitResultIndex        = 0;
+    state.mWaitResultCount        = 2;
+    state.mWaitResults[0]         = VK_SUCCESS;
+    state.mWaitResults[1]         = VK_TIMEOUT;
+    const auto  acquired_failure  = owner->acquireToPresentSwapchainFrameSlot();
+    const auto* acquired_error    = presentationError(acquired_failure);
+    ensure("a post-acquire recording failure retains the acquired image",
+           acquired_error && acquired_error->mOperationError &&
+               acquired_error->mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::EndCommandBuffer &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::ImageAcquired &&
+               instance->swapchainFrameAcquiredImageIndex() == 1);
+    const std::size_t drawable_queries_before_cancel = state.mDrawableSizeCalls;
+    state.mDrawableWidth                             = 0;
+    state.mDrawableHeight                            = 0;
+    state.mEndCommandBufferResult                    = VK_SUCCESS;
+    const auto  cancel_failure                       = owner->cancelSwapchainFrameSlotPresentation();
+    const auto* cancel_error                         = operationError(cancel_failure);
+    ensure("a cancellation wait timeout retains the exact pending obligation",
+           cancel_error && cancel_error->mOperationError &&
+               cancel_error->mOperationError->mCommand == VulkanSwapchainFrameSlotCommand::WaitForFences &&
+               cancel_error->mOperationError->mResult == VK_TIMEOUT &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::CancellationPending &&
+               state.mDrawableSizeCalls == drawable_queries_before_cancel && !owner->reset());
+    ensure("cancellation completion retries without querying changed geometry",
+           operationSucceeded(owner->retrySwapchainFrameSlotCancellationCompletion(), VulkanSwapchainFrameSlotDisposition::Reusable) &&
+               state.mDrawableSizeCalls == drawable_queries_before_cancel && state.mReleaseSwapchainImagesCalls == 1 &&
+               !instance->swapchainFrameAcquiredImageIndex());
+    ensure("the recovered presentation owner tears down child-first", owner->resetSwapchainFrameSlotGeneration() && owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<19>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 161, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("swapchain rebuild adapter fixture acquires a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->rebuildSwapchainChain();
+    const auto* missing_error    = std::get_if<VulkanSwapchainChainRebuildError>(&missing_instance);
+    ensure("swapchain rebuild requires a live instance before sampling SDL pixels",
+           missing_error && missing_error->mCode == VulkanSwapchainChainRebuildCode::InstanceNotLive &&
+               missing_error->mPhase == VulkanSwapchainChainRebuildPhase::Preflight && state.mDrawableSizeCalls == 0);
+
+    ensure("the rebuild adapter fixture acquires the complete initial chain", acquireCompleteFrameSlot(*owner));
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("the rebuild adapter fixture retains its exact live parent chain",
+           instance && instance->surface() == fakeSurface() && instance->physicalDevice() == state.mPhysicalDevice &&
+               instance->logicalDevice() == state.mDevice && instance->presentationQueue() == state.mQueue);
+    ensure("the initial chain publishes presentation targets and one graphics pipeline",
+           instance && instance->hasSwapchainPresentationTargetGeneration() &&
+               instance->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebufferCount() == state.mImages.size() &&
+               instance->swapchainPresentationFramebuffer(0) != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebuffer(1) != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebuffer(2) != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebuffer(static_cast<std::uint32_t>(state.mImages.size())) == VK_NULL_HANDLE &&
+               instance->hasSwapchainPresentationPipelineGeneration() &&
+               instance->swapchainPresentationPipelineLayout() != VK_NULL_HANDLE &&
+               instance->swapchainPresentationPipeline() != VK_NULL_HANDLE && state.mCreateRenderPassCalls == 1 &&
+               state.mCreateFramebufferCalls == state.mImages.size() && state.mCreateShaderModuleCalls == 2 &&
+               state.mDestroyShaderModuleCalls == 2 && state.mCreatePipelineLayoutCalls == 1 &&
+               state.mCreateGraphicsPipelineCalls == 1);
+
+    const std::size_t queries_before_invalid = state.mDrawableSizeCalls;
+    state.mDrawableSizeSucceeds              = false;
+    const auto failed_query        = owner->rebuildSwapchainChain();
+    const auto* failed_query_error = std::get_if<VulkanSwapchainChainRebuildError>(&failed_query);
+    ensure("an SDL pixel-query failure is one typed invalid-extent sample",
+           failed_query_error && failed_query_error->mCode == VulkanSwapchainChainRebuildCode::InvalidDrawableExtent &&
+               failed_query_error->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+               state.mDrawableSizeCalls == queries_before_invalid + 1);
+    ensure("an SDL pixel-query failure leaves the complete chain intact",
+           instance->hasSwapchainConfigurationGeneration() && instance->hasSwapchainGeneration() &&
+               instance->hasSwapchainImagesGeneration() && instance->hasSwapchainPresentationTargetGeneration() &&
+               instance->hasSwapchainPresentationPipelineGeneration() && instance->hasSwapchainFrameSlotGeneration() &&
+               state.mCreateRenderPassCalls == 1 &&
+               state.mDestroyRenderPassCalls == 0 && state.mCreateFramebufferCalls == state.mImages.size() &&
+               state.mDestroyFramebufferCalls == 0 &&
+               state.mCreateGraphicsPipelineCalls == 1 && state.mDestroyPipelineCalls == 0 &&
+               state.mCreateSwapchainCalls == 1 && state.mDestroySwapchainCalls == 0);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = -1;
+    state.mDrawableHeight       = 900;
+    const auto negative_width   = owner->rebuildSwapchainChain();
+    const auto* negative_error  = std::get_if<VulkanSwapchainChainRebuildError>(&negative_width);
+    ensure("a negative SDL pixel dimension is one typed invalid-extent sample",
+           negative_error && negative_error->mCode == VulkanSwapchainChainRebuildCode::InvalidDrawableExtent &&
+               negative_error->mPhase == VulkanSwapchainChainRebuildPhase::Preflight &&
+               state.mDrawableSizeCalls == queries_before_invalid + 2 &&
+               instance->hasSwapchainPresentationTargetGeneration() && instance->hasSwapchainFrameSlotGeneration());
+
+    state.mDrawableWidth                       = 1280;
+    state.mDrawableHeight                      = 720;
+    const std::size_t queries_before_explicit = state.mDrawableSizeCalls;
+    const auto suspended                       = owner->rebuildSwapchainChain(VkExtent2D{ 0, 0 });
+    const auto* suspended_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&suspended);
+    ensure("an explicit zero pixel dimension suspends without querying stale SDL geometry",
+           suspended_outcome && *suspended_outcome == VulkanSwapchainChainRebuildOutcome::Suspended &&
+               state.mDrawableSizeCalls == queries_before_explicit);
+    ensure("suspension removes all six swapchain children",
+           !instance->hasSwapchainConfigurationGeneration() && !instance->hasSwapchainGeneration() &&
+               !instance->hasSwapchainImagesGeneration() && !instance->hasSwapchainPresentationTargetGeneration() &&
+               !instance->hasSwapchainPresentationPipelineGeneration() && !instance->hasSwapchainFrameSlotGeneration() &&
+               instance->swapchainPresentationRenderPass() == VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebufferCount() == 0 &&
+               instance->swapchainPresentationFramebuffer(0) == VK_NULL_HANDLE &&
+               instance->swapchainPresentationPipelineLayout() == VK_NULL_HANDLE &&
+               instance->swapchainPresentationPipeline() == VK_NULL_HANDLE && state.mCreateSwapchainCalls == 1 &&
+               state.mDestroySwapchainCalls == 1 && state.mCreateRenderPassCalls == 1 &&
+               state.mDestroyRenderPassCalls == 1 && state.mCreateFramebufferCalls == state.mImages.size() &&
+               state.mDestroyFramebufferCalls == state.mImages.size() && state.mCreateGraphicsPipelineCalls == 1 &&
+               state.mDestroyPipelineCalls == 1 && state.mDestroyPipelineLayoutCalls == 1);
+    ensure("suspension preserves the exact SDL instance, surface, physical device, logical device, and queue",
+           owner->instanceGeneration() == instance && instance->surface() == fakeSurface() &&
+               instance->physicalDevice() == state.mPhysicalDevice && instance->logicalDevice() == state.mDevice &&
+               instance->presentationQueue() == state.mQueue && owner->isGenerationCurrent(161));
+
+    const auto rebuilt          = owner->rebuildSwapchainChain(VkExtent2D{ 1600, 900 });
+    const auto* rebuilt_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuilt);
+    ensure("one later explicit nonzero extent rebuilds the complete chain without querying SDL",
+           rebuilt_outcome && *rebuilt_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               state.mDrawableSizeCalls == queries_before_explicit);
+    ensure("the rebuilt configuration retains the new SDL backing-pixel extent",
+           instance->hasSwapchainConfigurationGeneration() && instance->swapchainDrawableExtent().width == 1600 &&
+               instance->swapchainDrawableExtent().height == 900);
+    ensure("the rebuilt chain owns a swapchain, images, presentation targets, pipeline, and frame slot",
+           instance->hasSwapchainGeneration() && instance->hasSwapchainImagesGeneration() &&
+               instance->resolvedSwapchainImageCount() == state.mImages.size() &&
+               instance->hasSwapchainPresentationTargetGeneration() &&
+               instance->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebufferCount() == state.mImages.size() &&
+               instance->swapchainPresentationFramebuffer(0) != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebuffer(1) != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebuffer(2) != VK_NULL_HANDLE &&
+               instance->hasSwapchainPresentationPipelineGeneration() &&
+               instance->swapchainPresentationPipelineLayout() != VK_NULL_HANDLE &&
+               instance->swapchainPresentationPipeline() != VK_NULL_HANDLE &&
+               instance->hasSwapchainFrameSlotGeneration() && state.mCreateSwapchainCalls == 2 &&
+               state.mDestroySwapchainCalls == 1 && state.mCreateRenderPassCalls == 2 &&
+               state.mDestroyRenderPassCalls == 1 && state.mCreateFramebufferCalls == state.mImages.size() * 2 &&
+               state.mDestroyFramebufferCalls == state.mImages.size() && state.mCreateShaderModuleCalls == 4 &&
+               state.mDestroyShaderModuleCalls == 4 && state.mCreatePipelineLayoutCalls == 2 &&
+               state.mCreateGraphicsPipelineCalls == 2 && state.mDestroyPipelineCalls == 1 &&
+               state.mDestroyPipelineLayoutCalls == 1);
+    ensure("the rebuilt chain still belongs to the exact SDL owner and native-window generation",
+           owner->instanceGeneration() == instance && instance->nativeWindowGeneration() == 161 && owner->isGenerationCurrent(161));
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    ensure("the rebuilt SDL owner tears down child-first", owner->reset());
+    ensure_equals("both earned swapchains are destroyed once", state.mDestroySwapchainCalls, std::size_t{ 2 });
+    ensure_equals("both earned presentation render passes are destroyed once", state.mDestroyRenderPassCalls, std::size_t{ 2 });
+    ensure_equals("every earned presentation framebuffer is destroyed once",
+                  state.mDestroyFramebufferCalls,
+                  state.mImages.size() * 2);
+    ensure_equals("both earned presentation pipelines are destroyed once", state.mDestroyPipelineCalls, std::size_t{ 2 });
+    ensure_equals("both earned presentation pipeline layouts are destroyed once",
+                  state.mDestroyPipelineLayoutCalls,
+                  std::size_t{ 2 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<20>()
+{
+    using namespace LLRenderVulkan;
+
+    VulkanSwapchainFrameClearColor clear_color;
+    clear_color.mRgba = { 0.125f, 0.375f, 0.625f, 1.0f };
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 171, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("clear-present adapter fixture acquires a Vulkan window", owner != nullptr);
+
+    const auto  missing_instance_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* missing_instance        = presentationError(missing_instance_result);
+    ensure("clear-present requires a live instance before sampling SDL pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("clear-present adapter fixture acquires the complete frame-slot chain", acquireCompleteFrameSlot(*owner));
+    const auto* instance = owner->instanceGeneration();
+    ensure("clear-present fixture retains the exact SDL owner and native generation",
+           instance && owner->isGenerationCurrent(171) && instance->nativeWindowGeneration() == 171);
+
+    const std::size_t drawable_queries_before_failures = state.mDrawableSizeCalls;
+    state.mDrawableSizeSucceeds                        = false;
+    const auto  failed_query_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* failed_query        = presentationError(failed_query_result);
+    ensure("clear-present reports one failed SDL backing-pixel sample as invalid extent",
+           failed_query && failed_query->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 1 && state.mAcquireNextImageCalls == 0 &&
+               state.mClearColorImageCalls == 0);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = -1;
+    state.mDrawableHeight       = 720;
+    const auto  negative_extent_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    const auto* negative_extent        = presentationError(negative_extent_result);
+    ensure("clear-present rejects a negative SDL backing-pixel dimension before native work",
+           negative_extent && negative_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 2 && state.mAcquireNextImageCalls == 0 &&
+               state.mClearColorImageCalls == 0);
+
+    state.mDrawableWidth  = 1280;
+    state.mDrawableHeight = 720;
+    VulkanSwapchainFrameClearColor invalid_color = clear_color;
+    invalid_color.mRgba[0] = -0.01f;
+    const auto  invalid_color_result = owner->acquireClearToPresentSwapchainFrameSlot(invalid_color);
+    const auto* invalid_color_error  = presentationError(invalid_color_result);
+    ensure("clear-present forwards invalid normalized color to the typed core preflight",
+           invalid_color_error && invalid_color_error->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor &&
+               !invalid_color_error->mOperationError &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 3 && state.mAcquireNextImageCalls == 0 &&
+               state.mClearColorImageCalls == 0);
+
+    state.mAcquiredImageIndex = 2;
+    const auto success_result = owner->acquireClearToPresentSwapchainFrameSlot(clear_color);
+    ensure("clear-present forwards the exact current SDL owner, generation, extent, and color",
+           presentationSucceeded(success_result, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 2) &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 4 && state.mAcquireNextImageCalls == 1 &&
+               state.mClearColorImageCalls == 1 && state.mClearCommandBuffer == state.mCommandBuffer &&
+               state.mClearedImage == state.mImages[2] && state.mClearImageLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+               state.mClearColor.float32[0] == clear_color.mRgba[0] && state.mClearColor.float32[1] == clear_color.mRgba[1] &&
+               state.mClearColor.float32[2] == clear_color.mRgba[2] && state.mClearColor.float32[3] == clear_color.mRgba[3] &&
+               state.mClearRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && state.mClearRange.baseMipLevel == 0 &&
+               state.mClearRange.levelCount == 1 && state.mClearRange.baseArrayLayer == 0 && state.mClearRange.layerCount == 1 &&
+               state.mQueueSubmitCalls == 1 && state.mQueuePresentCalls == 1 &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+
+    ensure("the clear-present SDL owner tears down child-first", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<21>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 181, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("presentation-target adapter fixture acquires a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("presentation-target acquisition requires a live instance before querying SDL pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainPresentationTargetAcquireCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("presentation-target adapter fixture acquires an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mDrawableSizeSucceeds = false;
+    const auto failed_size      = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("an SDL drawable-size failure is mapped before presentation-target acquisition",
+           failed_size && failed_size->mCode == VulkanSwapchainPresentationTargetAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 1);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = 1920;
+    state.mDrawableHeight       = 0;
+    const auto zero_size        = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("a zero SDL drawable height is rejected before presentation-target acquisition",
+           zero_size && zero_size->mCode == VulkanSwapchainPresentationTargetAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 2);
+
+    state.mDrawableHeight       = 1080;
+    const auto missing_surface = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("current SDL backing pixels are forwarded to the presentation-target parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainPresentationTargetAcquireCode::SurfaceNotLive &&
+               state.mDrawableSizeCalls == 3);
+
+    ensure("presentation-target adapter fixture acquires a surface", !owner->acquireSurfaceGeneration());
+    const auto missing_selection = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("the presentation-target adapter re-queries pixels through the exact surface parent",
+           missing_selection &&
+               missing_selection->mCode == VulkanSwapchainPresentationTargetAcquireCode::PresentationDeviceNotLive &&
+               state.mDrawableSizeCalls == 4);
+
+    ensure("presentation-target adapter fixture acquires the remaining parents through the swapchain",
+           !owner->acquirePresentationDeviceGeneration() && !owner->acquireLogicalDeviceGeneration() &&
+               !owner->acquireSwapchainConfigurationGeneration() && !owner->acquireSwapchainGeneration());
+    const auto missing_images = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("presentation-target acquisition requires the exact swapchain-image parent",
+           missing_images && missing_images->mCode == VulkanSwapchainPresentationTargetAcquireCode::SwapchainImagesNotLive &&
+               state.mCreateRenderPassCalls == 0 && state.mCreateFramebufferCalls == 0);
+    ensure("presentation-target adapter fixture acquires its swapchain-image parent",
+           !owner->acquireSwapchainImagesGeneration());
+    ensure("presentation-target acquisition succeeds through the authenticated SDL adapter",
+           !owner->acquireSwapchainPresentationTargetGeneration());
+
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    const VkRenderPass first_render_pass = instance ? instance->swapchainPresentationRenderPass() : VK_NULL_HANDLE;
+    const VkFramebuffer first_framebuffer = instance ? instance->swapchainPresentationFramebuffer(0) : VK_NULL_HANDLE;
+    ensure("the SDL adapter publishes one exact presentation target per swapchain image",
+           instance && instance->hasSwapchainPresentationTargetGeneration() && first_render_pass != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebufferCount() == state.mImages.size() &&
+               first_framebuffer != VK_NULL_HANDLE && instance->swapchainPresentationFramebuffer(1) != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebuffer(2) != VK_NULL_HANDLE &&
+               first_framebuffer != instance->swapchainPresentationFramebuffer(1) &&
+               instance->swapchainPresentationFramebuffer(1) != instance->swapchainPresentationFramebuffer(2) &&
+               instance->swapchainPresentationFramebuffer(static_cast<std::uint32_t>(state.mImages.size())) == VK_NULL_HANDLE &&
+               state.mCreateRenderPassCalls == 1 && state.mCreateFramebufferCalls == state.mImages.size() &&
+               state.mDestroyRenderPassCalls == 0 && state.mDestroyFramebufferCalls == 0);
+
+    const auto duplicate = owner->acquireSwapchainPresentationTargetGeneration();
+    ensure("duplicate presentation-target acquisition is typed and does not create native resources",
+           duplicate &&
+               duplicate->mCode == VulkanSwapchainPresentationTargetAcquireCode::SwapchainPresentationTargetAlreadyOwned &&
+               state.mCreateRenderPassCalls == 1 && state.mCreateFramebufferCalls == state.mImages.size());
+
+    ensure("the complete-chain order admits a frame slot after the presentation target",
+           !owner->acquireSwapchainFrameSlotGeneration() && instance->hasSwapchainFrameSlotGeneration());
+    ensure("explicit presentation-target reset retires the younger frame slot and every target handle",
+           owner->resetSwapchainPresentationTargetGeneration() &&
+               !instance->hasSwapchainPresentationTargetGeneration() && !instance->hasSwapchainFrameSlotGeneration() &&
+               instance->swapchainPresentationRenderPass() == VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebufferCount() == 0 &&
+               instance->swapchainPresentationFramebuffer(0) == VK_NULL_HANDLE && state.mDestroyRenderPassCalls == 1 &&
+               state.mDestroyFramebufferCalls == state.mImages.size());
+    ensure("an unowned presentation target reports no adapter-level reset",
+           !owner->resetSwapchainPresentationTargetGeneration());
+
+    ensure("the retained image parents can acquire a fresh presentation target",
+           !owner->acquireSwapchainPresentationTargetGeneration() &&
+               instance->swapchainPresentationRenderPass() != VK_NULL_HANDLE &&
+               instance->swapchainPresentationRenderPass() != first_render_pass &&
+               instance->swapchainPresentationFramebufferCount() == state.mImages.size() &&
+               instance->swapchainPresentationFramebuffer(0) != VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebuffer(0) != first_framebuffer && state.mCreateRenderPassCalls == 2 &&
+               state.mCreateFramebufferCalls == state.mImages.size() * 2);
+    ensure("resetting the image parent retires its presentation target first",
+           owner->resetSwapchainImagesGeneration() && !instance->hasSwapchainImagesGeneration() &&
+               !instance->hasSwapchainPresentationTargetGeneration() && instance->swapchainPresentationRenderPass() == VK_NULL_HANDLE &&
+               instance->swapchainPresentationFramebufferCount() == 0 && state.mDestroyRenderPassCalls == 2 &&
+               state.mDestroyFramebufferCalls == state.mImages.size() * 2);
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    ensure("presentation-target adapter fixture tears down its retained parents", owner->reset());
+    ensure_equals("presentation-target adapter checks preserve one surface destruction", state.mDestroySurfaceCount, std::size_t{ 1 });
+    ensure_equals("presentation-target adapter checks preserve one instance destruction", state.mDestroyInstanceCount, std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<22>()
+{
+    using namespace LLRenderVulkan;
+
+    const VulkanSwapchainFrameClearColor render_clear{ { 0.0625f, 0.3125f, 0.6875f, 1.0f } };
+
+    FakeState         missing_state;
+    ScopedVulkanState vulkan_state(missing_state);
+    auto              missing_result = acquireLLWindowSDLVulkan(createInfo(), 191, fakeOperations(missing_state));
+    auto*             missing_owner  = acquiredWindow(missing_result);
+    ensure("render-pass adapter fixture acquires its SDL owner", missing_owner != nullptr);
+
+    const auto  missing_instance_result = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* missing_instance        = presentationError(missing_instance_result);
+    ensure("render-pass clear requires a live instance before sampling SDL pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               missing_state.mDrawableSizeCalls == 0 && missing_state.mBeginRenderPassCalls == 0);
+
+    ensure("the missing-target fixture acquires every lower frame-slot parent",
+           !missing_owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled,
+                                                      VulkanInstancePortabilityMode::Disabled) &&
+               !missing_owner->acquireSurfaceGeneration() && !missing_owner->acquirePresentationDeviceGeneration() &&
+               !missing_owner->acquireLogicalDeviceGeneration() &&
+               !missing_owner->acquireSwapchainConfigurationGeneration() && !missing_owner->acquireSwapchainGeneration() &&
+               !missing_owner->acquireSwapchainImagesGeneration() && !missing_owner->acquireSwapchainFrameSlotGeneration());
+    const std::size_t missing_target_queries = missing_state.mDrawableSizeCalls;
+    const auto  missing_target_result = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* missing_target        = presentationError(missing_target_result);
+    ensure("render-pass clear reports the exact missing presentation-target parent after one fresh pixel sample",
+           missing_target && missing_target->mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationTargetNotLive &&
+               missing_state.mDrawableSizeCalls == missing_target_queries + 1 && missing_state.mAcquireNextImageCalls == 0 &&
+               missing_state.mBeginRenderPassCalls == 0 && missing_state.mEndRenderPassCalls == 0);
+    ensure("the lower frame-slot path remains independently usable without a presentation target",
+           operationSucceeded(missing_owner->roundTripEmptySwapchainFrameSlot(), VulkanSwapchainFrameSlotDisposition::Reusable) &&
+               missing_state.mBeginRenderPassCalls == 0 && missing_state.mEndRenderPassCalls == 0);
+    ensure("the missing-target fixture tears down child-first", missing_owner->reset());
+
+    FakeState state;
+    vulkan_state.use(state);
+    auto  result = acquireLLWindowSDLVulkan(createInfo(), 192, fakeOperations(state));
+    auto* owner  = acquiredWindow(result);
+    ensure("render-pass clear fixture acquires a complete authenticated frame-slot chain",
+           owner && acquireCompleteFrameSlot(*owner));
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("render-pass clear fixture retains its exact current SDL parent",
+           instance && owner->isGenerationCurrent(192) && instance->nativeWindowGeneration() == 192);
+
+    const std::size_t drawable_queries_before_failures = state.mDrawableSizeCalls;
+    state.mDrawableSizeSucceeds                        = false;
+    const auto  failed_query_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* failed_query        = presentationError(failed_query_result);
+    ensure("render-pass clear rejects a failed SDL backing-pixel sample before acquiring an image",
+           failed_query && failed_query->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 1 && state.mAcquireNextImageCalls == 0 &&
+               state.mBeginRenderPassCalls == 0);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = 1600;
+    state.mDrawableHeight       = 900;
+    const auto  changed_extent_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const auto* changed_extent        = presentationError(changed_extent_result);
+    ensure("render-pass clear forwards freshly sampled positive pixels to exact parent authentication",
+           changed_extent && changed_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 2 && state.mAcquireNextImageCalls == 0 &&
+               state.mBeginRenderPassCalls == 0);
+
+    VulkanSwapchainFrameClearColor invalid_clear = render_clear;
+    invalid_clear.mRgba[3]                       = 1.01f;
+    state.mDrawableWidth                         = 1280;
+    state.mDrawableHeight                        = 720;
+    const auto  invalid_clear_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(invalid_clear);
+    const auto* invalid_clear_error  = presentationError(invalid_clear_result);
+    ensure("render-pass clear preserves the core's typed normalized-color preflight",
+           invalid_clear_error && invalid_clear_error->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor &&
+               !invalid_clear_error->mOperationError && state.mDrawableSizeCalls == drawable_queries_before_failures + 3 &&
+               state.mAcquireNextImageCalls == 0 && state.mBeginRenderPassCalls == 0);
+
+    state.mAcquiredImageIndex = 2;
+    const VkRenderPass  expected_render_pass = instance->swapchainPresentationRenderPass();
+    const VkFramebuffer expected_framebuffer = instance->swapchainPresentationFramebuffer(2);
+    const VkExtent2D    expected_extent      = instance->swapchainImageExtent();
+    const auto          render_result = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(render_clear);
+    const VulkanSwapchainFrameSlotPresentationSuccess expected_success{
+        VulkanSwapchainFrameSlotPresentationOutcome::Presented, std::uint32_t{ 2 }
+    };
+    ensure("render-pass clear returns the exact parent success and reusable image disposition",
+           render_result == VulkanSwapchainFrameSlotParentPresentationResult{ expected_success } &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+    ensure("render-pass clear samples pixels once and records one balanced render pass without a transfer clear",
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 4 && state.mAcquireNextImageCalls == 1 &&
+               state.mPipelineBarrierCalls == 2 && state.mBeginRenderPassCalls == 1 && state.mEndRenderPassCalls == 1 &&
+               state.mClearColorImageCalls == 0 && state.mQueueSubmitCalls == 1 && state.mQueuePresentCalls == 1 &&
+               state.mSubmitWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    ensure("the recorded pass uses the exact acquired framebuffer, full image extent, and inline contents",
+           state.mRenderPassCommandBuffer == state.mCommandBuffer && state.mRenderPass == expected_render_pass &&
+               state.mRenderPassFramebuffer == expected_framebuffer && state.mRenderPassArea.offset.x == 0 &&
+               state.mRenderPassArea.offset.y == 0 && state.mRenderPassArea.extent.width == expected_extent.width &&
+               state.mRenderPassArea.extent.height == expected_extent.height && state.mRenderPassContents == VK_SUBPASS_CONTENTS_INLINE);
+    ensure("the wrapper copies the exact clear value into the render-pass begin record",
+           state.mRenderPassClear.color.float32[0] == render_clear.mRgba[0] &&
+               state.mRenderPassClear.color.float32[1] == render_clear.mRgba[1] &&
+               state.mRenderPassClear.color.float32[2] == render_clear.mRgba[2] &&
+               state.mRenderPassClear.color.float32[3] == render_clear.mRgba[3]);
+
+    const VulkanSwapchainFrameClearColor transfer_clear{ { 0.75f, 0.125f, 0.25f, 1.0f } };
+    state.mAcquiredImageIndex = 1;
+    const auto legacy_result  = owner->acquireClearToPresentSwapchainFrameSlot(transfer_clear);
+    ensure("the legacy transfer-clear wrapper remains independently reusable after a render-pass cycle",
+           presentationSucceeded(legacy_result, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
+               state.mBeginRenderPassCalls == 1 && state.mEndRenderPassCalls == 1 && state.mClearColorImageCalls == 1 &&
+               state.mClearedImage == state.mImages[1] && state.mClearColor.float32[0] == transfer_clear.mRgba[0] &&
+               state.mSubmitWaitStage == VK_PIPELINE_STAGE_TRANSFER_BIT &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex());
+
+    ensure("the render-pass clear fixture tears down child-first", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<23>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 201, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("presentation-pipeline adapter fixture acquires a Vulkan window", owner != nullptr);
+
+    const auto missing_instance = owner->acquireSwapchainPresentationPipelineGeneration();
+    ensure("presentation-pipeline acquisition requires a live instance before querying SDL pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainPresentationPipelineAcquireCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("presentation-pipeline adapter fixture acquires an instance",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled));
+
+    state.mDrawableSizeSucceeds = false;
+    const auto failed_size      = owner->acquireSwapchainPresentationPipelineGeneration();
+    ensure("an SDL drawable-size failure is mapped before presentation-pipeline acquisition",
+           failed_size && failed_size->mCode == VulkanSwapchainPresentationPipelineAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 1);
+
+    state.mDrawableSizeSucceeds = true;
+    state.mDrawableWidth        = -1;
+    state.mDrawableHeight       = 1080;
+    const auto invalid_size     = owner->acquireSwapchainPresentationPipelineGeneration();
+    ensure("a negative SDL drawable width is rejected before presentation-pipeline acquisition",
+           invalid_size && invalid_size->mCode == VulkanSwapchainPresentationPipelineAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == 2);
+
+    state.mDrawableWidth        = 1920;
+    const auto missing_surface = owner->acquireSwapchainPresentationPipelineGeneration();
+    ensure("current SDL backing pixels are forwarded to the presentation-pipeline parent",
+           missing_surface && missing_surface->mCode == VulkanSwapchainPresentationPipelineAcquireCode::SurfaceNotLive &&
+               state.mDrawableSizeCalls == 3);
+
+    ensure("presentation-pipeline adapter fixture acquires every parent below the presentation target",
+           !owner->acquireSurfaceGeneration() && !owner->acquirePresentationDeviceGeneration() &&
+               !owner->acquireLogicalDeviceGeneration() && !owner->acquireSwapchainConfigurationGeneration() &&
+               !owner->acquireSwapchainGeneration() && !owner->acquireSwapchainImagesGeneration());
+    const auto missing_target = owner->acquireSwapchainPresentationPipelineGeneration();
+    ensure("presentation-pipeline acquisition requires the exact presentation-target parent",
+           missing_target &&
+               missing_target->mCode == VulkanSwapchainPresentationPipelineAcquireCode::SwapchainPresentationTargetNotLive &&
+               state.mCreateShaderModuleCalls == 0 && state.mCreatePipelineLayoutCalls == 0 &&
+               state.mCreateGraphicsPipelineCalls == 0);
+    ensure("presentation-pipeline adapter fixture acquires its presentation target",
+           !owner->acquireSwapchainPresentationTargetGeneration());
+    ensure("presentation-pipeline acquisition succeeds through the authenticated SDL adapter",
+           !owner->acquireSwapchainPresentationPipelineGeneration());
+
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("the SDL adapter publishes one non-null presentation pipeline and destroys its transient shader modules",
+           instance && instance->hasSwapchainPresentationPipelineGeneration() &&
+               instance->swapchainPresentationPipelineLayout() != VK_NULL_HANDLE &&
+               instance->swapchainPresentationPipeline() != VK_NULL_HANDLE && state.mCreateShaderModuleCalls == 2 &&
+               state.mDestroyShaderModuleCalls == 2 && state.mCreatePipelineLayoutCalls == 1 &&
+               state.mCreateGraphicsPipelineCalls == 1 && state.mDestroyPipelineLayoutCalls == 0 &&
+               state.mDestroyPipelineCalls == 0);
+
+    const auto duplicate = owner->acquireSwapchainPresentationPipelineGeneration();
+    ensure("duplicate presentation-pipeline acquisition is typed and does not create native resources",
+           duplicate &&
+               duplicate->mCode == VulkanSwapchainPresentationPipelineAcquireCode::SwapchainPresentationPipelineAlreadyOwned &&
+               state.mCreateShaderModuleCalls == 2 && state.mCreatePipelineLayoutCalls == 1 &&
+               state.mCreateGraphicsPipelineCalls == 1);
+
+    ensure("the complete-chain order admits a frame slot after the presentation pipeline",
+           !owner->acquireSwapchainFrameSlotGeneration() && instance->hasSwapchainFrameSlotGeneration());
+    ensure("explicit presentation-pipeline reset retires the younger frame slot and both pipeline handles",
+           owner->resetSwapchainPresentationPipelineGeneration() &&
+               !instance->hasSwapchainPresentationPipelineGeneration() && !instance->hasSwapchainFrameSlotGeneration() &&
+               instance->hasSwapchainPresentationTargetGeneration() &&
+               instance->swapchainPresentationPipelineLayout() == VK_NULL_HANDLE &&
+               instance->swapchainPresentationPipeline() == VK_NULL_HANDLE && state.mDestroyPipelineCalls == 1 &&
+               state.mDestroyPipelineLayoutCalls == 1);
+    ensure("an unowned presentation pipeline reports no adapter-level reset",
+           !owner->resetSwapchainPresentationPipelineGeneration());
+
+    ensure("the retained target can acquire a fresh presentation pipeline",
+           !owner->acquireSwapchainPresentationPipelineGeneration() &&
+               instance->swapchainPresentationPipelineLayout() != VK_NULL_HANDLE &&
+               instance->swapchainPresentationPipeline() != VK_NULL_HANDLE &&
+               state.mCreateShaderModuleCalls == 4 && state.mDestroyShaderModuleCalls == 4 &&
+               state.mCreatePipelineLayoutCalls == 2 && state.mCreateGraphicsPipelineCalls == 2);
+    ensure("resetting the presentation target retires its pipeline child first",
+           owner->resetSwapchainPresentationTargetGeneration() &&
+               !instance->hasSwapchainPresentationTargetGeneration() &&
+               !instance->hasSwapchainPresentationPipelineGeneration() &&
+               instance->swapchainPresentationPipelineLayout() == VK_NULL_HANDLE &&
+               instance->swapchainPresentationPipeline() == VK_NULL_HANDLE && state.mDestroyPipelineCalls == 2 &&
+               state.mDestroyPipelineLayoutCalls == 2);
+
+    state.mOwnerDuringSurfaceDestroy  = owner;
+    state.mOwnerDuringInstanceDestroy = owner;
+    state.mOwnerDuringDestroy         = owner;
+    ensure("presentation-pipeline adapter fixture tears down its retained parents", owner->reset());
+    ensure_equals("presentation-pipeline adapter checks preserve one surface destruction",
+                  state.mDestroySurfaceCount,
+                  std::size_t{ 1 });
+    ensure_equals("presentation-pipeline adapter checks preserve one instance destruction",
+                  state.mDestroyInstanceCount,
+                  std::size_t{ 1 });
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<24>()
+{
+    using namespace LLRenderVulkan;
+
+    constexpr VulkanSwapchainFrameClearColor draw_clear{ { 0.09375f, 0.40625f, 0.71875f, 1.0f } };
+
+    FakeState         missing_state;
+    ScopedVulkanState vulkan_state(missing_state);
+    auto              missing_result = acquireLLWindowSDLVulkan(createInfo(), 211, fakeOperations(missing_state));
+    auto*             missing_owner  = acquiredWindow(missing_result);
+    ensure("draw adapter fixture acquires its SDL owner", missing_owner != nullptr);
+
+    const auto  missing_instance_result = missing_owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto* missing_instance        = presentationError(missing_instance_result);
+    ensure("diagnostic draw requires a live instance before sampling SDL backing pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainFrameSlotParentOperationCode::InstanceNotLive &&
+               missing_state.mDrawableSizeCalls == 0 && missing_state.mAcquireNextImageCalls == 0 && missing_state.mDrawCalls == 0);
+
+    ensure("the missing-pipeline fixture acquires the exact target and a younger frame slot",
+           !missing_owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
+               !missing_owner->acquireSurfaceGeneration() && !missing_owner->acquirePresentationDeviceGeneration() &&
+               !missing_owner->acquireLogicalDeviceGeneration() && !missing_owner->acquireSwapchainConfigurationGeneration() &&
+               !missing_owner->acquireSwapchainGeneration() && !missing_owner->acquireSwapchainImagesGeneration() &&
+               !missing_owner->acquireSwapchainPresentationTargetGeneration() && !missing_owner->acquireSwapchainFrameSlotGeneration());
+    const std::size_t missing_pipeline_queries = missing_state.mDrawableSizeCalls;
+    const auto        missing_pipeline_result  = missing_owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto*       missing_pipeline         = presentationError(missing_pipeline_result);
+    ensure("diagnostic draw reports the typed missing presentation-pipeline parent after one fresh pixel sample",
+           missing_pipeline &&
+               missing_pipeline->mCode == VulkanSwapchainFrameSlotParentOperationCode::SwapchainPresentationPipelineNotLive &&
+               missing_state.mDrawableSizeCalls == missing_pipeline_queries + 1 && missing_state.mAcquireNextImageCalls == 0 &&
+               missing_state.mBindPipelineCalls == 0 && missing_state.mBindVertexBuffersCalls == 0 && missing_state.mDrawCalls == 0);
+    missing_state.mAcquiredImageIndex = 1;
+    const auto clear_without_pipeline = missing_owner->acquireRenderPassClearToPresentSwapchainFrameSlot(draw_clear);
+    ensure("the existing render-pass clear route remains draw-free without a presentation pipeline",
+           presentationSucceeded(clear_without_pipeline, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
+               missing_state.mBeginRenderPassCalls == 1 && missing_state.mEndRenderPassCalls == 1 &&
+               missing_state.mBindPipelineCalls == 0 && missing_state.mBindVertexBuffersCalls == 0 &&
+               missing_state.mSetViewportCalls == 0 && missing_state.mSetScissorCalls == 0 && missing_state.mDrawCalls == 0);
+    ensure("the missing-pipeline fixture tears down child-first", missing_owner->reset());
+
+    FakeState state;
+    vulkan_state.use(state);
+    auto  result = acquireLLWindowSDLVulkan(createInfo(), 212, fakeOperations(state));
+    auto* owner  = acquiredWindow(result);
+    ensure("diagnostic draw fixture acquires target, pipeline, then a fresh frame slot", owner && acquireCompleteFrameSlot(*owner));
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ResidentUploadDestination       retained_destination;
+    ensure("diagnostic draw fixture completes one upload and retires its source and terminal transfer",
+           owner && acquireResidentUploadDestination(*owner, retained_destination));
+    ensure("complete-chain acquisition has no implicit draw hook",
+           instance && owner->isGenerationCurrent(212) && instance->nativeWindowGeneration() == 212 &&
+               instance->hasSwapchainPresentationTargetGeneration() && instance->hasSwapchainPresentationPipelineGeneration() &&
+               instance->hasSwapchainFrameSlotGeneration() && instance->hasUploadDestinationGeneration() &&
+               instance->uploadDestinationIsResident() && !instance->hasUploadSourceGeneration() &&
+               !instance->hasUploadTransferGeneration() && state.mBindPipelineCalls == 0 && state.mBindVertexBuffersCalls == 0 &&
+               state.mSetViewportCalls == 0 && state.mSetScissorCalls == 0 && state.mDrawCalls == 0);
+
+    const std::size_t drawable_queries_before_failures = state.mDrawableSizeCalls;
+    state.mDrawableSizeSucceeds                        = false;
+    const auto  failed_query_result                    = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto* failed_query                           = presentationError(failed_query_result);
+    ensure("diagnostic draw rejects a failed SDL backing-pixel sample before acquiring an image",
+           failed_query && failed_query->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 1 && state.mAcquireNextImageCalls == 0 &&
+               state.mBindVertexBuffersCalls == 0 && state.mDrawCalls == 0);
+
+    state.mDrawableSizeSucceeds       = true;
+    state.mDrawableWidth              = 1600;
+    state.mDrawableHeight             = 900;
+    const auto  changed_extent_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const auto* changed_extent        = presentationError(changed_extent_result);
+    ensure("diagnostic draw forwards freshly sampled positive pixels to exact parent authentication",
+           changed_extent && changed_extent->mCode == VulkanSwapchainFrameSlotParentOperationCode::DrawableExtentMismatch &&
+               state.mDrawableSizeCalls == drawable_queries_before_failures + 2 && state.mAcquireNextImageCalls == 0 &&
+               state.mBindVertexBuffersCalls == 0 && state.mDrawCalls == 0);
+
+    VulkanSwapchainFrameClearColor invalid_clear = draw_clear;
+    invalid_clear.mRgba[2]                       = std::numeric_limits<float>::quiet_NaN();
+    state.mDrawableWidth                         = 1280;
+    state.mDrawableHeight                        = 720;
+    const auto  invalid_clear_result             = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(invalid_clear);
+    const auto* invalid_clear_error              = presentationError(invalid_clear_result);
+    ensure("diagnostic draw preserves the core's typed normalized-color preflight",
+           invalid_clear_error && invalid_clear_error->mCode == VulkanSwapchainFrameSlotParentOperationCode::InvalidClearColor &&
+               !invalid_clear_error->mOperationError && state.mDrawableSizeCalls == drawable_queries_before_failures + 3 &&
+               state.mAcquireNextImageCalls == 0 && state.mBindVertexBuffersCalls == 0 && state.mDrawCalls == 0);
+
+    state.mAcquiredImageIndex                                                   = 2;
+    const VkRenderPass                                expected_render_pass      = instance->swapchainPresentationRenderPass();
+    const VkFramebuffer                               expected_framebuffer      = instance->swapchainPresentationFramebuffer(2);
+    const VkPipeline                                  expected_pipeline         = instance->swapchainPresentationPipeline();
+    const VkExtent2D                                  expected_extent           = instance->swapchainImageExtent();
+    const std::size_t                                 queue_submits_before_draw = state.mQueueSubmitCalls;
+    const auto                                        draw_result = owner->acquireRenderPassDrawToPresentSwapchainFrameSlot(draw_clear);
+    const VulkanSwapchainFrameSlotPresentationSuccess expected_success{ VulkanSwapchainFrameSlotPresentationOutcome::Presented,
+                                                                        std::uint32_t{ 2 } };
+    ensure("diagnostic draw returns the exact parent success and reusable image disposition",
+           draw_result == VulkanSwapchainFrameSlotParentPresentationResult{ expected_success } &&
+               instance->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !instance->swapchainFrameAcquiredImageIndex() && instance->hasUploadDestinationGeneration() &&
+               instance->uploadDestinationResourceHandle() == retained_destination.mHandle &&
+               instance->uploadDestinationExpectedContentIdentity() == retained_destination.mExpectedIdentity &&
+               instance->uploadDestinationResidentContentIdentity() == retained_destination.mResidentIdentity &&
+               instance->uploadDestinationBuffer() == retained_destination.mBuffer &&
+               instance->uploadDestinationMemory() == retained_destination.mMemory);
+    ensure("diagnostic draw samples backing pixels once and records one balanced submitted pass",
+           state.mDrawableSizeCalls == drawable_queries_before_failures + 4 && state.mAcquireNextImageCalls == 1 &&
+               state.mPipelineBarrierCalls == 2 && state.mBeginRenderPassCalls == 1 && state.mEndRenderPassCalls == 1 &&
+               state.mClearColorImageCalls == 0 && state.mBindPipelineCalls == 1 && state.mBindVertexBuffersCalls == 1 &&
+               state.mSetViewportCalls == 1 && state.mSetScissorCalls == 1 && state.mDrawCalls == 1 &&
+               state.mQueueSubmitCalls == queue_submits_before_draw + 1 && state.mQueuePresentCalls == 1 &&
+               state.mSubmitWaitStage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    ensure("diagnostic draw forwards the acquired framebuffer, pipeline, and exact clear value",
+           state.mRenderPassCommandBuffer == state.mCommandBuffer && state.mRenderPass == expected_render_pass &&
+               state.mRenderPassFramebuffer == expected_framebuffer && state.mRenderPassArea.offset.x == 0 &&
+               state.mRenderPassArea.offset.y == 0 && state.mRenderPassArea.extent.width == expected_extent.width &&
+               state.mRenderPassArea.extent.height == expected_extent.height && state.mRenderPassContents == VK_SUBPASS_CONTENTS_INLINE &&
+               state.mDrawCommandBuffer == state.mCommandBuffer && state.mPipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
+               state.mBoundPipeline == expected_pipeline && state.mFirstVertexBinding == 0 && state.mVertexBindingCount == 1 &&
+               state.mBoundVertexBuffer == retained_destination.mBuffer && state.mBoundVertexOffset == 0 &&
+               state.mBindPipelineOrder < state.mBindVertexBuffersOrder && state.mBindVertexBuffersOrder < state.mDrawOrder &&
+               state.mRenderPassClear.color.float32[0] == draw_clear.mRgba[0] &&
+               state.mRenderPassClear.color.float32[1] == draw_clear.mRgba[1] &&
+               state.mRenderPassClear.color.float32[2] == draw_clear.mRgba[2] &&
+               state.mRenderPassClear.color.float32[3] == draw_clear.mRgba[3]);
+    ensure("diagnostic draw forwards one full positive-height dynamic viewport and matching scissor",
+           state.mFirstViewport == 0 && state.mViewport.x == 0.0f && state.mViewport.y == 0.0f &&
+               state.mViewport.width == static_cast<float>(expected_extent.width) &&
+               state.mViewport.height == static_cast<float>(expected_extent.height) && state.mViewport.minDepth == 0.0f &&
+               state.mViewport.maxDepth == 1.0f && state.mFirstScissor == 0 && state.mScissor.offset.x == 0 &&
+               state.mScissor.offset.y == 0 && state.mScissor.extent.width == expected_extent.width &&
+               state.mScissor.extent.height == expected_extent.height);
+    ensure("diagnostic draw forwards one exact three-vertex, one-instance draw",
+           state.mDrawVertexCount == 3 && state.mDrawInstanceCount == 1 && state.mDrawFirstVertex == 0 && state.mDrawFirstInstance == 0);
+
+    state.mAcquiredImageIndex = 1;
+    const auto clear_result   = owner->acquireRenderPassClearToPresentSwapchainFrameSlot(draw_clear);
+    ensure("the existing render-pass clear wrapper remains independent from the explicit draw route",
+           presentationSucceeded(clear_result, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
+               state.mBeginRenderPassCalls == 2 && state.mEndRenderPassCalls == 2 && state.mBindPipelineCalls == 1 &&
+               state.mBindVertexBuffersCalls == 1 && state.mSetViewportCalls == 1 && state.mSetScissorCalls == 1 && state.mDrawCalls == 1);
+
+    ensure("the diagnostic draw fixture tears down child-first", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<25>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 213, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("readback adapter fixture acquires its SDL owner", owner != nullptr);
+
+    const VulkanSwapchainReadbackAcquireResult missing_instance = owner->acquireSwapchainReadbackGeneration();
+    ensure("readback requires a live instance before sampling SDL backing pixels",
+           missing_instance && missing_instance->mCode == VulkanSwapchainReadbackAcquireCode::InstanceNotLive &&
+               state.mDrawableSizeCalls == 0);
+
+    ensure("readback fixture acquires the exact chain through swapchain images",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
+               !owner->acquireSurfaceGeneration() && !owner->acquirePresentationDeviceGeneration() &&
+               !owner->acquireLogicalDeviceGeneration() && !owner->acquireSwapchainConfigurationGeneration() &&
+               !owner->acquireSwapchainGeneration() && !owner->acquireSwapchainImagesGeneration());
+    const VulkanInstanceGeneration* instance = owner->instanceGeneration();
+    ensure("the readback owner is absent before explicit acquisition",
+           instance && !instance->hasSwapchainReadbackGeneration() && !owner->resetSwapchainReadbackGeneration());
+
+    const std::size_t drawable_queries                         = state.mDrawableSizeCalls;
+    state.mDrawableSizeSucceeds                                = false;
+    const VulkanSwapchainReadbackAcquireResult failed_geometry = owner->acquireSwapchainReadbackGeneration();
+    ensure("readback rejects a failed backing-pixel sample without native mutation",
+           failed_geometry && failed_geometry->mCode == VulkanSwapchainReadbackAcquireCode::InvalidDrawableExtent &&
+               state.mDrawableSizeCalls == drawable_queries + 1 && state.mCreateBufferCalls == 0);
+    state.mDrawableSizeSucceeds = true;
+
+    ensure("readback acquisition depends on images but not presentation target or pipeline",
+           !owner->acquireSwapchainReadbackGeneration() && instance->hasSwapchainReadbackGeneration() &&
+               !instance->hasSwapchainPresentationTargetGeneration() && !instance->hasSwapchainPresentationPipelineGeneration());
+    ensure("the SDL adapter publishes exact mapped readback metadata",
+           instance->swapchainReadbackBuffer() == state.mReadbackBuffer && instance->swapchainReadbackMemory() == state.mReadbackMemory &&
+               instance->swapchainReadbackIsMapped() &&
+               instance->swapchainReadbackImageFormat() == VK_FORMAT_B8G8R8A8_UNORM &&
+               instance->swapchainReadbackImageExtent().width == 1280 && instance->swapchainReadbackImageExtent().height == 720 &&
+               instance->swapchainReadbackImageCount() == 3 && instance->swapchainReadbackRowBytes() == 1280 * 4 &&
+               instance->swapchainReadbackByteCount() == 1280 * 720 * 4 &&
+               instance->swapchainReadbackAllocationSize() >= instance->swapchainReadbackByteCount() &&
+               (instance->swapchainReadbackMemoryPropertyFlags() &
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                   (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+
+    const VulkanSwapchainReadbackAcquireResult duplicate = owner->acquireSwapchainReadbackGeneration();
+    ensure("duplicate readback acquisition is typed and performs no second mutation",
+           duplicate && duplicate->mCode == VulkanSwapchainReadbackAcquireCode::SwapchainReadbackAlreadyOwned &&
+               state.mCreateBufferCalls == 1 && state.mAllocateMemoryCalls == 1 && state.mMapMemoryCalls == 1);
+    ensure("explicit readback reset unmaps, destroys, and frees without disturbing images",
+           owner->resetSwapchainReadbackGeneration() && !instance->hasSwapchainReadbackGeneration() &&
+               instance->hasSwapchainImagesGeneration() && state.mUnmapMemoryCalls == 1 && state.mDestroyBufferCalls == 1 &&
+               state.mFreeMemoryCalls == 1 && !owner->resetSwapchainReadbackGeneration());
+    ensure("the independent frame-slot sibling remains legal without readback",
+           !owner->acquireSwapchainFrameSlotGeneration() && instance->hasSwapchainFrameSlotGeneration());
+    ensure("readback adapter fixture tears down its retained chain", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<26>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 223, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("texture destination fixture acquires its SDL owner", owner != nullptr);
+    ensure("texture destination fixture acquires the exact device parents",
+           !owner->acquireInstanceGeneration(VulkanInstanceValidationMode::Disabled, VulkanInstancePortabilityMode::Disabled) &&
+               !owner->acquireSurfaceGeneration() && !owner->acquirePresentationDeviceGeneration() &&
+               !owner->acquireLogicalDeviceGeneration());
+
+    auto* generation = owner->instanceGeneration();
+    ensure("texture destination fixture publishes its mutable aggregate", generation != nullptr);
+    UploadOperationContext                          context{ owner, generation };
+    const VulkanTextureUploadDestinationDescription description = vulkanTextureUploadDestinationDescription();
+    const VulkanTextureUploadDestinationRequest     request{ generation->nativeWindowGeneration(),
+                                                         description,
+                                                             { &context, uploadInstanceOwnerIsCurrent },
+                                                             { &context, uploadWindowGenerationIsCurrent } };
+
+    ensure("the SDL aggregate acquires one canonical texture upload destination",
+           !generation->acquireTextureUploadDestinationGeneration(request) && generation->hasTextureUploadDestinationGeneration());
+    const VkImageSubresourceRange  view_range        = generation->textureUploadDestinationViewRange();
+    const VkImageFormatProperties  image_limits      = generation->textureUploadDestinationImageFormatProperties();
+    constexpr VkFormatFeatureFlags required_features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+                                                       VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                                                       VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    ensure("the SDL aggregate publishes exact canonical texture metadata",
+           generation->textureUploadDestinationResourceHandle() == description.mHandle &&
+               generation->textureUploadDestinationExpectedRevision() == description.mExpectedRevision &&
+               generation->textureUploadDestinationResidentExtent().width == description.mResidentExtent.mWidth &&
+               generation->textureUploadDestinationResidentExtent().height == description.mResidentExtent.mHeight &&
+               generation->textureUploadDestinationResidentExtent().depth == 1 &&
+               generation->textureUploadDestinationLogicalExtent().mWidth == description.mLogicalExtent.mWidth &&
+               generation->textureUploadDestinationLogicalExtent().mHeight == description.mLogicalExtent.mHeight &&
+               generation->textureUploadDestinationResidentDiscard() == description.mResidentDiscard &&
+               generation->textureUploadDestinationPixelFormat() == description.mFormat &&
+               generation->textureUploadDestinationInitialState() == description.mInitialState &&
+               generation->textureUploadDestinationFlags() == 0 && generation->textureUploadDestinationImageType() == VK_IMAGE_TYPE_2D &&
+               generation->textureUploadDestinationFormat() == VK_FORMAT_R8G8B8A8_UNORM &&
+               generation->textureUploadDestinationMipLevels() == description.mMipLevels &&
+               generation->textureUploadDestinationArrayLayers() == description.mArrayLayers &&
+               generation->textureUploadDestinationSamples() == VK_SAMPLE_COUNT_1_BIT &&
+               generation->textureUploadDestinationTiling() == VK_IMAGE_TILING_OPTIMAL &&
+               generation->textureUploadDestinationUsage() ==
+                   (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) &&
+               generation->textureUploadDestinationSharingMode() == VK_SHARING_MODE_EXCLUSIVE &&
+               generation->textureUploadDestinationInitialLayout() == VK_IMAGE_LAYOUT_UNDEFINED &&
+               (generation->textureUploadDestinationFormatFeatures() & required_features) == required_features &&
+               image_limits.maxExtent.width >= description.mResidentExtent.mWidth &&
+               image_limits.maxExtent.height >= description.mResidentExtent.mHeight &&
+               image_limits.maxMipLevels >= description.mMipLevels && image_limits.maxArrayLayers >= description.mArrayLayers &&
+               (image_limits.sampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0);
+    ensure("the SDL aggregate publishes one dedicated device-local image allocation and full mip view",
+           generation->textureUploadDestinationImage() == state.mTextureImage &&
+               generation->textureUploadDestinationMemory() == state.mTextureMemory &&
+               generation->textureUploadDestinationImageView() == state.mTextureImageView &&
+               generation->textureUploadDestinationAllocationSize() == state.mTextureMemoryRequirements.size &&
+               generation->textureUploadDestinationAllocationAlignment() == state.mTextureMemoryRequirements.alignment &&
+               generation->textureUploadDestinationCompatibleMemoryTypeBits() == state.mTextureMemoryRequirements.memoryTypeBits &&
+               generation->textureUploadDestinationMemoryTypeIndex() == 0 && generation->textureUploadDestinationIsDeviceLocal() &&
+               generation->textureUploadDestinationPrefersDedicatedAllocation() &&
+               generation->textureUploadDestinationRequiresDedicatedAllocation() && view_range.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+               view_range.baseMipLevel == 0 && view_range.levelCount == description.mMipLevels && view_range.baseArrayLayer == 0 &&
+               view_range.layerCount == description.mArrayLayers);
+    ensure("the fake receives the exact canonical image and full-mip view descriptions",
+           state.mTextureImageCreateInfo.sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO &&
+               state.mTextureImageCreateInfo.pNext == nullptr && state.mTextureImageCreateInfo.flags == 0 &&
+               state.mTextureImageCreateInfo.imageType == VK_IMAGE_TYPE_2D &&
+               state.mTextureImageCreateInfo.format == VK_FORMAT_R8G8B8A8_UNORM &&
+               state.mTextureImageCreateInfo.extent.width == description.mResidentExtent.mWidth &&
+               state.mTextureImageCreateInfo.extent.height == description.mResidentExtent.mHeight &&
+               state.mTextureImageCreateInfo.extent.depth == 1 &&
+               state.mTextureImageCreateInfo.mipLevels == description.mMipLevels &&
+               state.mTextureImageCreateInfo.arrayLayers == description.mArrayLayers &&
+               state.mTextureImageCreateInfo.samples == VK_SAMPLE_COUNT_1_BIT &&
+               state.mTextureImageCreateInfo.tiling == VK_IMAGE_TILING_OPTIMAL &&
+               state.mTextureImageCreateInfo.usage ==
+                   (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) &&
+               state.mTextureImageCreateInfo.sharingMode == VK_SHARING_MODE_EXCLUSIVE &&
+               state.mTextureImageCreateInfo.queueFamilyIndexCount == 0 &&
+               state.mTextureImageCreateInfo.pQueueFamilyIndices == nullptr &&
+               state.mTextureImageCreateInfo.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+               state.mTextureImageViewCreateInfo.sType == VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &&
+               state.mTextureImageViewCreateInfo.pNext == nullptr && state.mTextureImageViewCreateInfo.flags == 0 &&
+               state.mTextureImageViewCreateInfo.image == state.mTextureImage &&
+               state.mTextureImageViewCreateInfo.viewType == VK_IMAGE_VIEW_TYPE_2D &&
+               state.mTextureImageViewCreateInfo.format == VK_FORMAT_R8G8B8A8_UNORM &&
+               state.mTextureImageViewCreateInfo.subresourceRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+               state.mTextureImageViewCreateInfo.subresourceRange.baseMipLevel == 0 &&
+               state.mTextureImageViewCreateInfo.subresourceRange.levelCount == description.mMipLevels &&
+               state.mTextureImageViewCreateInfo.subresourceRange.baseArrayLayer == 0 &&
+               state.mTextureImageViewCreateInfo.subresourceRange.layerCount == description.mArrayLayers);
+    ensure("texture acquisition does not consume swapchain views or buffer allocation routing",
+           state.mNextImageView == 0 && state.mLastCreatedBuffer == VK_NULL_HANDLE && state.mCreateBufferCalls == 0 &&
+               state.mCreateTextureImageCalls == 1 && state.mTextureRequirementsCalls == 1 && state.mAllocateTextureMemoryCalls == 1 &&
+               state.mBindTextureMemoryCalls == 1 && state.mCreateTextureImageViewCalls == 1);
+
+    ensure("direct texture reset preserves its exact logical-device parent",
+           generation->resetTextureUploadDestinationGeneration() && generation->hasLogicalDeviceGeneration() &&
+               generation->logicalDevice() == state.mDevice && generation->hasSurfaceGeneration());
+    ensure("direct texture reset removes every published native handle",
+           !generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationImage() == VK_NULL_HANDLE &&
+               generation->textureUploadDestinationMemory() == VK_NULL_HANDLE &&
+               generation->textureUploadDestinationImageView() == VK_NULL_HANDLE && state.mDestroyTextureImageViewCalls == 1 &&
+               state.mDestroyTextureImageCalls == 1 && state.mFreeTextureMemoryCalls == 1 &&
+               state.mTextureViewDestroyOrder < state.mTextureImageDestroyOrder &&
+               state.mTextureImageDestroyOrder < state.mTextureMemoryFreeOrder);
+
+    ensure("the retained parents reacquire an independent texture destination",
+           !generation->acquireTextureUploadDestinationGeneration(request) &&
+               generation->textureUploadDestinationImage() == state.mTextureImage && state.mCreateTextureImageCalls == 2);
+    ensure("surface retirement destroys the texture child before its device parents",
+           owner->resetSurfaceGeneration() && !generation->hasTextureUploadDestinationGeneration() &&
+               !generation->hasLogicalDeviceGeneration() && !generation->hasPresentationDeviceGeneration() &&
+               state.mDestroyTextureImageViewCalls == 2 && state.mDestroyTextureImageCalls == 2 && state.mFreeTextureMemoryCalls == 2);
+    ensure("texture destination fixture tears down its retained instance", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<27>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 233, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("texture source fixture acquires the complete SDL owner chain", owner && acquireCompleteFrameSlot(*owner));
+
+    auto* generation = owner->instanceGeneration();
+    ensure("texture source fixture publishes its mutable aggregate", generation != nullptr);
+    UploadOperationContext context{ owner, generation };
+
+    const VulkanTextureUploadDestinationDescription destination_description = vulkanTextureUploadDestinationDescription();
+    const VulkanTextureUploadDestinationRequest     destination_request{ generation->nativeWindowGeneration(),
+                                                                     destination_description,
+                                                                         { &context, uploadInstanceOwnerIsCurrent },
+                                                                         { &context, uploadWindowGenerationIsCurrent } };
+    ensure("texture source fixture first acquires its exact Stage 57 destination",
+           !generation->acquireTextureUploadDestinationGeneration(destination_request));
+    const VkImage        retained_image        = generation->textureUploadDestinationImage();
+    const VkDeviceMemory retained_image_memory = generation->textureUploadDestinationMemory();
+    const VkImageView    retained_image_view   = generation->textureUploadDestinationImageView();
+
+    const VulkanUploadSourceDescription vertex_description = vulkanScreenTriangleUploadSourceDescription();
+    const VulkanUploadSourceRequest     vertex_request{ generation->nativeWindowGeneration(),
+                                                    vertex_description,
+                                                        { &context, uploadInstanceOwnerIsCurrent },
+                                                        { &context, uploadWindowGenerationIsCurrent } };
+    state.mMemoryProperties.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    ensure("texture source fixture also acquires the existing noncoherent 48-byte vertex source",
+           !generation->acquireUploadSourceGeneration(vertex_request));
+    const VkBuffer       retained_vertex_buffer = generation->uploadSourceBuffer();
+    const VkDeviceMemory retained_vertex_memory = generation->uploadSourceMemory();
+
+    const LLRenderContract::TextureUploadFixture fixture = LLRenderContract::makeTextureUploadFixture();
+    static_assert(fixture.mSourceRGBA8.size() == VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT);
+    const VulkanTextureUploadSourceDescription description = vulkanTextureUploadSourceDescription(fixture.mSourceRGBA8);
+    const VulkanTextureUploadSourceRequest     request{ generation->nativeWindowGeneration(),
+                                                    description,
+                                                        { &context, uploadInstanceOwnerIsCurrent },
+                                                        { &context, uploadWindowGenerationIsCurrent } };
+    ensure("the SDL aggregate acquires the exact 144-byte texture source after its image destination",
+           !generation->acquireTextureUploadSourceGeneration(request) && generation->hasTextureUploadSourceGeneration());
+
+    const VkBuffer       retained_source_buffer   = generation->textureUploadSourceBuffer();
+    const VkDeviceMemory retained_source_memory   = generation->textureUploadSourceMemory();
+    const std::uint64_t  retained_source_identity = generation->textureUploadSourceContentIdentity();
+    ensure("the SDL aggregate publishes exact immutable texture-source metadata",
+           generation->textureUploadSourceResourceHandle() == description.mHandle &&
+               generation->textureUploadSourceExpectedRevision() == description.mExpectedRevision &&
+               generation->textureUploadSourceResidentExtent().mWidth == LLRenderContract::TEXTURE_UPLOAD_RESIDENT_WIDTH &&
+               generation->textureUploadSourceResidentExtent().mHeight == LLRenderContract::TEXTURE_UPLOAD_RESIDENT_HEIGHT &&
+               generation->textureUploadSourcePixelFormat() == LLRenderContract::PixelFormat::RGBA8Unorm &&
+               generation->textureUploadSourceRowPitch() == LLRenderContract::TEXTURE_UPLOAD_ROW_PITCH &&
+               generation->textureUploadSourceRowOrigin() == LLRenderContract::RowOrigin::TopLeft && retained_source_identity != 0 &&
+               generation->textureUploadSourceByteCount() == VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT &&
+               generation->textureUploadSourceAllocationSize() == VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT &&
+               generation->textureUploadSourceMemoryTypeIndex() == 0 &&
+               (generation->textureUploadSourceMemoryPropertyFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 &&
+               !generation->textureUploadSourceIsCoherent());
+    ensure("the 144-byte source has native buffer and memory identities distinct from the vertex source and image destination",
+           retained_source_buffer == state.mTextureUploadSourceBuffer && retained_source_buffer != VK_NULL_HANDLE &&
+               retained_source_buffer != retained_vertex_buffer && retained_source_memory == state.mTextureUploadSourceMemory &&
+               retained_source_memory != VK_NULL_HANDLE && retained_source_memory != retained_vertex_memory &&
+               retained_source_memory != retained_image_memory);
+    ensure("the fake receives one exact exclusive transfer-source buffer description",
+           state.mTextureUploadSourceCreateInfo.sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &&
+               state.mTextureUploadSourceCreateInfo.pNext == nullptr && state.mTextureUploadSourceCreateInfo.flags == 0 &&
+               state.mTextureUploadSourceCreateInfo.size == VULKAN_TEXTURE_UPLOAD_SOURCE_BYTE_COUNT &&
+               state.mTextureUploadSourceCreateInfo.usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT &&
+               state.mTextureUploadSourceCreateInfo.sharingMode == VK_SHARING_MODE_EXCLUSIVE &&
+               state.mTextureUploadSourceCreateInfo.queueFamilyIndexCount == 0 &&
+               state.mTextureUploadSourceCreateInfo.pQueueFamilyIndices == nullptr);
+    ensure("the noncoherent source copies all 144 bytes, flushes the whole allocation, and unmaps before publication",
+           state.mTextureUploadMappedBytes == fixture.mSourceRGBA8 && state.mMapTextureUploadSourceMemoryCalls == 1 &&
+               state.mFlushTextureUploadSourceMemoryCalls == 1 && state.mUnmapTextureUploadSourceMemoryCalls == 1 &&
+               state.mTextureUploadSourceMapOrder < state.mTextureUploadSourceFlushOrder &&
+               state.mTextureUploadSourceFlushOrder < state.mTextureUploadSourceUnmapOrder && !state.mTextureUploadSourceMapped);
+    ensure("texture-source acquisition records no queue work and leaves the image in its immutable creation state",
+           state.mQueueSubmitCalls == 0 && state.mPipelineBarrierCalls == 0 &&
+               generation->textureUploadDestinationInitialLayout() == VK_IMAGE_LAYOUT_UNDEFINED);
+
+    state.mMemoryProperties.memoryTypes[0].propertyFlags =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    state.mDrawableWidth        = 1600;
+    state.mDrawableHeight       = 900;
+    const auto  rebuild         = owner->rebuildSwapchainChain();
+    const auto* rebuild_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuild);
+    ensure("changed-extent rebuild preserves the exact texture source, destination, and vertex-source siblings",
+           rebuild_outcome && *rebuild_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               generation->hasTextureUploadSourceGeneration() && generation->textureUploadSourceBuffer() == retained_source_buffer &&
+               generation->textureUploadSourceMemory() == retained_source_memory &&
+               generation->textureUploadSourceContentIdentity() == retained_source_identity &&
+               generation->textureUploadDestinationImage() == retained_image &&
+               generation->textureUploadDestinationMemory() == retained_image_memory &&
+               generation->textureUploadDestinationImageView() == retained_image_view &&
+               generation->uploadSourceBuffer() == retained_vertex_buffer && generation->uploadSourceMemory() == retained_vertex_memory);
+
+    ensure("direct texture-source reset preserves its exact destination and rebuilt swapchain chain",
+           generation->resetTextureUploadSourceGeneration() && !generation->hasTextureUploadSourceGeneration() &&
+               generation->textureUploadSourceBuffer() == VK_NULL_HANDLE && generation->textureUploadSourceMemory() == VK_NULL_HANDLE &&
+               generation->textureUploadSourceByteCount() == 0 && generation->textureUploadSourceContentIdentity() == 0 &&
+               generation->textureUploadDestinationImage() == retained_image &&
+               generation->textureUploadDestinationMemory() == retained_image_memory &&
+               generation->textureUploadDestinationImageView() == retained_image_view && generation->hasSwapchainGeneration() &&
+               generation->hasSwapchainImagesGeneration() && generation->hasSwapchainPresentationTargetGeneration() &&
+               generation->hasSwapchainPresentationPipelineGeneration() && generation->hasSwapchainFrameSlotGeneration() &&
+               state.mDestroyTextureUploadSourceBufferCalls == 1 && state.mFreeTextureUploadSourceMemoryCalls == 1);
+
+    state.mTextureUploadMappedBytes.fill(0xcd);
+    ensure("the retained destination reacquires an independent coherent texture source and rewrites every byte",
+           !generation->acquireTextureUploadSourceGeneration(request) &&
+               generation->textureUploadSourceBuffer() == retained_source_buffer &&
+               generation->textureUploadSourceMemory() == retained_source_memory && state.mMapTextureUploadSourceMemoryCalls == 2 &&
+               state.mFlushTextureUploadSourceMemoryCalls == 1 && state.mUnmapTextureUploadSourceMemoryCalls == 2 &&
+               state.mTextureUploadMappedBytes == fixture.mSourceRGBA8 && generation->textureUploadSourceIsCoherent() &&
+               !state.mTextureUploadSourceMapped);
+    ensure("surface retirement destroys the texture source before its image destination and logical device",
+           owner->resetSurfaceGeneration() && !generation->hasTextureUploadSourceGeneration() &&
+               !generation->hasTextureUploadDestinationGeneration() && !generation->hasLogicalDeviceGeneration() &&
+               state.mDestroyTextureUploadSourceBufferCalls == 2 && state.mFreeTextureUploadSourceMemoryCalls == 2 &&
+               state.mTextureUploadSourceBufferDestroyOrder < state.mTextureUploadSourceMemoryFreeOrder &&
+               state.mTextureUploadSourceMemoryFreeOrder < state.mTextureViewDestroyOrder &&
+               state.mTextureViewDestroyOrder < state.mTextureImageDestroyOrder &&
+               state.mTextureImageDestroyOrder < state.mTextureMemoryFreeOrder &&
+               state.mTextureMemoryFreeOrder < state.mDeviceDestroyOrder);
+    ensure("texture source fixture tears down its retained instance", owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<28>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 239, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("texture transfer fixture acquires the complete SDL owner chain", owner && acquireCompleteFrameSlot(*owner));
+
+    auto* generation = owner->instanceGeneration();
+    ensure("texture transfer fixture publishes its mutable aggregate", generation != nullptr);
+    UploadOperationContext context{ owner, generation };
+
+    const LLRenderContract::TextureUploadFixture      fixture                 = LLRenderContract::makeTextureUploadFixture();
+    const VulkanTextureUploadSourceDescription        source_description      = vulkanTextureUploadSourceDescription(fixture.mSourceRGBA8);
+    const VulkanTextureUploadDestinationDescription   destination_description = vulkanTextureUploadDestinationDescription();
+    const VulkanTextureUploadSourceRequest            source_request{ generation->nativeWindowGeneration(),
+                                                           source_description,
+                                                                      { &context, uploadInstanceOwnerIsCurrent },
+                                                                      { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadDestinationRequest       destination_request{ generation->nativeWindowGeneration(),
+                                                                     destination_description,
+                                                                           { &context, uploadInstanceOwnerIsCurrent },
+                                                                           { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadTransferRequest          transfer_request{ generation->nativeWindowGeneration(),
+                                                               source_description,
+                                                               destination_description,
+                                                                        { &context, uploadInstanceOwnerIsCurrent },
+                                                                        { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadTransferOperationRequest operation_request{ generation->nativeWindowGeneration(),
+                                                                         source_description,
+                                                                         destination_description,
+                                                                         1'000'000'000,
+                                                                         { &context, uploadInstanceOwnerIsCurrent },
+                                                                         { &context, uploadWindowGenerationIsCurrent } };
+
+    state.mMemoryProperties.memoryTypes[0].propertyFlags =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    ensure("texture transfer fixture acquires its exact source and unpublished destination",
+           !generation->acquireTextureUploadDestinationGeneration(destination_request) &&
+               !generation->acquireTextureUploadSourceGeneration(source_request) && !generation->textureUploadDestinationIsResident());
+    const VkBuffer      source_buffer     = generation->textureUploadSourceBuffer();
+    const VkImage       destination_image = generation->textureUploadDestinationImage();
+    const std::uint64_t content_identity  = generation->textureUploadSourceContentIdentity();
+
+    ensure("the SDL aggregate acquires one texture upload transfer over those exact resources",
+           !generation->acquireTextureUploadTransferGeneration(transfer_request) && generation->hasTextureUploadTransferGeneration() &&
+               generation->textureUploadTransferResourceHandle() == destination_description.mHandle &&
+               generation->textureUploadTransferExpectedRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadTransferContentIdentity() == content_identity &&
+               generation->textureUploadTransferSourceBuffer() == source_buffer &&
+               generation->textureUploadTransferDestinationImage() == destination_image &&
+               generation->textureUploadTransferQueue() == generation->presentationQueue() &&
+               generation->textureUploadTransferQueueFamilyIndex() == generation->presentationQueueFamilyIndex() &&
+               generation->textureUploadTransferQueueIndex() == generation->logicalDeviceQueueIndex() &&
+               generation->textureUploadTransferCommandPool() != VK_NULL_HANDLE &&
+               generation->textureUploadTransferCommandBuffer() != VK_NULL_HANDLE &&
+               generation->textureUploadTransferFence() != VK_NULL_HANDLE &&
+               generation->textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Ready);
+
+    const auto  execution   = generation->executeTextureUploadTransfer(operation_request);
+    const auto* disposition = std::get_if<VulkanTextureUploadTransferDisposition>(&execution);
+    ensure("one completed texture transfer publishes exact shader-readable residency",
+           disposition && *disposition == VulkanTextureUploadTransferDisposition::Complete &&
+               generation->textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Complete &&
+               generation->textureUploadTransferSubmissionCount() == 1 && generation->textureUploadTransferCompletionWaitCount() == 1 &&
+               state.mTextureUploadCopyCalls == 1 && state.mTextureUploadBlitCalls == 2 && state.mTextureUploadImageBarrierCount == 5 &&
+               generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadDestinationResidentContentIdentity() == content_identity &&
+               generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead);
+
+    state.mDrawableWidth        = 1600;
+    state.mDrawableHeight       = 900;
+    const auto  rebuild         = owner->rebuildSwapchainChain();
+    const auto* rebuild_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuild);
+    ensure("changed-extent rebuild preserves the completed texture transfer and published destination",
+           rebuild_outcome && *rebuild_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               generation->hasTextureUploadTransferGeneration() && generation->textureUploadTransferSourceBuffer() == source_buffer &&
+               generation->textureUploadTransferDestinationImage() == destination_image &&
+               generation->textureUploadTransferDisposition() == VulkanTextureUploadTransferDisposition::Complete &&
+               generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentContentIdentity() == content_identity);
+
+    ensure("direct transfer reset preserves its resident destination, source, and rebuilt presentation chain",
+           generation->resetTextureUploadTransferGeneration() && !generation->hasTextureUploadTransferGeneration() &&
+               generation->hasTextureUploadSourceGeneration() && generation->textureUploadSourceBuffer() == source_buffer &&
+               generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationImage() == destination_image &&
+               generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentContentIdentity() == content_identity &&
+               generation->hasSwapchainFrameSlotGeneration());
+    ensure("texture transfer fixture releases its retained resources and owner",
+           generation->resetTextureUploadSourceGeneration() && generation->resetTextureUploadDestinationGeneration() && owner->reset());
+}
+
+template<>
+template<>
+void window_sdl_vulkan_object::test<29>()
+{
+    using namespace LLRenderVulkan;
+
+    FakeState         state;
+    ScopedVulkanState vulkan_state(state);
+    auto              result = acquireLLWindowSDLVulkan(createInfo(), 241, fakeOperations(state));
+    auto*             owner  = acquiredWindow(result);
+    ensure("texture sample-binding fixture acquires the complete SDL owner chain", owner && acquireCompleteFrameSlot(*owner));
+
+    auto* generation = owner->instanceGeneration();
+    ensure("texture sample-binding fixture publishes its mutable aggregate", generation != nullptr);
+    ResidentUploadDestination sampled_vertices;
+    ensure("texture sample-binding fixture uploads the screen-triangle vertices required by sampled presentation",
+           acquireResidentUploadDestination(*owner, sampled_vertices));
+    UploadOperationContext context{ owner, generation };
+
+    const LLRenderContract::TextureUploadFixture      fixture                 = LLRenderContract::makeTextureUploadFixture();
+    const VulkanTextureUploadSourceDescription        source_description      = vulkanTextureUploadSourceDescription(fixture.mSourceRGBA8);
+    const VulkanTextureUploadDestinationDescription   destination_description = vulkanTextureUploadDestinationDescription();
+    const VulkanTextureUploadSourceRequest            source_request{ generation->nativeWindowGeneration(),
+                                                           source_description,
+                                                                      { &context, uploadInstanceOwnerIsCurrent },
+                                                                      { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadDestinationRequest       destination_request{ generation->nativeWindowGeneration(),
+                                                                     destination_description,
+                                                                           { &context, uploadInstanceOwnerIsCurrent },
+                                                                           { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadTransferRequest          transfer_request{ generation->nativeWindowGeneration(),
+                                                               source_description,
+                                                               destination_description,
+                                                                        { &context, uploadInstanceOwnerIsCurrent },
+                                                                        { &context, uploadWindowGenerationIsCurrent } };
+    const VulkanTextureUploadTransferOperationRequest operation_request{ generation->nativeWindowGeneration(),
+                                                                         source_description,
+                                                                         destination_description,
+                                                                         1'000'000'000,
+                                                                         { &context, uploadInstanceOwnerIsCurrent },
+                                                                         { &context, uploadWindowGenerationIsCurrent } };
+
+    state.mMemoryProperties.memoryTypes[0].propertyFlags =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    ensure("texture sample-binding fixture acquires its exact source and destination",
+           !generation->acquireTextureUploadDestinationGeneration(destination_request) &&
+               !generation->acquireTextureUploadSourceGeneration(source_request));
+    ensure("texture sample-binding fixture acquires and completes one upload transfer",
+           !generation->acquireTextureUploadTransferGeneration(transfer_request));
+    const auto  execution   = generation->executeTextureUploadTransfer(operation_request);
+    const auto* disposition = std::get_if<VulkanTextureUploadTransferDisposition>(&execution);
+    ensure("texture sample-binding fixture publishes one exact resident destination",
+           disposition && *disposition == VulkanTextureUploadTransferDisposition::Complete &&
+               generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadDestinationCurrentState() == LLRenderContract::ImageState::ShaderRead);
+
+    const std::uint64_t resident_identity = generation->textureUploadDestinationResidentContentIdentity();
+    const VkImage       destination_image = generation->textureUploadDestinationImage();
+    const VkImageView   destination_view  = generation->textureUploadDestinationImageView();
+    ensure("the completed upload keeps its source, terminal transfer, and resident destination live for pipeline acquisition",
+           resident_identity != 0 && destination_image == state.mTextureImage && destination_view == state.mTextureImageView &&
+               generation->hasTextureUploadTransferGeneration() && generation->hasTextureUploadSourceGeneration() &&
+               generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentContentIdentity() == resident_identity);
+
+    const std::size_t                                 shader_create_calls   = state.mCreateShaderModuleCalls;
+    const std::size_t                                 graphics_create_calls = state.mCreateGraphicsPipelineCalls;
+    const std::size_t                                 draw_calls            = state.mDrawCalls;
+    const std::size_t                                 submit_calls          = state.mQueueSubmitCalls;
+    const VulkanTextureUploadSampleBindingDescription binding_description   = vulkanTextureUploadSampleBindingDescription();
+    const VulkanTextureUploadSampleBindingRequest     binding_request{ generation->nativeWindowGeneration(),
+                                                                   destination_description,
+                                                                   binding_description,
+                                                                       { &context, uploadInstanceOwnerIsCurrent },
+                                                                       { &context, uploadWindowGenerationIsCurrent } };
+    ensure("the SDL aggregate acquires the canonical binding from the resident destination alone",
+           !generation->acquireTextureUploadSampleBindingGeneration(binding_request) &&
+               generation->hasTextureUploadSampleBindingGeneration());
+
+    const VkSampler             sampler               = generation->textureUploadSampleBindingSampler();
+    const VkDescriptorSetLayout descriptor_set_layout = generation->textureUploadSampleBindingDescriptorSetLayout();
+    const VkPipelineLayout      pipeline_layout       = generation->textureUploadSampleBindingPipelineLayout();
+    const VkDescriptorPool      descriptor_pool       = generation->textureUploadSampleBindingDescriptorPool();
+    const VkDescriptorSet       descriptor_set        = generation->textureUploadSampleBindingDescriptorSet();
+    ensure("the SDL aggregate publishes the exact immutable texture sample binding",
+           generation->textureUploadSampleBindingSamplerResourceHandle() == binding_description.mSampler.mHandle &&
+               generation->textureUploadSampleBindingDestinationResourceHandle() == destination_description.mHandle &&
+               generation->textureUploadSampleBindingExpectedRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadSampleBindingResidentRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadSampleBindingResidentContentIdentity() == resident_identity &&
+               generation->textureUploadSampleBindingDestinationImageView() == destination_view &&
+               generation->textureUploadSampleBindingDestinationImageLayout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+               generation->textureUploadSampleBindingDescriptorSetIndex() == 0 && generation->textureUploadSampleBindingBinding() == 0 &&
+               sampler == state.mTextureUploadSampleBindingSampler &&
+               descriptor_set_layout == state.mTextureUploadSampleBindingDescriptorSetLayout &&
+               pipeline_layout == state.mTextureUploadSampleBindingPipelineLayout &&
+               descriptor_pool == state.mTextureUploadSampleBindingDescriptorPool &&
+               descriptor_set == state.mTextureUploadSampleBindingDescriptorSet);
+
+    const VkSamplerCreateInfo& sampler_info = state.mTextureUploadSampleBindingSamplerCreateInfo;
+    ensure("the SDL fake receives the exact canonical sampler",
+           state.mCreateTextureUploadSampleBindingSamplerCalls == 1 && sampler_info.sType == VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO &&
+               sampler_info.pNext == nullptr && sampler_info.flags == 0 && sampler_info.magFilter == VK_FILTER_LINEAR &&
+               sampler_info.minFilter == VK_FILTER_LINEAR && sampler_info.mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR &&
+               sampler_info.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
+               sampler_info.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
+               sampler_info.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && sampler_info.mipLodBias == 0.f &&
+               sampler_info.anisotropyEnable == VK_FALSE && sampler_info.maxAnisotropy == 1.f && sampler_info.compareEnable == VK_FALSE &&
+               sampler_info.compareOp == VK_COMPARE_OP_ALWAYS && sampler_info.minLod == 0.f && sampler_info.maxLod == 2.f &&
+               sampler_info.borderColor == VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK && sampler_info.unnormalizedCoordinates == VK_FALSE);
+
+    const VkDescriptorSetLayoutCreateInfo& set_layout_info    = state.mTextureUploadSampleBindingDescriptorSetLayoutCreateInfo;
+    const VkDescriptorSetLayoutBinding&    set_layout_binding = state.mTextureUploadSampleBindingDescriptorSetLayoutBinding;
+    ensure("the SDL fake receives one exact fragment combined-image-sampler layout",
+           state.mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls == 1 &&
+               set_layout_info.sType == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO && set_layout_info.pNext == nullptr &&
+               set_layout_info.flags == 0 && set_layout_info.bindingCount == 1 && set_layout_binding.binding == 0 &&
+               set_layout_binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && set_layout_binding.descriptorCount == 1 &&
+               set_layout_binding.stageFlags == VK_SHADER_STAGE_FRAGMENT_BIT && set_layout_binding.pImmutableSamplers == nullptr);
+
+    const VkPipelineLayoutCreateInfo& binding_pipeline_info = state.mTextureUploadSampleBindingPipelineLayoutCreateInfo;
+    ensure("the SDL fake receives one exact set-zero pipeline layout",
+           state.mCreateTextureUploadSampleBindingPipelineLayoutCalls == 1 &&
+               binding_pipeline_info.sType == VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO && binding_pipeline_info.pNext == nullptr &&
+               binding_pipeline_info.flags == 0 && binding_pipeline_info.setLayoutCount == 1 &&
+               state.mTextureUploadSampleBindingPipelineSetLayout == descriptor_set_layout &&
+               binding_pipeline_info.pushConstantRangeCount == 0 && binding_pipeline_info.pPushConstantRanges == nullptr);
+
+    const VkDescriptorPoolCreateInfo&  pool_info     = state.mTextureUploadSampleBindingDescriptorPoolCreateInfo;
+    const VkDescriptorPoolSize&        pool_size     = state.mTextureUploadSampleBindingDescriptorPoolSize;
+    const VkDescriptorSetAllocateInfo& allocate_info = state.mTextureUploadSampleBindingDescriptorSetAllocateInfo;
+    ensure("the SDL fake receives one fixed pool and one set allocation",
+           state.mCreateTextureUploadSampleBindingDescriptorPoolCalls == 1 &&
+               pool_info.sType == VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO && pool_info.pNext == nullptr && pool_info.flags == 0 &&
+               pool_info.maxSets == 1 && pool_info.poolSizeCount == 1 && pool_size.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+               pool_size.descriptorCount == 1 && state.mAllocateTextureUploadSampleBindingDescriptorSetCalls == 1 &&
+               allocate_info.sType == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO && allocate_info.pNext == nullptr &&
+               allocate_info.descriptorPool == descriptor_pool && allocate_info.descriptorSetCount == 1 &&
+               state.mTextureUploadSampleBindingAllocatedSetLayout == descriptor_set_layout);
+
+    const VkWriteDescriptorSet&  write      = state.mTextureUploadSampleBindingWrite;
+    const VkDescriptorImageInfo& image_info = state.mTextureUploadSampleBindingImageInfo;
+    ensure("the SDL fake receives one completed descriptor write to the resident view",
+           state.mUpdateTextureUploadSampleBindingDescriptorSetCalls == 1 && write.sType == VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET &&
+               write.pNext == nullptr && write.dstSet == descriptor_set && write.dstBinding == 0 && write.dstArrayElement == 0 &&
+               write.descriptorCount == 1 && write.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+               write.pBufferInfo == nullptr && write.pTexelBufferView == nullptr && image_info.sampler == sampler &&
+               image_info.imageView == destination_view && image_info.imageLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ensure("binding acquisition creates no shader, graphics pipeline, draw, or submission work",
+           state.mCreateShaderModuleCalls == shader_create_calls && state.mCreateGraphicsPipelineCalls == graphics_create_calls &&
+               state.mDrawCalls == draw_calls && state.mQueueSubmitCalls == submit_calls);
+
+    const VulkanTextureUploadSamplePipelineDescription sample_pipeline_description = vulkanTextureUploadSamplePipelineDescription();
+    VulkanTextureUploadSamplePipelineRequest           sample_pipeline_request;
+    sample_pipeline_request.mNativeWindowGeneration   = generation->nativeWindowGeneration();
+    sample_pipeline_request.mDrawableExtent           = generation->swapchainDrawableExtent();
+    sample_pipeline_request.mDestinationDescription   = destination_description;
+    sample_pipeline_request.mSampleBindingDescription = binding_description;
+    sample_pipeline_request.mDescription              = sample_pipeline_description;
+    sample_pipeline_request.mInstanceOwnerCheck       = { &context, uploadInstanceOwnerIsCurrent };
+    sample_pipeline_request.mWindowGenerationCheck    = { &context, uploadWindowGenerationIsCurrent };
+
+    const std::size_t  shader_destroy_calls             = state.mDestroyShaderModuleCalls;
+    const std::size_t  binding_pipeline_layout_calls    = state.mCreateTextureUploadSampleBindingPipelineLayoutCalls;
+    const VkRenderPass initial_presentation_render_pass = generation->swapchainPresentationRenderPass();
+    ensure("the SDL aggregate acquires one sampled pipeline against the completed upload and exact Stage 60 binding",
+           !generation->acquireTextureUploadSamplePipelineGeneration(sample_pipeline_request) &&
+               generation->hasTextureUploadSamplePipelineGeneration());
+
+    const VkPipeline initial_sample_pipeline = generation->textureUploadSamplePipeline();
+    ensure("the SDL aggregate publishes the sampled pipeline with the exact borrowed Stage 60 layout",
+           generation->textureUploadSamplePipelineResourceHandle() == sample_pipeline_description.mHandle &&
+               generation->textureUploadSamplePipelineLayout() == pipeline_layout && initial_sample_pipeline != VK_NULL_HANDLE &&
+               initial_sample_pipeline == state.mTextureUploadSamplePipeline &&
+               state.mTextureUploadSamplePipelineLayout == pipeline_layout &&
+               state.mTextureUploadSamplePipelineRenderPass == initial_presentation_render_pass &&
+               state.mCreateTextureUploadSamplePipelineCalls == 1 &&
+               state.mCreateTextureUploadSampleBindingPipelineLayoutCalls == binding_pipeline_layout_calls);
+    ensure("sampled-pipeline acquisition creates two transient shaders and no sampled draw or submission work",
+           state.mCreateShaderModuleCalls == shader_create_calls + 2 && state.mDestroyShaderModuleCalls == shader_destroy_calls + 2 &&
+               state.mCreateGraphicsPipelineCalls == graphics_create_calls + 1 && state.mDrawCalls == draw_calls &&
+               state.mQueueSubmitCalls == submit_calls);
+    ensure("terminal transfer reset preserves the initial sampled pipeline and exact binding",
+           generation->resetTextureUploadTransferGeneration() && !generation->hasTextureUploadTransferGeneration() &&
+               generation->hasTextureUploadSourceGeneration() && generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineLayout() == pipeline_layout &&
+               generation->textureUploadSamplePipeline() == initial_sample_pipeline &&
+               generation->textureUploadSampleBindingDescriptorSet() == descriptor_set);
+    ensure("texture-source reset preserves the initial sampled pipeline and resident destination",
+           generation->resetTextureUploadSourceGeneration() && !generation->hasTextureUploadSourceGeneration() &&
+               generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineLayout() == pipeline_layout &&
+               generation->textureUploadSamplePipeline() == initial_sample_pipeline &&
+               generation->textureUploadSampleBindingPipelineLayout() == pipeline_layout &&
+               generation->textureUploadSampleBindingDescriptorSet() == descriptor_set &&
+               generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationIsResident() &&
+               generation->textureUploadDestinationResidentContentIdentity() == resident_identity);
+
+    state.mDrawableWidth        = 1600;
+    state.mDrawableHeight       = 900;
+    const auto  rebuild         = owner->rebuildSwapchainChain();
+    const auto* rebuild_outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&rebuild);
+    ensure("changed-extent rebuild retires the sampled pipeline before its old target and preserves the exact binding",
+           rebuild_outcome && *rebuild_outcome == VulkanSwapchainChainRebuildOutcome::Ready &&
+               !generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineResourceHandle() == LLRenderContract::PipelineHandle{} &&
+               generation->textureUploadSamplePipelineLayout() == VK_NULL_HANDLE &&
+               generation->textureUploadSamplePipeline() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingSamplerResourceHandle() == binding_description.mSampler.mHandle &&
+               generation->textureUploadSampleBindingDestinationResourceHandle() == destination_description.mHandle &&
+               generation->textureUploadSampleBindingExpectedRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadSampleBindingResidentRevision() == destination_description.mExpectedRevision &&
+               generation->textureUploadSampleBindingResidentContentIdentity() == resident_identity &&
+               generation->textureUploadSampleBindingDestinationImageView() == destination_view &&
+               generation->textureUploadSampleBindingDestinationImageLayout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+               generation->textureUploadSampleBindingDescriptorSetIndex() == binding_description.mDescriptorSetIndex &&
+               generation->textureUploadSampleBindingBinding() == binding_description.mBinding &&
+               generation->textureUploadSampleBindingSampler() == sampler &&
+               generation->textureUploadSampleBindingDescriptorSetLayout() == descriptor_set_layout &&
+               generation->textureUploadSampleBindingPipelineLayout() == pipeline_layout &&
+               generation->textureUploadSampleBindingDescriptorPool() == descriptor_pool &&
+               generation->textureUploadSampleBindingDescriptorSet() == descriptor_set &&
+               state.mCreateTextureUploadSampleBindingSamplerCalls == 1 &&
+               state.mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls == 1 &&
+               state.mCreateTextureUploadSampleBindingPipelineLayoutCalls == 1 &&
+               state.mCreateTextureUploadSampleBindingDescriptorPoolCalls == 1 &&
+               state.mAllocateTextureUploadSampleBindingDescriptorSetCalls == 1 &&
+               state.mUpdateTextureUploadSampleBindingDescriptorSetCalls == 1 && state.mCreateTextureUploadSamplePipelineCalls == 1 &&
+               state.mDestroyTextureUploadSamplePipelineCalls == 1 &&
+               state.mTextureUploadSamplePipelineDestroyOrder < state.mPresentationRenderPassDestroyOrder);
+
+    const std::size_t  rebuild_sample_pipeline_destroy_order = state.mTextureUploadSamplePipelineDestroyOrder;
+    const VkRenderPass rebuilt_presentation_render_pass      = generation->swapchainPresentationRenderPass();
+    sample_pipeline_request.mDrawableExtent                  = generation->swapchainDrawableExtent();
+    ensure("the rebuilt target requires an explicit sampled-pipeline reacquire",
+           rebuilt_presentation_render_pass != VK_NULL_HANDLE && rebuilt_presentation_render_pass != initial_presentation_render_pass &&
+               !generation->acquireTextureUploadSamplePipelineGeneration(sample_pipeline_request) &&
+               generation->hasTextureUploadSamplePipelineGeneration());
+
+    const VkPipeline rebuilt_sample_pipeline = generation->textureUploadSamplePipeline();
+    ensure("the reacquired sampled pipeline borrows the same binding layout and the rebuilt target",
+           generation->textureUploadSamplePipelineResourceHandle() == sample_pipeline_description.mHandle &&
+               generation->textureUploadSamplePipelineLayout() == pipeline_layout && rebuilt_sample_pipeline != VK_NULL_HANDLE &&
+               rebuilt_sample_pipeline == state.mTextureUploadSamplePipeline && rebuilt_sample_pipeline != initial_sample_pipeline &&
+               state.mTextureUploadSamplePipelineLayout == pipeline_layout &&
+               state.mTextureUploadSamplePipelineRenderPass == rebuilt_presentation_render_pass &&
+               state.mCreateTextureUploadSamplePipelineCalls == 2 && state.mDestroyTextureUploadSamplePipelineCalls == 1 &&
+               state.mDrawCalls == draw_calls && state.mQueueSubmitCalls == submit_calls);
+
+    ensure("direct sampled-pipeline reset destroys only the pipeline before its binding and rebuilt target",
+           generation->resetTextureUploadSamplePipelineGeneration() && !generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineResourceHandle() == LLRenderContract::PipelineHandle{} &&
+               generation->textureUploadSamplePipelineLayout() == VK_NULL_HANDLE &&
+               generation->textureUploadSamplePipeline() == VK_NULL_HANDLE && generation->hasTextureUploadSampleBindingGeneration() &&
+               generation->textureUploadSampleBindingPipelineLayout() == pipeline_layout &&
+               generation->textureUploadSampleBindingDescriptorSet() == descriptor_set &&
+               generation->hasSwapchainPresentationTargetGeneration() &&
+               generation->swapchainPresentationRenderPass() == rebuilt_presentation_render_pass &&
+               state.mDestroyTextureUploadSamplePipelineCalls == 2 &&
+               state.mTextureUploadSamplePipelineDestroyOrder > rebuild_sample_pipeline_destroy_order && state.mDrawCalls == draw_calls &&
+               state.mQueueSubmitCalls == submit_calls);
+
+    ensure("direct binding reset clears publication and preserves its resident destination and frame slot",
+           generation->resetTextureUploadSampleBindingGeneration() && !generation->hasTextureUploadSampleBindingGeneration() &&
+               generation->textureUploadSampleBindingSamplerResourceHandle() == LLRenderContract::SamplerHandle{} &&
+               generation->textureUploadSampleBindingDestinationResourceHandle() == LLRenderContract::ImageHandle{} &&
+               generation->textureUploadSampleBindingExpectedRevision() == 0 &&
+               generation->textureUploadSampleBindingResidentRevision() == 0 &&
+               generation->textureUploadSampleBindingResidentContentIdentity() == 0 &&
+               generation->textureUploadSampleBindingDestinationImageView() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingDestinationImageLayout() == VK_IMAGE_LAYOUT_MAX_ENUM &&
+               generation->textureUploadSampleBindingDescriptorSetIndex() == std::numeric_limits<std::uint32_t>::max() &&
+               generation->textureUploadSampleBindingBinding() == std::numeric_limits<std::uint32_t>::max() &&
+               generation->textureUploadSampleBindingSampler() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingDescriptorSetLayout() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingPipelineLayout() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingDescriptorPool() == VK_NULL_HANDLE &&
+               generation->textureUploadSampleBindingDescriptorSet() == VK_NULL_HANDLE &&
+               generation->hasTextureUploadDestinationGeneration() && generation->textureUploadDestinationImage() == destination_image &&
+               generation->textureUploadDestinationIsResident() && generation->hasSwapchainFrameSlotGeneration() &&
+               state.mDestroyTextureUploadSampleBindingDescriptorPoolCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingPipelineLayoutCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingSamplerCalls == 1 &&
+               state.mTextureUploadSamplePipelineDestroyOrder < state.mTextureUploadSampleBindingDescriptorPoolDestroyOrder &&
+               state.mTextureUploadSampleBindingDescriptorPoolDestroyOrder < state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder &&
+               state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder <
+                   state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder &&
+               state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder < state.mTextureUploadSampleBindingSamplerDestroyOrder);
+    ensure("an absent binding accepts an idempotent second reset", generation->resetTextureUploadSampleBindingGeneration());
+    ensure("the idempotent second reset destroys no additional sampled object",
+           state.mDestroyTextureUploadSampleBindingDescriptorPoolCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingPipelineLayoutCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls == 1 &&
+               state.mDestroyTextureUploadSampleBindingSamplerCalls == 1);
+
+    ensure("the retained resident destination reacquires an independent binding",
+           !generation->acquireTextureUploadSampleBindingGeneration(binding_request) &&
+               generation->hasTextureUploadSampleBindingGeneration() && state.mCreateTextureUploadSampleBindingSamplerCalls == 2 &&
+               state.mCreateTextureUploadSampleBindingDescriptorSetLayoutCalls == 2 &&
+               state.mCreateTextureUploadSampleBindingPipelineLayoutCalls == 2 &&
+               state.mCreateTextureUploadSampleBindingDescriptorPoolCalls == 2 &&
+               state.mAllocateTextureUploadSampleBindingDescriptorSetCalls == 2 &&
+               state.mUpdateTextureUploadSampleBindingDescriptorSetCalls == 2);
+    ensure("the retained target and replacement binding reacquire a sampled pipeline for full-reset ordering",
+           !generation->acquireTextureUploadSamplePipelineGeneration(sample_pipeline_request) &&
+               generation->hasTextureUploadSamplePipelineGeneration() &&
+               generation->textureUploadSamplePipelineLayout() == generation->textureUploadSampleBindingPipelineLayout() &&
+               generation->textureUploadSamplePipeline() == state.mTextureUploadSamplePipeline &&
+               state.mCreateTextureUploadSamplePipelineCalls == 3 && state.mDrawCalls == draw_calls &&
+               state.mQueueSubmitCalls == submit_calls);
+
+    const VkPipeline       final_sample_pipeline    = generation->textureUploadSamplePipeline();
+    const VkPipelineLayout final_pipeline_layout    = generation->textureUploadSampleBindingPipelineLayout();
+    const VkDescriptorSet  final_descriptor_set     = generation->textureUploadSampleBindingDescriptorSet();
+    const std::size_t      drawable_queries         = state.mDrawableSizeCalls;
+    const std::size_t      bind_pipeline_calls      = state.mBindPipelineCalls;
+    const std::size_t      bind_descriptor_calls    = state.mBindDescriptorSetsCalls;
+    const std::size_t      bind_vertex_calls        = state.mBindVertexBuffersCalls;
+    const std::size_t      sampled_draw_calls       = state.mDrawCalls;
+    const std::size_t      sampled_submit_calls     = state.mQueueSubmitCalls;
+    const std::size_t      sampled_present_calls    = state.mQueuePresentCalls;
+    state.mAcquiredImageIndex                       = 1;
+    const auto sampled_draw = owner->acquireRenderPassSampleDrawToPresentSwapchainFrameSlot();
+    ensure("the SDL sampled-draw bridge reaches the aggregate without a typed parent error", !presentationError(sampled_draw));
+    ensure("the SDL sampled-draw bridge presents one acquired image and returns the frame slot reusable",
+           presentationSucceeded(sampled_draw, VulkanSwapchainFrameSlotPresentationOutcome::Presented, 1) &&
+               generation->swapchainFrameSlotDisposition() == VulkanSwapchainFrameSlotDisposition::Reusable &&
+               !generation->swapchainFrameAcquiredImageIndex());
+    ensure("the SDL sampled-draw bridge queries backing pixels and submits one sampled draw",
+           state.mDrawableSizeCalls == drawable_queries + 1 && state.mBindPipelineCalls == bind_pipeline_calls + 1 &&
+               state.mBindDescriptorSetsCalls == bind_descriptor_calls + 1 &&
+               state.mBindVertexBuffersCalls == bind_vertex_calls + 1 && state.mDrawCalls == sampled_draw_calls + 1 &&
+               state.mQueueSubmitCalls == sampled_submit_calls + 1 && state.mQueuePresentCalls == sampled_present_calls + 1);
+    ensure("the sampled draw binds the exact pipeline layout, descriptor set, and pipeline in command order",
+           state.mBoundPipeline == final_sample_pipeline &&
+               state.mDescriptorPipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS &&
+               state.mBoundDescriptorPipelineLayout == final_pipeline_layout && state.mFirstDescriptorSet == 0 &&
+               state.mDescriptorSetCount == 1 && state.mBoundDescriptorSet == final_descriptor_set &&
+               state.mDynamicOffsetCount == 0 && state.mBoundVertexBuffer == sampled_vertices.mBuffer &&
+               state.mBindPipelineOrder < state.mBindDescriptorSetsOrder &&
+               state.mBindDescriptorSetsOrder < state.mBindVertexBuffersOrder && state.mBindVertexBuffersOrder < state.mDrawOrder);
+    ensure("full SDL owner reset retires the sampled pipeline before its binding, target, destination, and device",
+           owner->reset() && state.mDestroyTextureUploadSamplePipelineCalls == 3 &&
+               state.mDestroyTextureUploadSampleBindingDescriptorPoolCalls == 2 &&
+               state.mDestroyTextureUploadSampleBindingPipelineLayoutCalls == 2 &&
+               state.mDestroyTextureUploadSampleBindingDescriptorSetLayoutCalls == 2 &&
+               state.mDestroyTextureUploadSampleBindingSamplerCalls == 2 && state.mDestroyTextureImageViewCalls == 1 &&
+               state.mDestroyTextureImageCalls == 1 && state.mFreeTextureMemoryCalls == 1 &&
+               state.mTextureUploadSamplePipelineDestroyOrder < state.mTextureUploadSampleBindingDescriptorPoolDestroyOrder &&
+               state.mTextureUploadSamplePipelineDestroyOrder < state.mPresentationRenderPassDestroyOrder &&
+               state.mTextureUploadSampleBindingDescriptorPoolDestroyOrder < state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder &&
+               state.mTextureUploadSampleBindingPipelineLayoutDestroyOrder <
+                   state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder &&
+               state.mTextureUploadSampleBindingDescriptorSetLayoutDestroyOrder < state.mTextureUploadSampleBindingSamplerDestroyOrder &&
+               state.mTextureUploadSampleBindingSamplerDestroyOrder < state.mTextureViewDestroyOrder &&
+               state.mTextureViewDestroyOrder < state.mTextureImageDestroyOrder &&
+               state.mTextureImageDestroyOrder < state.mTextureMemoryFreeOrder &&
+               state.mTextureMemoryFreeOrder < state.mDeviceDestroyOrder);
+}
+
+} // namespace tut

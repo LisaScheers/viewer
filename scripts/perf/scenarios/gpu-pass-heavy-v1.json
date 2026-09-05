@@ -1,0 +1,43 @@
+{
+  "schema_version": 3,
+  "id": "gpu-pass-heavy-v1",
+  "description": "High-fill view for shadows, reflection probes, deferred lighting, and bandwidth pressure.",
+  "cache_mode": "warm",
+  "capture": {"warmup_seconds": 30, "duration_seconds": 120, "repeats": 5, "poll_interval_seconds": 0.5},
+  "settings": {
+    "AutoTuneFPS": false,
+    "RenderBenchmarkUIScale": 1.0,
+    "RenderDeferred": true,
+    "RenderFarClip": 256.0,
+    "RenderGLContextCoreProfile": true,
+    "RenderHiDPI": true,
+    "RenderReflectionProbeDetail": 2,
+    "RenderReflectionsEnabled": true,
+    "RenderShadowDetail": 2,
+    "RenderVSyncEnable": false,
+    "RenderVolumeLODFactor": 2.0,
+    "WindowHeight": 720,
+    "WindowMaximized": false,
+    "WindowWidth": 1280,
+    "YieldTime": -1
+  },
+  "validity": {
+    "asset_mode": "settled",
+    "population_mode": "stable",
+    "ui_mode": "clear",
+    "settle_seconds": 15,
+    "max_camera_translation_m": 0.1,
+    "max_camera_rotation_rad": 0.05,
+    "max_agent_travel_m": 0.0,
+    "max_visible_avatar_delta": 0,
+    "max_active_object_delta": 0,
+    "max_new_objects": 0,
+    "max_sim_ping_ms": 600
+  },
+  "workload": {
+    "operator_setup": "Use a stable scene with shadows and probes visible; pair steady runs with a separately labeled external GPU capture.",
+    "camera": "Fixed high-fill view with unchanged render resolution.",
+    "observations": ["GPU pass capture", "render resolution", "shadow updates", "reflection probe updates", "thermal state"],
+    "invalid_if": ["no matching diagnostic GPU capture exists", "resolution changes", "probe or shadow state changes", "power or thermal throttling occurs"]
+  }
+}

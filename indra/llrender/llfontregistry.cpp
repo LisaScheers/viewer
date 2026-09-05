@@ -543,9 +543,9 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
         bool is_ft_collection = (std::find_if(font_collection_files.begin(), font_collection_files.end(),
                                               [&font_file_it](const LLFontFileInfo& ffi) { return font_file_it->FileName == ffi.FileName; }) != font_collection_files.end());
 
-        // *HACK: Fallback fonts don't render, so we can use that to suppress
-        // creation of OpenGL textures for test apps. JC
-        bool is_fallback = !is_first_found || !mCreateGLTextures;
+        // Font fallback selection and GPU atlas allocation are independent.
+        // A CPU-only head font still rasterizes glyphs for a non-GL renderer.
+        bool is_fallback = !is_first_found;
         F32 extra_scale = (is_fallback) ? fallback_scale : 1.0f;
         F32 point_size_scale = extra_scale * point_size;
         bool is_font_loaded = false;
@@ -564,7 +564,7 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
                     fontp = new LLFontGL;
                 }
                 if (fontp->loadFace(font_path, point_size_scale + font_file_it->mSizeDelta,
-                                 LLFontGL::sVertDPI, LLFontGL::sHorizDPI, font_file_it->mWeight, is_fallback, i, font_file_it->mHinting, font_file_it->mFlags))
+                                 LLFontGL::sVertDPI, LLFontGL::sHorizDPI, font_file_it->mWeight, is_fallback, i, font_file_it->mHinting, font_file_it->mFlags, mCreateGLTextures))
                 {
                     is_font_loaded = true;
                     if (is_first_found)

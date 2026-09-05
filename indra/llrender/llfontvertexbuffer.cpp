@@ -121,7 +121,7 @@ S32 LLFontVertexBuffer::render(
     {
         return static_cast<S32>(text.length());
     }
-    if (!sEnableBufferCollection)
+    if (!sEnableBufferCollection || gGL.isUIRecording())
     {
         // For debug purposes and performance testing
         return fontp->render(text, begin_offset, x, y, color, halign, valign, style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color);

@@ -23,6 +23,9 @@ set(llrender_SOURCE_FILES
     llgltexture.cpp
     llimagegl.cpp
     llrender.cpp
+    llrenderglmaterial.cpp
+    llrendergltextureupload.cpp
+    llrendergltonemap.cpp
     llrender2dutils.cpp
     llrendernavprim.cpp
     llrendersphere.cpp
@@ -54,6 +57,9 @@ set(llrender_HEADER_FILES
     llgltypes.h
     llimagegl.h
     llrender.h
+    llrenderglmaterial.h
+    llrendergltextureupload.h
+    llrendergltonemap.h
     llrender2dutils.h
     llrendernavprim.h
     llrendersphere.h
@@ -68,6 +74,36 @@ set(llrender_HEADER_FILES
 
 list(APPEND llrender_SOURCE_FILES ${llrender_HEADER_FILES})
 
+set(llrendercontract_SOURCE_FILES
+    lluirenderframe.cpp
+    lluirenderframe.h
+    lldrawpacketcontract.cpp
+    lldrawpacketcontract.h
+    llmaterialcontract.cpp
+    llmaterialcontract.h
+    llmaterialdiagnostic.cpp
+    llmaterialdiagnostic.h
+    llmaterialparametercontract.cpp
+    llmaterialparametercontract.h
+    llrendercontract.cpp
+    llrendercontract.h
+    llshadermanifest.cpp
+    llshadermanifest.h
+    lltextureuploadcontract.cpp
+    lltextureuploadcontract.h
+    lltextureuploaddiagnostic.cpp
+    lltextureuploaddiagnostic.h
+    lltonemapcontract.cpp
+    lltonemapcontract.h
+    lltonemapdiagnostic.cpp
+    lltonemapdiagnostic.h
+    )
+
+# Keep the backend-neutral contract independently linkable. In particular,
+# this target must not inherit llrender's OpenGL or window dependencies.
+add_library(llrendercontract ${llrendercontract_SOURCE_FILES})
+target_include_directories(llrendercontract PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 if (BUILD_HEADLESS)
   add_library (llrenderheadless
     ${llrender_SOURCE_FILES}
@@ -75,6 +111,7 @@ if (BUILD_HEADLESS)
   target_include_directories(llrenderheadless INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
   target_link_libraries(llrenderheadless
+          llrendercontract
           llcommon
           llimage
           llmath
@@ -90,12 +127,26 @@ if (BUILD_HEADLESS)
   endif()
 endif (BUILD_HEADLESS)
 
+if (LL_RENDER_BENCHMARK)
+  set_property(SOURCE
+      llglslshader.cpp
+      llimagegl.cpp
+      llshadermgr.cpp
+      APPEND PROPERTY COMPILE_DEFINITIONS LL_RENDER_BENCHMARK=1)
+  set_property(SOURCE
+      llglslshader.cpp
+      llimagegl.cpp
+      llshadermgr.cpp
+      PROPERTY SKIP_PRECOMPILE_HEADERS ON)
+endif()
+
 add_library (llrender ${llrender_SOURCE_FILES})
 target_include_directories(llrender INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Libraries on which this library depends, needed for Linux builds
 # Sort by high-level to low-level
 target_link_libraries(llrender
+        llrendercontract
         llcommon
         llimage
         llmath
@@ -114,4 +165,1303 @@ endif()
 
 if (USE_PRECOMPILED_HEADERS)
  target_precompile_headers(llrender REUSE_FROM llprecompiled)
+endif ()
+
+if (LL_TESTS)
+  include(LLAddBuildTest)
+  set_source_files_properties(tests/lluirenderframe_test.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(lluirenderframe "" "llrender;llrendercontract;llcommon")
+  target_compile_definitions(INTEGRATION_TEST_lluirenderframe PRIVATE
+      LL_UI_TEST_FONT="${CMAKE_CURRENT_SOURCE_DIR}/../newview/fonts/DejaVuSans.ttf")
+  set_source_files_properties(
+    tests/lldrawpacketcontract_test.cpp
+    tests/llmaterialdiagnostic_test.cpp
+    tests/llmaterialparametercontract_test.cpp
+    tests/llrendercontract_test.cpp
+    tests/llshadermanifest_test.cpp
+    tests/llrenderglmaterialregistry_test.cpp
+    tests/llrendergltextureuploadregistry_test.cpp
+    tests/llrendergltonemapregistry_test.cpp
+    tests/lltextureuploadcontract_test.cpp
+    tests/lltextureuploaddiagnostic_test.cpp
+    tests/lltonemapdiagnostic_test.cpp
+    PROPERTIES
+    SKIP_PRECOMPILE_HEADERS TRUE
+  )
+  LL_ADD_INTEGRATION_TEST(lldrawpacketcontract "" "llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(llmaterialdiagnostic "" "llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(llmaterialparametercontract "" "llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(llrendercontract "" "llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(llshadermanifest "" "llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(llrenderglmaterialregistry "" "llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(llrendergltextureuploadregistry "" "llrender;llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(llrendergltonemapregistry "" "llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(lltextureuploadcontract "" "llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(lltextureuploaddiagnostic "" "llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(lltonemapdiagnostic "" "llrendercontract;llcommon")
+endif ()
+
+if ((LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST) AND NOT LL_TESTS)
+  message(FATAL_ERROR "Vulkan runtime tests require LL_TESTS=ON")
+endif ()
+
+if (LL_VULKAN_TONEMAP_TEST)
+  if (NOT LINUX AND NOT DARWIN)
+    message(FATAL_ERROR "LL_VULKAN_TONEMAP_TEST is supported only on Linux and macOS")
+  endif ()
+
+  find_package(Vulkan REQUIRED)
+  set(llvulkan_headers_include_dir "${Vulkan_INCLUDE_DIR}")
+elseif (LL_VULKAN_RUNTIME_TEST)
+  find_path(LL_VULKAN_HEADERS_INCLUDE_DIR
+      NAMES vulkan/vulkan.h
+      HINTS ENV VULKAN_SDK
+      PATH_SUFFIXES include Include)
+  if (NOT LL_VULKAN_HEADERS_INCLUDE_DIR)
+    message(FATAL_ERROR
+        "LL_VULKAN_RUNTIME_TEST requires Vulkan headers; add them to the include search path or set LL_VULKAN_HEADERS_INCLUDE_DIR")
+  endif ()
+  set(llvulkan_headers_include_dir "${LL_VULKAN_HEADERS_INCLUDE_DIR}")
+endif ()
+
+if (LL_VULKAN_RUNTIME_TEST OR LL_VULKAN_TONEMAP_TEST)
+  add_library(llrendervulkanglobaldispatch STATIC
+      vulkan/llrendervulkanglobaldispatch.cpp
+      vulkan/llrendervulkanglobaldispatch.h)
+  target_include_directories(llrendervulkanglobaldispatch
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanglobaldispatch SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanglobaldispatch
+      PRIVATE VK_NO_PROTOTYPES)
+  set_target_properties(llrendervulkanglobaldispatch PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanglobaldispatch_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanglobaldispatch
+      ""
+      "llrendervulkanglobaldispatch;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanglobaldispatch
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanphysicaldevice STATIC
+      vulkan/llrendervulkanphysicaldevice.cpp
+      vulkan/llrendervulkanphysicaldevice.h)
+  target_include_directories(llrendervulkanphysicaldevice
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanphysicaldevice SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanphysicaldevice
+      PRIVATE VK_NO_PROTOTYPES)
+  set_target_properties(llrendervulkanphysicaldevice PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanphysicaldevice_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanphysicaldevice
+      ""
+      "llrendervulkanphysicaldevice;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanphysicaldevice
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanlogicaldevice STATIC
+      vulkan/llrendervulkanlogicaldevice.cpp
+      vulkan/llrendervulkanlogicaldevice.h)
+  target_include_directories(llrendervulkanlogicaldevice
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanlogicaldevice SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanlogicaldevice
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanlogicaldevice
+      PUBLIC llrendervulkanphysicaldevice)
+  set_target_properties(llrendervulkanlogicaldevice PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanlogicaldevice_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanlogicaldevice
+      ""
+      "llrendervulkanlogicaldevice;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanlogicaldevice
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanuploadsource STATIC
+      vulkan/llrendervulkanuploadsource.cpp
+      vulkan/llrendervulkanuploadsource.h)
+  target_include_directories(llrendervulkanuploadsource
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanuploadsource SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanuploadsource
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanuploadsource
+      PUBLIC
+          llrendervulkanlogicaldevice
+          llrendercontract)
+  set_target_properties(llrendervulkanuploadsource PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanuploadsource_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanuploadsource
+      ""
+      "llrendervulkanuploadsource;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanuploadsource
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkantextureuploaddestination STATIC
+      vulkan/llrendervulkantextureuploaddestination.cpp
+      vulkan/llrendervulkantextureuploaddestination.h)
+  target_include_directories(llrendervulkantextureuploaddestination
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkantextureuploaddestination SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkantextureuploaddestination
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkantextureuploaddestination
+      PUBLIC
+          llrendervulkanlogicaldevice
+          llrendercontract)
+  set_target_properties(llrendervulkantextureuploaddestination PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkantextureuploaddestination_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkantextureuploaddestination
+      ""
+      "llrendervulkantextureuploaddestination;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkantextureuploaddestination
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkantextureuploadsource STATIC
+      vulkan/llrendervulkantextureuploadsource.cpp
+      vulkan/llrendervulkantextureuploadsource.h)
+  target_include_directories(llrendervulkantextureuploadsource
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkantextureuploadsource SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkantextureuploadsource
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkantextureuploadsource
+      PUBLIC
+          llrendervulkanlogicaldevice
+          llrendercontract)
+  set_target_properties(llrendervulkantextureuploadsource PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkantextureuploadsource_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkantextureuploadsource
+      ""
+      "llrendervulkantextureuploadsource;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkantextureuploadsource
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkantextureuploadtransfer STATIC
+      vulkan/llrendervulkantextureuploadtransfer.cpp
+      vulkan/llrendervulkantextureuploadtransfer.h)
+  target_include_directories(llrendervulkantextureuploadtransfer
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkantextureuploadtransfer SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkantextureuploadtransfer
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkantextureuploadtransfer
+      PUBLIC
+          llrendervulkantextureuploaddestination
+          llrendervulkantextureuploadsource
+          llrendercontract)
+  set_target_properties(llrendervulkantextureuploadtransfer PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkantextureuploadtransfer_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkantextureuploadtransfer
+      ""
+      "llrendervulkantextureuploadtransfer;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkantextureuploadtransfer
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkantextureuploadsamplebinding STATIC
+      vulkan/llrendervulkantextureuploadsamplebinding.cpp
+      vulkan/llrendervulkantextureuploadsamplebinding.h)
+  target_include_directories(llrendervulkantextureuploadsamplebinding
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkantextureuploadsamplebinding SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkantextureuploadsamplebinding
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkantextureuploadsamplebinding
+      PUBLIC
+          llrendervulkantextureuploaddestination
+          llrendercontract)
+  set_target_properties(llrendervulkantextureuploadsamplebinding PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkantextureuploadsamplebinding_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkantextureuploadsamplebinding
+      ""
+      "llrendervulkantextureuploadsamplebinding;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkantextureuploadsamplebinding
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanuploaddestination STATIC
+      vulkan/llrendervulkanuploaddestination.cpp
+      vulkan/llrendervulkanuploaddestination.h)
+  target_include_directories(llrendervulkanuploaddestination
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanuploaddestination SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanuploaddestination
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanuploaddestination
+      PUBLIC llrendervulkanuploadsource)
+  set_target_properties(llrendervulkanuploaddestination PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanuploaddestination_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanuploaddestination
+      ""
+      "llrendervulkanuploaddestination;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanuploaddestination
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanuploadtransfer STATIC
+      vulkan/llrendervulkanuploadtransfer.cpp
+      vulkan/llrendervulkanuploadtransfer.h)
+  target_include_directories(llrendervulkanuploadtransfer
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanuploadtransfer SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanuploadtransfer
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanuploadtransfer
+      PUBLIC llrendervulkanuploaddestination)
+  set_target_properties(llrendervulkanuploadtransfer PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanuploadtransfer_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanuploadtransfer
+      ""
+      "llrendervulkanuploadtransfer;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanuploadtransfer
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanswapchainconfiguration STATIC
+      vulkan/llrendervulkanswapchainconfiguration.cpp
+      vulkan/llrendervulkanswapchainconfiguration.h)
+  target_include_directories(llrendervulkanswapchainconfiguration
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanswapchainconfiguration SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanswapchainconfiguration
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanswapchainconfiguration
+      PUBLIC llrendervulkanlogicaldevice)
+  set_target_properties(llrendervulkanswapchainconfiguration PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanswapchainconfiguration_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanswapchainconfiguration
+      ""
+      "llrendervulkanswapchainconfiguration;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanswapchainconfiguration
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanswapchain STATIC
+      vulkan/llrendervulkanswapchain.cpp
+      vulkan/llrendervulkanswapchain.h)
+  target_include_directories(llrendervulkanswapchain
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanswapchain SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanswapchain
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanswapchain
+      PUBLIC llrendervulkanswapchainconfiguration)
+  set_target_properties(llrendervulkanswapchain PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanswapchain_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanswapchain
+      ""
+      "llrendervulkanswapchain;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanswapchain
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanswapchainimages STATIC
+      vulkan/llrendervulkanswapchainimages.cpp
+      vulkan/llrendervulkanswapchainimages.h)
+  target_include_directories(llrendervulkanswapchainimages
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanswapchainimages SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanswapchainimages
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanswapchainimages
+      PUBLIC llrendervulkanswapchain)
+  set_target_properties(llrendervulkanswapchainimages PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanswapchainimages_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanswapchainimages
+      ""
+      "llrendervulkanswapchainimages;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanswapchainimages
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanswapchainreadback STATIC
+      vulkan/llrendervulkanswapchainreadback.cpp
+      vulkan/llrendervulkanswapchainreadback.h)
+  target_include_directories(llrendervulkanswapchainreadback
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanswapchainreadback SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanswapchainreadback
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanswapchainreadback
+      PUBLIC llrendervulkanswapchainimages)
+  set_target_properties(llrendervulkanswapchainreadback PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanswapchainreadback_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanswapchainreadback
+      ""
+      "llrendervulkanswapchainreadback;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanswapchainreadback
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanswapchainpresentationtarget STATIC
+      vulkan/llrendervulkanswapchainpresentationtarget.cpp
+      vulkan/llrendervulkanswapchainpresentationtarget.h)
+  target_include_directories(llrendervulkanswapchainpresentationtarget
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanswapchainpresentationtarget SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanswapchainpresentationtarget
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanswapchainpresentationtarget
+      PUBLIC llrendervulkanswapchainimages)
+  set_target_properties(llrendervulkanswapchainpresentationtarget PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanswapchainpresentationtarget_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanswapchainpresentationtarget
+      ""
+      "llrendervulkanswapchainpresentationtarget;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanswapchainpresentationtarget
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanswapchainpresentationpipeline STATIC
+      vulkan/llrendervulkanswapchainpresentationpipeline.cpp
+      vulkan/llrendervulkanswapchainpresentationpipeline.h
+      vulkan/shaders/presentation.vert.glsl
+      vulkan/shaders/presentation.frag.glsl)
+  set_source_files_properties(
+      vulkan/shaders/presentation.vert.glsl
+      vulkan/shaders/presentation.frag.glsl
+      PROPERTIES HEADER_FILE_ONLY TRUE)
+  target_include_directories(llrendervulkanswapchainpresentationpipeline
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanswapchainpresentationpipeline SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanswapchainpresentationpipeline
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanswapchainpresentationpipeline
+      PUBLIC llrendervulkanswapchainpresentationtarget)
+  set_target_properties(llrendervulkanswapchainpresentationpipeline PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanswapchainpresentationpipeline_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanswapchainpresentationpipeline
+      ""
+      "llrendervulkanswapchainpresentationpipeline;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanswapchainpresentationpipeline
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkantextureuploadsamplepipeline STATIC
+      vulkan/llrendervulkantextureuploadsamplepipeline.cpp
+      vulkan/llrendervulkantextureuploadsamplepipeline.h
+      vulkan/shaders/textureupload.vert.glsl
+      vulkan/shaders/textureupload.frag.glsl)
+  set_source_files_properties(
+      vulkan/shaders/textureupload.vert.glsl
+      vulkan/shaders/textureupload.frag.glsl
+      PROPERTIES HEADER_FILE_ONLY TRUE)
+  target_include_directories(llrendervulkantextureuploadsamplepipeline
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkantextureuploadsamplepipeline SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkantextureuploadsamplepipeline
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkantextureuploadsamplepipeline
+      PUBLIC
+          llrendervulkanswapchainpresentationtarget
+          llrendervulkantextureuploadsamplebinding)
+  set_target_properties(llrendervulkantextureuploadsamplepipeline PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkantextureuploadsamplepipeline_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkantextureuploadsamplepipeline
+      ""
+      "llrendervulkantextureuploadsamplepipeline;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkantextureuploadsamplepipeline
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanswapchainframeslot STATIC
+      vulkan/llrendervulkanswapchainframeslot.cpp
+      vulkan/llrendervulkanswapchainframeslot.h)
+  target_include_directories(llrendervulkanswapchainframeslot
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanswapchainframeslot SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkanswapchainframeslot
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanswapchainframeslot
+      PUBLIC
+          llrendervulkanuploaddestination
+          llrendervulkantextureuploadsamplepipeline
+          llrendervulkantextureuploadsamplebinding
+          llrendervulkantextureuploaddestination
+          llrendervulkanswapchainpresentationpipeline
+          llrendervulkanswapchainreadback)
+  set_target_properties(llrendervulkanswapchainframeslot PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanswapchainframeslot_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanswapchainframeslot
+      ""
+      "llrendervulkanswapchainframeslot;llrendervulkanuploadtransfer;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanswapchainframeslot
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkaninstance STATIC
+      vulkan/llrendervulkanui.cpp
+      vulkan/llrendervulkanui.h
+      vulkan/llrendervulkanuishaders.h
+      vulkan/llrendervulkaninstance.cpp
+      vulkan/llrendervulkaninstance.h)
+  target_include_directories(llrendervulkaninstance
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkaninstance SYSTEM
+      PUBLIC "${llvulkan_headers_include_dir}")
+  target_compile_definitions(llrendervulkaninstance
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkaninstance
+      PUBLIC
+          llrendervulkanglobaldispatch
+          llrendervulkanlogicaldevice
+          llrendervulkantextureuploaddestination
+          llrendervulkantextureuploadsamplebinding
+          llrendervulkantextureuploadsamplepipeline
+          llrendervulkantextureuploadsource
+          llrendervulkantextureuploadtransfer
+          llrendervulkanuploadsource
+          llrendervulkanuploaddestination
+          llrendervulkanuploadtransfer
+          llrendervulkanphysicaldevice
+          llrendervulkanswapchain
+          llrendervulkanswapchainimages
+          llrendervulkanswapchainreadback
+          llrendervulkanswapchainpresentationtarget
+          llrendervulkanswapchainpresentationpipeline
+          llrendervulkanswapchainframeslot
+          llrendervulkanswapchainconfiguration)
+  set_target_properties(llrendervulkaninstance PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkaninstance_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkaninstance
+      ""
+      "llrendervulkaninstance;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkaninstance
+      PRIVATE VK_NO_PROTOTYPES)
+endif ()
+
+if (LL_VULKAN_TONEMAP_TEST)
+  find_program(LL_VULKAN_GLSLANG_VALIDATOR
+      NAMES glslangValidator
+      DOC "Path to glslangValidator for the Vulkan tonemap diagnostic")
+  find_program(LL_VULKAN_SPIRV_VAL
+      NAMES spirv-val
+      DOC "Path to spirv-val for the Vulkan tonemap diagnostic")
+  find_program(LL_VULKAN_SPIRV_CROSS
+      NAMES spirv-cross
+      DOC "Path to spirv-cross for Vulkan shader reflection")
+  find_program(LL_VULKAN_SPIRV_DIS
+      NAMES spirv-dis
+      DOC "Path to spirv-dis for Vulkan shader decoration validation")
+
+  if (NOT LL_VULKAN_GLSLANG_VALIDATOR OR
+      NOT EXISTS "${LL_VULKAN_GLSLANG_VALIDATOR}")
+    message(FATAL_ERROR
+        "LL_VULKAN_TONEMAP_TEST requires glslangValidator; add it to PATH or set LL_VULKAN_GLSLANG_VALIDATOR")
+  endif ()
+  if (NOT LL_VULKAN_SPIRV_VAL OR NOT EXISTS "${LL_VULKAN_SPIRV_VAL}")
+    message(FATAL_ERROR
+        "LL_VULKAN_TONEMAP_TEST requires spirv-val; add it to PATH or set LL_VULKAN_SPIRV_VAL")
+  endif ()
+  if (NOT LL_VULKAN_SPIRV_CROSS OR NOT EXISTS "${LL_VULKAN_SPIRV_CROSS}")
+    message(FATAL_ERROR
+        "LL_VULKAN_TONEMAP_TEST requires spirv-cross; add it to PATH or set LL_VULKAN_SPIRV_CROSS")
+  endif ()
+  if (NOT LL_VULKAN_SPIRV_DIS OR NOT EXISTS "${LL_VULKAN_SPIRV_DIS}")
+    message(FATAL_ERROR
+        "LL_VULKAN_TONEMAP_TEST requires spirv-dis; add it to PATH or set LL_VULKAN_SPIRV_DIS")
+  endif ()
+  if (NOT LL_VULKAN_VALIDATION_LAYER_DIR OR
+      NOT IS_DIRECTORY "${LL_VULKAN_VALIDATION_LAYER_DIR}" OR
+      NOT EXISTS "${LL_VULKAN_VALIDATION_LAYER_DIR}/VkLayer_khronos_validation.json")
+    message(FATAL_ERROR
+        "LL_VULKAN_TONEMAP_TEST requires LL_VULKAN_VALIDATION_LAYER_DIR to contain VkLayer_khronos_validation.json")
+  endif ()
+
+  set(llvulkan_shader_source_dir "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/shaders")
+  set(llvulkan_shader_binary_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan/shaders")
+  set(llvulkan_vertex_source "${llvulkan_shader_source_dir}/tonemap.vert.glsl")
+  set(llvulkan_fragment_source "${llvulkan_shader_source_dir}/tonemap.frag.glsl")
+  set(llvulkan_vertex_spv "${llvulkan_shader_binary_dir}/tonemap.vert.spv")
+
+  add_custom_command(
+      OUTPUT "${llvulkan_vertex_spv}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${llvulkan_shader_binary_dir}"
+      COMMAND "${CMAKE_COMMAND}" -E remove -f "${llvulkan_vertex_spv}.tmp"
+      COMMAND "${LL_VULKAN_GLSLANG_VALIDATOR}"
+              -V --target-env vulkan1.1 -S vert
+              "-I${llvulkan_shader_source_dir}"
+              -o "${llvulkan_vertex_spv}.tmp"
+              "${llvulkan_vertex_source}"
+      COMMAND "${LL_VULKAN_SPIRV_VAL}"
+              --target-env vulkan1.1 "${llvulkan_vertex_spv}.tmp"
+      COMMAND "${CMAKE_COMMAND}" -E rename
+              "${llvulkan_vertex_spv}.tmp" "${llvulkan_vertex_spv}"
+      DEPENDS
+              "${llvulkan_vertex_source}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/../newview/app_settings/shaders/class1/deferred/postDeferredNoTCV.glsl"
+      COMMENT "Compiling and validating Vulkan tonemap vertex shader"
+      VERBATIM
+  )
+
+  set(llvulkan_fragment_spv_files)
+  foreach (llvulkan_variant IN ITEMS 0 1 2 3 6 7)
+    set(llvulkan_variant_defines)
+    if (llvulkan_variant EQUAL 1 OR llvulkan_variant EQUAL 3 OR
+        llvulkan_variant EQUAL 7)
+      list(APPEND llvulkan_variant_defines -DLL_TONEMAP_NO_POST=1)
+    endif ()
+    if (llvulkan_variant EQUAL 2 OR llvulkan_variant EQUAL 3 OR
+        llvulkan_variant EQUAL 6 OR llvulkan_variant EQUAL 7)
+      list(APPEND llvulkan_variant_defines -DLL_TONEMAP_GAMMA_CORRECT=1)
+    endif ()
+    if (llvulkan_variant EQUAL 6 OR llvulkan_variant EQUAL 7)
+      list(APPEND llvulkan_variant_defines -DLL_TONEMAP_LEGACY_GAMMA=1)
+    endif ()
+
+    set(llvulkan_fragment_spv
+        "${llvulkan_shader_binary_dir}/tonemap.frag.${llvulkan_variant}.spv")
+    add_custom_command(
+        OUTPUT "${llvulkan_fragment_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${llvulkan_shader_binary_dir}"
+        COMMAND "${CMAKE_COMMAND}" -E remove -f "${llvulkan_fragment_spv}.tmp"
+        COMMAND "${LL_VULKAN_GLSLANG_VALIDATOR}"
+                -V --target-env vulkan1.1 -S frag
+                "-I${llvulkan_shader_source_dir}"
+                ${llvulkan_variant_defines}
+                -o "${llvulkan_fragment_spv}.tmp"
+                "${llvulkan_fragment_source}"
+        COMMAND "${LL_VULKAN_SPIRV_VAL}"
+                --target-env vulkan1.1 "${llvulkan_fragment_spv}.tmp"
+        COMMAND "${CMAKE_COMMAND}" -E rename
+                "${llvulkan_fragment_spv}.tmp" "${llvulkan_fragment_spv}"
+        DEPENDS
+                "${llvulkan_fragment_source}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../newview/app_settings/shaders/class1/environment/srgbF.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../newview/app_settings/shaders/class1/deferred/tonemapUtilF.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../newview/app_settings/shaders/class1/deferred/postDeferredTonemap.glsl"
+        COMMENT "Compiling and validating Vulkan tonemap fragment shader variant ${llvulkan_variant}"
+        VERBATIM
+    )
+    list(APPEND llvulkan_fragment_spv_files "${llvulkan_fragment_spv}")
+  endforeach ()
+
+  add_custom_target(llvulkantonemap_shaders
+      DEPENDS "${llvulkan_vertex_spv}" ${llvulkan_fragment_spv_files})
+  set_target_properties(llvulkantonemap_shaders PROPERTIES FOLDER "Tests")
+
+  set(llvulkan_material_vertex_source
+      "${llvulkan_shader_source_dir}/material.vert.glsl")
+  set(llvulkan_material_fragment_source
+      "${llvulkan_shader_source_dir}/material.frag.glsl")
+
+  add_executable(llshadermanifest_dump
+      vulkan/llshadermanifest_dump.cpp)
+  target_link_libraries(llshadermanifest_dump PRIVATE llrendercontract)
+  set_target_properties(llshadermanifest_dump PROPERTIES FOLDER "Tests")
+
+  set(llvulkan_material_reflection_verifier
+      "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/verify_material_reflection.py")
+  set(llvulkan_material_reflection_verifier_test
+      "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/test_verify_material_reflection.py")
+  set(llvulkan_material_hash_writer
+      "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/write_shader_hashes.cmake")
+
+  function(ll_add_vulkan_material_shader_profile profile artifact_stem target_name)
+    set(profile_defines ${ARGN})
+    set(artifact_path "${llvulkan_shader_binary_dir}/${artifact_stem}")
+    set(vertex_spv "${artifact_path}.vert.spv")
+    set(fragment_spv "${artifact_path}.frag.spv")
+    set(vertex_reflection "${artifact_path}.vert.reflect.json")
+    set(fragment_reflection "${artifact_path}.frag.reflect.json")
+    set(vertex_disassembly "${artifact_path}.vert.spvasm")
+    set(fragment_disassembly "${artifact_path}.frag.spvasm")
+    set(manifest_expectation "${artifact_path}.manifest.json")
+    set(module_hashes "${artifact_path}.modules.sha256")
+    set(manifest_stamp "${artifact_path}.manifest.verified")
+
+    add_custom_command(
+        OUTPUT "${vertex_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${llvulkan_shader_binary_dir}"
+        COMMAND "${CMAKE_COMMAND}" -E remove -f "${vertex_spv}.tmp"
+        COMMAND "${LL_VULKAN_GLSLANG_VALIDATOR}"
+                -V --target-env vulkan1.1 -S vert
+                "-I${llvulkan_shader_source_dir}"
+                ${profile_defines}
+                -o "${vertex_spv}.tmp"
+                "${llvulkan_material_vertex_source}"
+        COMMAND "${LL_VULKAN_SPIRV_VAL}"
+                --target-env vulkan1.1 "${vertex_spv}.tmp"
+        COMMAND "${CMAKE_COMMAND}" -E rename
+                "${vertex_spv}.tmp"
+                "${vertex_spv}"
+        DEPENDS
+                "${llvulkan_material_vertex_source}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../newview/app_settings/shaders/class1/deferred/materialV.glsl"
+        COMMENT "Compiling and validating ${profile} Vulkan material vertex shader"
+        VERBATIM
+    )
+
+    add_custom_command(
+        OUTPUT "${fragment_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${llvulkan_shader_binary_dir}"
+        COMMAND "${CMAKE_COMMAND}" -E remove -f "${fragment_spv}.tmp"
+        COMMAND "${LL_VULKAN_GLSLANG_VALIDATOR}"
+                -V --target-env vulkan1.1 -S frag
+                "-I${llvulkan_shader_source_dir}"
+                ${profile_defines}
+                -o "${fragment_spv}.tmp"
+                "${llvulkan_material_fragment_source}"
+        COMMAND "${LL_VULKAN_SPIRV_VAL}"
+                --target-env vulkan1.1 "${fragment_spv}.tmp"
+        COMMAND "${CMAKE_COMMAND}" -E rename
+                "${fragment_spv}.tmp"
+                "${fragment_spv}"
+        DEPENDS
+                "${llvulkan_material_fragment_source}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../newview/app_settings/shaders/class1/deferred/globalF.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../newview/app_settings/shaders/class3/deferred/materialF.glsl"
+        COMMENT "Compiling and validating ${profile} Vulkan material fragment shader"
+        VERBATIM
+    )
+
+    add_custom_command(
+        OUTPUT
+        "${manifest_stamp}"
+        "${module_hashes}"
+        BYPRODUCTS
+        "${vertex_reflection}"
+        "${fragment_reflection}"
+        "${vertex_disassembly}"
+        "${fragment_disassembly}"
+        "${manifest_expectation}"
+        COMMAND "${CMAKE_COMMAND}" -E remove -f
+                "${manifest_stamp}"
+                "${module_hashes}"
+                "${vertex_reflection}"
+                "${fragment_reflection}"
+                "${vertex_disassembly}"
+                "${fragment_disassembly}"
+                "${manifest_expectation}"
+        COMMAND "${LL_VULKAN_SPIRV_CROSS}"
+                "${vertex_spv}"
+                --reflect --output "${vertex_reflection}"
+        COMMAND "${LL_VULKAN_SPIRV_CROSS}"
+                "${fragment_spv}"
+                --reflect --output "${fragment_reflection}"
+        COMMAND "${LL_VULKAN_SPIRV_DIS}"
+                "${vertex_spv}"
+                -o "${vertex_disassembly}"
+        COMMAND "${LL_VULKAN_SPIRV_DIS}"
+                "${fragment_spv}"
+                -o "${fragment_disassembly}"
+        COMMAND "$<TARGET_FILE:llshadermanifest_dump>"
+                --profile "${profile}"
+                --output "${manifest_expectation}"
+        COMMAND "${PYTHON_EXECUTABLE}" -B
+                "${llvulkan_material_reflection_verifier_test}"
+        COMMAND "${PYTHON_EXECUTABLE}"
+                "${llvulkan_material_reflection_verifier}"
+                --expectation "${manifest_expectation}"
+                --vertex-reflection "${vertex_reflection}"
+                --fragment-reflection "${fragment_reflection}"
+                --vertex-disassembly "${vertex_disassembly}"
+                --fragment-disassembly "${fragment_disassembly}"
+        COMMAND "${CMAKE_COMMAND}"
+                "-DVERTEX_MODULE=${vertex_spv}"
+                "-DFRAGMENT_MODULE=${fragment_spv}"
+                "-DOUTPUT_FILE=${module_hashes}"
+                -P "${llvulkan_material_hash_writer}"
+        COMMAND "${CMAKE_COMMAND}" -E touch
+                "${manifest_stamp}"
+        DEPENDS
+        "${vertex_spv}"
+        "${fragment_spv}"
+        llshadermanifest_dump
+        "${llvulkan_material_reflection_verifier}"
+        "${llvulkan_material_reflection_verifier_test}"
+        "${llvulkan_material_hash_writer}"
+        COMMENT "Reflecting and validating the ${profile} Vulkan material manifest"
+        VERBATIM
+    )
+
+    add_custom_target(${target_name}
+        DEPENDS
+        "${vertex_spv}"
+        "${fragment_spv}"
+        "${manifest_stamp}"
+        "${module_hashes}")
+    set_target_properties(${target_name} PROPERTIES FOLDER "Tests")
+
+    set(${target_name}_VERTEX_SPV "${vertex_spv}" PARENT_SCOPE)
+    set(${target_name}_FRAGMENT_SPV "${fragment_spv}" PARENT_SCOPE)
+    set(${target_name}_VERIFIED_STAMP "${manifest_stamp}" PARENT_SCOPE)
+  endfunction()
+
+  ll_add_vulkan_material_shader_profile(
+      diagnostic material llvulkanmaterial_shaders)
+  ll_add_vulkan_material_shader_profile(
+      production material.production llvulkanmaterialproduction_shaders
+      -DLL_VULKAN_MATERIAL_PRODUCTION=1)
+
+  # The viewer manifest is configured later from a sibling directory. Pass
+  # the exact validated-output directory through the common parent scope.
+  set(LL_VULKAN_MATERIAL_PRODUCTION_ARTIFACT_DIR
+      "${llvulkan_shader_binary_dir}"
+      PARENT_SCOPE)
+  set(LL_VULKAN_MATERIAL_PRODUCTION_VERTEX_SPV
+      "${llvulkanmaterialproduction_shaders_VERTEX_SPV}"
+      PARENT_SCOPE)
+  set(LL_VULKAN_MATERIAL_PRODUCTION_FRAGMENT_SPV
+      "${llvulkanmaterialproduction_shaders_FRAGMENT_SPV}"
+      PARENT_SCOPE)
+  set(LL_VULKAN_MATERIAL_PRODUCTION_VERIFIED_STAMP
+      "${llvulkanmaterialproduction_shaders_VERIFIED_STAMP}"
+      PARENT_SCOPE)
+
+  add_library(llvulkanmaterialartifact STATIC
+      vulkan/llvulkanmaterialartifact.cpp
+      vulkan/llvulkanmaterialartifact.h)
+  target_include_directories(llvulkanmaterialartifact
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_link_libraries(llvulkanmaterialartifact PUBLIC llrendercontract)
+  set_target_properties(llvulkanmaterialartifact PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llvulkanmaterialartifact_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llvulkanmaterialartifact
+      ""
+      "llvulkanmaterialartifact;llrendercontract;llcommon")
+
+  add_library(llvulkanmaterialpublication STATIC
+      vulkan/llvulkanmaterialpublication.cpp
+      vulkan/llvulkanmaterialpublication.h)
+  target_include_directories(llvulkanmaterialpublication
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_link_libraries(llvulkanmaterialpublication
+      PUBLIC llvulkanmaterialartifact)
+  set_target_properties(llvulkanmaterialpublication PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llvulkanmaterialpublication_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llvulkanmaterialpublication
+      ""
+      "llvulkanmaterialpublication;llcommon")
+
+  add_library(llrendervulkanmaterialmodule STATIC
+      vulkan/llrendervulkanmaterialmodule.cpp
+      vulkan/llrendervulkanmaterialmodule.h)
+  target_include_directories(llrendervulkanmaterialmodule
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanmaterialmodule SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  target_compile_definitions(llrendervulkanmaterialmodule
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanmaterialmodule
+      PUBLIC llvulkanmaterialpublication)
+  set_target_properties(llrendervulkanmaterialmodule PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanmaterialmodule_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanmaterialmodule
+      ""
+      "llrendervulkanmaterialmodule;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanmaterialmodule
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanmateriallayout STATIC
+      vulkan/llrendervulkanmateriallayout.cpp
+      vulkan/llrendervulkanmateriallayout.h)
+  target_include_directories(llrendervulkanmateriallayout
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanmateriallayout SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  target_compile_definitions(llrendervulkanmateriallayout
+      PRIVATE VK_NO_PROTOTYPES)
+  set_target_properties(llrendervulkanmateriallayout PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanmateriallayout_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanmateriallayout
+      ""
+      "llrendervulkanmateriallayout;llrendercontract;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanmateriallayout
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanmaterialdescriptor STATIC
+      vulkan/llrendervulkanmaterialdescriptor.cpp
+      vulkan/llrendervulkanmaterialdescriptor.h)
+  target_include_directories(llrendervulkanmaterialdescriptor
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanmaterialdescriptor SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  target_compile_definitions(llrendervulkanmaterialdescriptor
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanmaterialdescriptor
+      PUBLIC llrendervulkanmateriallayout llrendercontract)
+  set_target_properties(llrendervulkanmaterialdescriptor PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanmaterialdescriptor_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanmaterialdescriptor
+      ""
+      "llrendervulkanmaterialdescriptor;llrendercontract;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanmaterialdescriptor
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanmaterialattachment STATIC
+      vulkan/llrendervulkanmaterialattachment.cpp
+      vulkan/llrendervulkanmaterialattachment.h)
+  target_include_directories(llrendervulkanmaterialattachment
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanmaterialattachment SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  target_compile_definitions(llrendervulkanmaterialattachment
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanmaterialattachment
+      PUBLIC llrendercontract)
+  set_target_properties(llrendervulkanmaterialattachment PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanmaterialattachment_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanmaterialattachment
+      ""
+      "llrendervulkanmaterialattachment;llrendercontract;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanmaterialattachment
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanmaterialcapability STATIC
+      vulkan/llrendervulkanmaterialcapability.cpp
+      vulkan/llrendervulkanmaterialcapability.h)
+  target_include_directories(llrendervulkanmaterialcapability
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanmaterialcapability SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  target_compile_definitions(llrendervulkanmaterialcapability
+      PRIVATE VK_NO_PROTOTYPES VK_ENABLE_BETA_EXTENSIONS)
+  target_link_libraries(llrendervulkanmaterialcapability
+      PUBLIC llrendervulkanmaterialattachment)
+  set_target_properties(llrendervulkanmaterialcapability PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanmaterialcapability_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanmaterialcapability
+      ""
+      "llrendervulkanmaterialcapability;llrendervulkanmaterialattachment;llrendercontract;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanmaterialcapability
+      PRIVATE VK_NO_PROTOTYPES VK_ENABLE_BETA_EXTENSIONS)
+
+  add_library(llrendervulkanmaterialpipelinecache STATIC
+      vulkan/llrendervulkanmaterialpipelinecache.cpp
+      vulkan/llrendervulkanmaterialpipelinecache.h)
+  target_include_directories(llrendervulkanmaterialpipelinecache
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanmaterialpipelinecache SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  target_compile_definitions(llrendervulkanmaterialpipelinecache
+      PRIVATE VK_NO_PROTOTYPES)
+  set_target_properties(llrendervulkanmaterialpipelinecache PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanmaterialpipelinecache_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanmaterialpipelinecache
+      ""
+      "llrendervulkanmaterialpipelinecache;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanmaterialpipelinecache
+      PRIVATE VK_NO_PROTOTYPES)
+
+  add_library(llrendervulkanmaterialrenderpass STATIC
+      vulkan/llrendervulkanmaterialrenderpass.cpp
+      vulkan/llrendervulkanmaterialrenderpass.h)
+  target_include_directories(llrendervulkanmaterialrenderpass
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanmaterialrenderpass SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  target_compile_definitions(llrendervulkanmaterialrenderpass
+      PRIVATE VK_NO_PROTOTYPES)
+  target_link_libraries(llrendervulkanmaterialrenderpass
+      PUBLIC llrendervulkanmaterialattachment)
+  set_target_properties(llrendervulkanmaterialrenderpass PROPERTIES FOLDER "Tests")
+
+  set_source_files_properties(
+      tests/llrendervulkanmaterialrenderpass_test.cpp
+      PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanmaterialrenderpass
+      ""
+      "llrendervulkanmaterialrenderpass;llrendervulkanmaterialattachment;llrendercontract;llcommon")
+  target_compile_definitions(
+      INTEGRATION_TEST_llrendervulkanmaterialrenderpass
+      PRIVATE VK_NO_PROTOTYPES)
+
+  set(llvulkan_texture_upload_vertex_source
+      "${llvulkan_shader_source_dir}/textureupload.vert.glsl")
+  set(llvulkan_texture_upload_fragment_source
+      "${llvulkan_shader_source_dir}/textureupload.frag.glsl")
+  set(llvulkan_texture_upload_vertex_spv
+      "${llvulkan_shader_binary_dir}/textureupload.vert.spv")
+  set(llvulkan_texture_upload_fragment_spv
+      "${llvulkan_shader_binary_dir}/textureupload.frag.spv")
+
+  add_custom_command(
+      OUTPUT "${llvulkan_texture_upload_vertex_spv}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${llvulkan_shader_binary_dir}"
+      COMMAND "${CMAKE_COMMAND}" -E remove -f "${llvulkan_texture_upload_vertex_spv}.tmp"
+      COMMAND "${LL_VULKAN_GLSLANG_VALIDATOR}"
+              -V --target-env vulkan1.1 -S vert
+              "-I${llvulkan_shader_source_dir}"
+              -o "${llvulkan_texture_upload_vertex_spv}.tmp"
+              "${llvulkan_texture_upload_vertex_source}"
+      COMMAND "${LL_VULKAN_SPIRV_VAL}"
+              --target-env vulkan1.1 "${llvulkan_texture_upload_vertex_spv}.tmp"
+      COMMAND "${CMAKE_COMMAND}" -E rename
+              "${llvulkan_texture_upload_vertex_spv}.tmp"
+              "${llvulkan_texture_upload_vertex_spv}"
+      DEPENDS
+              "${llvulkan_texture_upload_vertex_source}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/../newview/app_settings/shaders/class1/interface/copyV.glsl"
+      COMMENT "Compiling and validating Vulkan texture upload vertex shader"
+      VERBATIM
+  )
+
+  add_custom_command(
+      OUTPUT "${llvulkan_texture_upload_fragment_spv}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${llvulkan_shader_binary_dir}"
+      COMMAND "${CMAKE_COMMAND}" -E remove -f "${llvulkan_texture_upload_fragment_spv}.tmp"
+      COMMAND "${LL_VULKAN_GLSLANG_VALIDATOR}"
+              -V --target-env vulkan1.1 -S frag
+              "-I${llvulkan_shader_source_dir}"
+              -o "${llvulkan_texture_upload_fragment_spv}.tmp"
+              "${llvulkan_texture_upload_fragment_source}"
+      COMMAND "${LL_VULKAN_SPIRV_VAL}"
+              --target-env vulkan1.1 "${llvulkan_texture_upload_fragment_spv}.tmp"
+      COMMAND "${CMAKE_COMMAND}" -E rename
+              "${llvulkan_texture_upload_fragment_spv}.tmp"
+              "${llvulkan_texture_upload_fragment_spv}"
+      DEPENDS
+              "${llvulkan_texture_upload_fragment_source}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/../newview/app_settings/shaders/class1/interface/copyF.glsl"
+      COMMENT "Compiling and validating Vulkan texture upload fragment shader"
+      VERBATIM
+  )
+
+  add_custom_target(llvulkantextureupload_shaders
+      DEPENDS
+      "${llvulkan_texture_upload_vertex_spv}"
+      "${llvulkan_texture_upload_fragment_spv}")
+  set_target_properties(llvulkantextureupload_shaders PROPERTIES FOLDER "Tests")
+
+  set(llvulkan_link_library Vulkan::Vulkan)
+  set(llvulkan_universal_macos OFF)
+  if (DARWIN)
+    if (NOT LL_VULKAN_MOLTENVK_ICD OR
+        NOT EXISTS "${LL_VULKAN_MOLTENVK_ICD}")
+      message(FATAL_ERROR
+          "LL_VULKAN_TONEMAP_TEST on macOS requires LL_VULKAN_MOLTENVK_ICD to name a MoltenVK ICD manifest")
+    endif ()
+
+    list(FIND CMAKE_OSX_ARCHITECTURES "arm64" llvulkan_arm64_index)
+    list(FIND CMAKE_OSX_ARCHITECTURES "x86_64" llvulkan_x86_64_index)
+    if (NOT llvulkan_arm64_index EQUAL -1 AND
+        NOT llvulkan_x86_64_index EQUAL -1)
+      if (NOT LL_VULKAN_MACOS_X86_64_LOADER OR
+          NOT EXISTS "${LL_VULKAN_MACOS_X86_64_LOADER}")
+        message(FATAL_ERROR
+            "A universal LL_VULKAN_TONEMAP_TEST requires LL_VULKAN_MACOS_X86_64_LOADER")
+      endif ()
+      if (NOT Vulkan_LIBRARY OR NOT EXISTS "${Vulkan_LIBRARY}")
+        message(FATAL_ERROR
+            "A universal LL_VULKAN_TONEMAP_TEST requires Vulkan_LIBRARY to name the host Vulkan loader dylib")
+      endif ()
+      find_program(LL_VULKAN_LIPO NAMES lipo DOC "Path to Apple's lipo tool")
+      if (NOT LL_VULKAN_LIPO OR NOT EXISTS "${LL_VULKAN_LIPO}")
+        message(FATAL_ERROR "A universal LL_VULKAN_TONEMAP_TEST requires lipo")
+      endif ()
+      find_program(LL_VULKAN_INSTALL_NAME_TOOL
+          NAMES install_name_tool
+          DOC "Path to Apple's install_name_tool")
+      if (NOT LL_VULKAN_INSTALL_NAME_TOOL OR
+          NOT EXISTS "${LL_VULKAN_INSTALL_NAME_TOOL}")
+        message(FATAL_ERROR
+            "A universal LL_VULKAN_TONEMAP_TEST requires install_name_tool")
+      endif ()
+      find_program(LL_VULKAN_CODESIGN
+          NAMES codesign
+          DOC "Path to Apple's codesign tool")
+      if (NOT LL_VULKAN_CODESIGN OR NOT EXISTS "${LL_VULKAN_CODESIGN}")
+        message(FATAL_ERROR
+            "A universal LL_VULKAN_TONEMAP_TEST requires codesign")
+      endif ()
+
+      set(llvulkan_fat_loader_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan/lib")
+      set(llvulkan_fat_loader "${llvulkan_fat_loader_dir}/libvulkan.1.dylib")
+      add_custom_command(
+          OUTPUT "${llvulkan_fat_loader}"
+          COMMAND "${CMAKE_COMMAND}" -E make_directory "${llvulkan_fat_loader_dir}"
+          COMMAND "${CMAKE_COMMAND}" -E remove -f "${llvulkan_fat_loader}.tmp"
+          COMMAND "${LL_VULKAN_LIPO}" -create
+                  "${Vulkan_LIBRARY}"
+                  "${LL_VULKAN_MACOS_X86_64_LOADER}"
+                  -output "${llvulkan_fat_loader}.tmp"
+          COMMAND "${LL_VULKAN_INSTALL_NAME_TOOL}"
+                  -id "@rpath/libvulkan.1.dylib"
+                  "${llvulkan_fat_loader}.tmp"
+          COMMAND "${LL_VULKAN_CODESIGN}" --force --sign -
+                  "${llvulkan_fat_loader}.tmp"
+          COMMAND "${CMAKE_COMMAND}" -E rename
+                  "${llvulkan_fat_loader}.tmp" "${llvulkan_fat_loader}"
+          DEPENDS "${Vulkan_LIBRARY}" "${LL_VULKAN_MACOS_X86_64_LOADER}"
+          COMMENT "Creating universal Vulkan loader for the tonemap diagnostic"
+          VERBATIM
+      )
+      add_custom_target(llvulkantonemap_loader DEPENDS "${llvulkan_fat_loader}")
+      set_target_properties(llvulkantonemap_loader PROPERTIES FOLDER "Tests")
+      set(llvulkan_link_library "${llvulkan_fat_loader}")
+      set(llvulkan_universal_macos ON)
+    endif ()
+  endif ()
+
+  add_library(llrendervulkantonemap STATIC
+      vulkan/llrendervulkantonemap.cpp
+      vulkan/llrendervulkantonemap.h
+  )
+  target_include_directories(llrendervulkantonemap
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkantonemap SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  if (llvulkan_universal_macos)
+    add_dependencies(llrendervulkantonemap llvulkantonemap_loader)
+  endif ()
+  target_link_libraries(llrendervulkantonemap
+      PUBLIC
+      llrendercontract
+      "${llvulkan_link_library}")
+  set_target_properties(llrendervulkantonemap PROPERTIES FOLDER "Tests")
+
+  add_executable(llvulkantonemap vulkan/llvulkantonemap_main.cpp)
+  target_link_libraries(llvulkantonemap PRIVATE llrendervulkantonemap)
+  add_dependencies(llvulkantonemap llvulkantonemap_shaders)
+
+  add_executable(lltonemapcompare vulkan/lltonemapcompare_main.cpp)
+  target_link_libraries(lltonemapcompare PRIVATE llrendercontract)
+
+  add_library(llrendervulkanmaterial STATIC
+      vulkan/llrendervulkanmaterial.cpp
+      vulkan/llrendervulkanmaterial.h
+  )
+  target_include_directories(llrendervulkanmaterial
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkanmaterial SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  if (llvulkan_universal_macos)
+    add_dependencies(llrendervulkanmaterial llvulkantonemap_loader)
+  endif ()
+  target_link_libraries(llrendervulkanmaterial
+      PUBLIC
+      llrendercontract
+      "${llvulkan_link_library}")
+  set_target_properties(llrendervulkanmaterial PROPERTIES FOLDER "Tests")
+
+  add_executable(llvulkanmaterial vulkan/llvulkanmaterial_main.cpp)
+  target_link_libraries(llvulkanmaterial
+      PRIVATE llrendervulkanmaterial llrendervulkanglobaldispatch)
+  add_dependencies(llvulkanmaterial llvulkanmaterial_shaders)
+
+  add_executable(llmaterialcompare vulkan/llmaterialcompare_main.cpp)
+  target_link_libraries(llmaterialcompare PRIVATE llrendercontract)
+
+  add_library(llrendervulkantextureupload STATIC
+      vulkan/llrendervulkantextureupload.cpp
+      vulkan/llrendervulkantextureupload.h
+  )
+  target_include_directories(llrendervulkantextureupload
+      PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vulkan")
+  target_include_directories(llrendervulkantextureupload SYSTEM
+      PUBLIC "${Vulkan_INCLUDE_DIR}")
+  if (llvulkan_universal_macos)
+    add_dependencies(llrendervulkantextureupload llvulkantonemap_loader)
+  endif ()
+  target_link_libraries(llrendervulkantextureupload
+      PUBLIC
+      llrendercontract
+      "${llvulkan_link_library}")
+  set_target_properties(llrendervulkantextureupload PROPERTIES FOLDER "Tests")
+
+  add_executable(llvulkantextureupload vulkan/llvulkantextureupload_main.cpp)
+  target_link_libraries(llvulkantextureupload PRIVATE llrendervulkantextureupload)
+  add_dependencies(llvulkantextureupload llvulkantextureupload_shaders)
+
+  add_executable(lltextureuploadcompare vulkan/lltextureuploadcompare_main.cpp)
+  target_link_libraries(lltextureuploadcompare PRIVATE llrendercontract)
+
+  if (DARWIN)
+    set_target_properties(
+        llvulkantonemap lltonemapcompare llvulkanmaterial llmaterialcompare
+        llvulkantextureupload lltextureuploadcompare
+        PROPERTIES
+        OSX_ARCHITECTURES "${CMAKE_OSX_ARCHITECTURES}"
+        XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "-"
+        XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "YES"
+        FOLDER "Tests")
+    if (llvulkan_universal_macos)
+      set_target_properties(llvulkantonemap llvulkanmaterial llvulkantextureupload PROPERTIES
+          BUILD_RPATH "${llvulkan_fat_loader_dir}")
+    endif ()
+  else ()
+    set_target_properties(
+        llvulkantonemap lltonemapcompare llvulkanmaterial llmaterialcompare
+        llvulkantextureupload lltextureuploadcompare
+        PROPERTIES
+        FOLDER "Tests")
+  endif ()
+
+  set_source_files_properties(
+      tests/llrendervulkanmaterialregistry_test.cpp
+      tests/llrendervulkantextureuploadregistry_test.cpp
+      tests/llrendervulkantonemapregistry_test.cpp
+      PROPERTIES
+      SKIP_PRECOMPILE_HEADERS TRUE
+  )
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkantonemapregistry
+      ""
+      "llrendervulkantonemap;${llvulkan_link_library};llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkanmaterialregistry
+      ""
+      "llrendervulkanmaterial;${llvulkan_link_library};llrendercontract;llcommon")
+  LL_ADD_INTEGRATION_TEST(
+      llrendervulkantextureuploadregistry
+      ""
+      "llrendervulkantextureupload;${llvulkan_link_library};llrendercontract;llcommon")
+  if (llvulkan_universal_macos)
+    set_target_properties(
+        INTEGRATION_TEST_llrendervulkantonemapregistry
+        INTEGRATION_TEST_llrendervulkanmaterialregistry
+        INTEGRATION_TEST_llrendervulkantextureuploadregistry
+        PROPERTIES
+        BUILD_WITH_INSTALL_RPATH OFF
+        BUILD_RPATH "${llvulkan_fat_loader_dir}")
+  endif ()
+
+  add_dependencies(
+      BUILD_TESTS
+      llvulkantonemap
+      lltonemapcompare
+      llvulkanmaterial
+      llmaterialcompare
+      llvulkantextureupload
+      lltextureuploadcompare)
 endif ()

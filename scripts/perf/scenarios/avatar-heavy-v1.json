@@ -1,0 +1,43 @@
+{
+  "schema_version": 3,
+  "id": "avatar-heavy-v1",
+  "description": "Controlled crowd view stressing avatar updates, skinning, attachments, and impostors.",
+  "cache_mode": "warm",
+  "capture": {"warmup_seconds": 30, "duration_seconds": 120, "repeats": 5, "poll_interval_seconds": 0.5},
+  "settings": {
+    "AutoTuneFPS": false,
+    "RenderAvatarMaxNonImpostors": 16,
+    "RenderBenchmarkUIScale": 1.0,
+    "RenderDeferred": true,
+    "RenderFarClip": 128.0,
+    "RenderGLContextCoreProfile": true,
+    "RenderHiDPI": true,
+    "RenderReflectionsEnabled": true,
+    "RenderShadowDetail": 2,
+    "RenderVSyncEnable": false,
+    "RenderVolumeLODFactor": 1.0,
+    "WindowHeight": 720,
+    "WindowMaximized": false,
+    "WindowWidth": 1280,
+    "YieldTime": -1
+  },
+  "validity": {
+    "asset_mode": "settled",
+    "population_mode": "stable",
+    "ui_mode": "clear",
+    "settle_seconds": 15,
+    "max_camera_translation_m": 0.1,
+    "max_camera_rotation_rad": 0.05,
+    "max_agent_travel_m": 0.0,
+    "max_visible_avatar_delta": 0,
+    "max_active_object_delta": 0,
+    "max_new_objects": 0,
+    "max_sim_ping_ms": 600
+  },
+  "workload": {
+    "operator_setup": "Use a controlled crowd or replay with a recorded avatar count and the same attachment complexity.",
+    "camera": "Fixed crowd-facing camera with identical impostor distances.",
+    "observations": ["visible avatars", "non-impostor avatars", "attachment complexity", "simulator ping"],
+    "invalid_if": ["avatar count changes", "outfits or attachment complexity change", "bakes are incomplete", "camera moves", "graphics features differ"]
+  }
+}

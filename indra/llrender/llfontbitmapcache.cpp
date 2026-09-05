@@ -39,9 +39,10 @@ LLFontBitmapCache::~LLFontBitmapCache()
 }
 
 void LLFontBitmapCache::init(S32 max_char_width,
-                             S32 max_char_height)
+                             S32 max_char_height, bool create_gl_textures)
 {
     reset();
+    mCreateGLTextures = create_gl_textures;
 
     mMaxCharWidth = max_char_width;
     mMaxCharHeight = max_char_height;
@@ -115,18 +116,23 @@ bool LLFontBitmapCache::nextOpenPos(S32 width, S32& pos_x, S32& pos_y, EFontGlyp
             {
                 image_raw->clear(255, 0);
             }
+            else
+            {
+                image_raw->clear(0, 0, 0, 0);
+            }
 
-            // Make corresponding GL image.
-            mImageGLVec[bitmap_idx].emplace_back(new LLImageGL(image_raw, false, false));
-            LLImageGL* image_gl = getImageGL(bitmap_type, bitmap_num);
+            if (mCreateGLTextures)
+            {
+                mImageGLVec[bitmap_idx].emplace_back(new LLImageGL(image_raw, false, false));
+                LLImageGL* image_gl = getImageGL(bitmap_type, bitmap_num);
+                gGL.getTexUnit(0)->bind(image_gl);
+                image_gl->setFilteringOption(LLTexUnit::TFO_POINT);
+            }
 
             // Start at beginning of the new image.
             mCurrentOffsetX[bitmap_idx] = 1;
             mCurrentOffsetY[bitmap_idx] = 1;
 
-            // Attach corresponding GL texture. (*TODO: is this needed?)
-            gGL.getTexUnit(0)->bind(image_gl);
-            image_gl->setFilteringOption(LLTexUnit::TFO_POINT); // was setMipFilterNearest(true, true);
         }
         else
         {

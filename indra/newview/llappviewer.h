@@ -53,6 +53,8 @@
 
 #include <boost/signals2.hpp>
 
+#include <memory>
+
 class LLCommandLineParser;
 class LLFrameTimer;
 class LLPumpIO;
@@ -63,6 +65,9 @@ class LLWatchdogTimeout;
 class LLViewerJoystick;
 class LLPurgeDiskCacheThread;
 class LLViewerRegion;
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
+class LLViewerVulkanRuntime;
+#endif
 
 extern LLTrace::BlockTimerStatHandle FTM_FRAME;
 
@@ -315,7 +320,15 @@ protected:
 
 private:
 
+    enum class GraphicsLifecycle : U8
+    {
+        Legacy,
+        VulkanSelected,
+        VulkanCleaned
+    };
+
     bool doFrame();
+    void cleanupVulkanSlice() noexcept;
 
     void initMaxHeapSize();
     bool initThreads(); // Initialize viewer threads, return false on failure.
@@ -401,6 +414,11 @@ private:
 
     // llcorehttp library init/shutdown helper
     LLAppCoreHttp mAppCoreHttp;
+
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
+    std::unique_ptr<LLViewerVulkanRuntime> mVulkanRuntime;
+#endif
+    GraphicsLifecycle mGraphicsLifecycle = GraphicsLifecycle::Legacy;
 
     bool mIsFirstRun;
 
