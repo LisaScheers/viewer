@@ -240,6 +240,7 @@ GLViewRef createOpenGLView(NSWindowRef window, unsigned int samples, bool vsync)
 
 void glSwapBuffers(void* context)
 {
+    recordMacOSXGLSwapAttempt();
     [(NSOpenGLContext*)context flushBuffer];
 }
 
@@ -390,6 +391,11 @@ void commitCurrentPreedit(GLViewRef glView)
 void allowDirectMarkedTextInput(bool allow, GLViewRef glView)
 {
     [(LLOpenGLView*)glView allowMarkedTextInput:allow];
+}
+
+bool isWindowMiniaturized(NSWindowRef window)
+{
+    return [(NSWindow*)window isMiniaturized];
 }
 
 NSWindowRef getMainAppWindow()

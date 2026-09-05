@@ -29,6 +29,8 @@ struct LLWindowMacOSXVulkanCreateInfo
     std::string mLoaderPath;
     U32         mBackingWidth  = 0;
     U32         mBackingHeight = 0;
+    // Optional viewer-owned NSWindow. Null retains the isolated diagnostic mode.
+    void*       mApplicationWindow = nullptr;
 };
 
 enum class LLWindowMacOSXVulkanNativeCreateCode : U8
@@ -140,6 +142,7 @@ public:
     LLWindowMacOSXVulkan& operator=(LLWindowMacOSXVulkan&& other) noexcept;
 
     bool                              hasNativeWindow() const noexcept { return mNativeWindow.mToken != nullptr; }
+    void*                             nativeView() const noexcept { return mNativeWindow.mView; }
     F64                               backingScale() const noexcept { return mNativeWindow.mBackingScale; }
     U32                               drawableWidth() const noexcept { return mNativeWindow.mDrawableWidth; }
     U32                               drawableHeight() const noexcept { return mNativeWindow.mDrawableHeight; }
@@ -176,6 +179,7 @@ public:
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult    cancelSwapchainFrameSlotPresentation() noexcept;
     LLRenderVulkan::VulkanSwapchainFrameSlotParentOperationResult    retrySwapchainFrameSlotCancellationCompletion() noexcept;
     const LLRenderVulkan::VulkanInstanceGeneration*           instanceGeneration() const noexcept { return mInstanceGeneration.get(); }
+    LLRenderVulkan::VulkanInstanceGeneration*                 instanceGeneration() noexcept { return mInstanceGeneration.get(); }
     bool                                                      resetSwapchainFrameSlotGeneration() noexcept;
     bool                                                      resetSwapchainReadbackGeneration() noexcept;
     bool                                                      resetSwapchainPresentationPipelineGeneration() noexcept;

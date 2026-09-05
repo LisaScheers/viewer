@@ -464,7 +464,7 @@ LLWindow* LLWindowManager::createWindow(
     case LLWindow::GraphicsAPI::Headless:
         break;
     case LLWindow::GraphicsAPI::Vulkan:
-#if LL_SDL_WINDOW && defined(LL_VULKAN_SDL_WSI)
+#if (LL_SDL_WINDOW && defined(LL_VULKAN_SDL_WSI)) || (LL_DARWIN && defined(LL_VULKAN_MACOS_WSI))
         break;
 #else
         LL_WARNS("Window") << "Vulkan window creation is not implemented." << LL_ENDL;
@@ -489,10 +489,10 @@ LLWindow* LLWindowManager::createWindow(
         }
     }
 
-#if LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)
+#if (LL_SDL_WINDOW && !defined(LL_MESA_HEADLESS)) || LL_DARWIN
     if (!sWindowList.empty())
     {
-        LL_WARNS("Window") << "The SDL path supports one live window because its implementation and keyboard are process-global." << LL_ENDL;
+        LL_WARNS("Window") << "This native path supports one live window because its implementation and keyboard are process-global." << LL_ENDL;
         return nullptr;
     }
 #endif
@@ -525,7 +525,7 @@ LLWindow* LLWindowManager::createWindow(
 #elif LL_DARWIN
         new_window = new LLWindowMacOSX(callbacks,
             title, name, x, y, width, height, flags,
-            fullscreen, clearBg, enable_vsync, true, ignore_pixel_depth, fsaa_samples);
+            fullscreen, clearBg, enable_vsync, graphics_api, ignore_pixel_depth, fsaa_samples);
 #endif
     }
     else

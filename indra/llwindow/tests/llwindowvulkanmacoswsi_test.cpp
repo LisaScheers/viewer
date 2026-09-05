@@ -21,6 +21,7 @@
 #include "lltextureuploaddiagnostic.h"
 #include "llwindow.h"
 #include "llwindowmacosxvulkan.h"
+#include "llwindowmacosxvulkan-objc.h"
 #include "lltut.h"
 
 #include <OpenGL/OpenGL.h>
@@ -1627,6 +1628,38 @@ void window_vulkan_macos_wsi_object::test<1>()
     ensure_equals("clean teardown leaves LLWindowManager unchanged", LLWindow::instanceCount(), initial_window_count);
     ensure("clean teardown leaves the initial CGL context unchanged", CGLGetCurrentContext() == initial_cgl_context);
     ensure_equals("clean teardown leaves the OpenGL manager unchanged", gGLManager.mInited, initial_gl_manager);
+}
+
+template<>
+template<>
+void window_vulkan_macos_wsi_object::test<2>()
+{
+    if (!nativeSmokeRequested()) return;
+
+    struct NativeLifetime
+    {
+        LLWindowMacOSXVulkanNative native{};
+        ~NativeLifetime() { (void)llwindow_macosx_vulkan_native_destroy(&native); }
+    } original, attachment;
+    const auto initial_context = CGLGetCurrentContext();
+    ensure_equals("create a native window for the borrowing seam",
+                  llwindow_macosx_vulkan_native_create(640, 480, &original.native),
+                  LLWINDOWMACOSXVULKAN_STATUS_SUCCESS);
+    const auto original_view = original.native.view;
+    ensure_equals("attach to the existing window",
+                  llwindow_macosx_vulkan_native_attach(original.native.window, 640, 480, &attachment.native),
+                  LLWINDOWMACOSXVULKAN_STATUS_SUCCESS);
+    ensure("attachment borrows the same window and owns a different view",
+           attachment.native.window == original.native.window && attachment.native.view != original_view);
+    ensure_equals("retire only the attachment",
+                  llwindow_macosx_vulkan_native_destroy(&attachment.native), LLWINDOWMACOSXVULKAN_STATUS_SUCCESS);
+    ensure_equals("original window and content view remain usable",
+                  llwindow_macosx_vulkan_native_refresh(&original.native), LLWINDOWMACOSXVULKAN_STATUS_SUCCESS);
+    ensure("previous content view was restored", original.native.view == original_view);
+    ensure_equals("original window remains resizable after attachment retirement",
+                  llwindow_macosx_vulkan_native_resize_for_diagnostic(800, 600, &original.native),
+                  LLWINDOWMACOSXVULKAN_STATUS_SUCCESS);
+    ensure("attachment lifecycle did not create a GL context", CGLGetCurrentContext() == initial_context);
 }
 
 } // namespace tut

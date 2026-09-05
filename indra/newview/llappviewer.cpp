@@ -152,7 +152,7 @@
 #include "llwindowsdl.h"
 #endif
 
-#if defined(LL_VULKAN_SDL_WSI)
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
 #include "llviewervulkanruntime.h"
 #endif
 
@@ -828,7 +828,7 @@ bool LLAppViewer::init()
     mGraphicsLifecycle = vulkan_requested ? GraphicsLifecycle::VulkanSelected : GraphicsLifecycle::Legacy;
 
     constexpr bool vulkan_available =
-#if defined(LL_VULKAN_SDL_WSI)
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
         true;
 #else
         false;
@@ -848,10 +848,14 @@ bool LLAppViewer::init()
         return false;
     }
 
-#if LL_SDL_WINDOW
+#if LL_SDL_WINDOW || LL_DARWIN
     if (std::get<LLWindow::GraphicsAPI>(graphics_api) == LLWindow::GraphicsAPI::Vulkan)
     {
+#if LL_DARWIN
+        armLLWindowMacOSXGLAudit();
+#else
         armLLWindowSDLGLAudit();
+#endif
     }
 #endif
 
@@ -1384,7 +1388,7 @@ LLTrace::BlockTimerStatHandle FTM_FRAME("Frame");
 
 bool LLAppViewer::frame()
 {
-#if defined(LL_VULKAN_SDL_WSI)
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
     if (mVulkanRuntime)
     {
         if (LLApp::isRunning() && !mVulkanRuntime->tick(gViewerWindow->recordVulkanProgress()))
@@ -2359,7 +2363,7 @@ void LLAppViewer::cleanupVulkanSlice() noexcept
         }
     }
 
-#if defined(LL_VULKAN_SDL_WSI)
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
     if (mVulkanRuntime)
     {
         mVulkanRuntime->shutdown();
@@ -2384,8 +2388,12 @@ void LLAppViewer::cleanupVulkanSlice() noexcept
     delete gKeyboard;
     gKeyboard = nullptr;
 
-#if LL_SDL_WINDOW
+#if LL_SDL_WINDOW || LL_DARWIN
+#if LL_DARWIN
+    const auto gl_audit = getLLWindowMacOSXGLAuditSnapshot();
+#else
     const LLWindowSDLGLAuditSnapshot gl_audit = getLLWindowSDLGLAuditSnapshot();
+#endif
     LL_INFOS("VulkanViewerSlice")
         << "window_retired=1 live_windows=" << LLWindow::instanceCount()
         << " gl_context_create_attempts=" << gl_audit.mContextCreateAttempts
@@ -3600,7 +3608,7 @@ bool LLAppViewer::initWindow()
 
     if (mGraphicsLifecycle == GraphicsLifecycle::VulkanSelected)
     {
-#if defined(LL_VULKAN_SDL_WSI)
+#if defined(LL_VULKAN_SDL_WSI) || defined(LL_VULKAN_MACOS_WSI)
         LLUI::getInstance()->mWindow = gViewerWindow->getWindow();
         mVulkanRuntime = std::make_unique<LLViewerVulkanRuntime>();
         if (!mVulkanRuntime->initialize(*gViewerWindow->getWindow()))

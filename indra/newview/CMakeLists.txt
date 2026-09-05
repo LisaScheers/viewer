@@ -761,7 +761,7 @@ set(viewer_SOURCE_FILES
     pipeline.cpp
     )
 
-if (LL_VULKAN_SDL_WSI)
+if (LL_VULKAN_SDL_WSI OR LL_VULKAN_MACOS_WSI)
   list(APPEND viewer_SOURCE_FILES llviewervulkanruntime.cpp)
 endif ()
 
@@ -1451,7 +1451,7 @@ set(viewer_HEADER_FILES
     roles_constants.h
     )
 
-if (LL_VULKAN_SDL_WSI)
+if (LL_VULKAN_SDL_WSI OR LL_VULKAN_MACOS_WSI)
   list(APPEND viewer_HEADER_FILES llviewervulkanruntime.h)
 endif ()
 
@@ -2200,6 +2200,10 @@ target_link_libraries(${VIEWER_BINARY_NAME}
         ll::openxr
         )
 
+if (LL_VULKAN_MACOS_WSI)
+    target_link_libraries(${VIEWER_BINARY_NAME} llwindowmacosxvulkan)
+endif ()
+
 if (NOT DISABLE_WEBRTC)
     target_link_libraries(${VIEWER_BINARY_NAME} llwebrtc )
 endif()
@@ -2674,10 +2678,10 @@ if (LL_TESTS)
     "${test_libs};llwindow"
   )
 
-  if (LL_VULKAN_SDL_WSI)
+  if (LL_VULKAN_SDL_WSI OR LL_VULKAN_MACOS_WSI)
     LL_ADD_INTEGRATION_TEST(llviewervulkanruntime
       llviewervulkanruntime.cpp
-      "${test_libs};llwindow;llrender;llrendervulkaninstance"
+      "${test_libs};llwindow;llrender;llrendervulkaninstance;$<$<BOOL:${LL_VULKAN_MACOS_WSI}>:llwindowmacosxvulkan>"
     )
   endif ()
 

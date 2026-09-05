@@ -25,6 +25,7 @@
  */
 
 #import "llwindowmacosxvulkan-objc.h"
+#include "llwindowmacosx-objc.h"
 
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -34,6 +35,7 @@
 #include <new>
 
 @interface LLVulkanMetalView : NSView
+@property(nonatomic) BOOL applicationView;
 - (void)updateDrawableGeometry;
 @end
 
@@ -56,9 +58,52 @@
     [metal_layer setDrawableSize:backing_bounds.size];
 }
 
+- (BOOL)acceptsFirstResponder { return self.applicationView; }
+
+- (void)keyDown:(NSEvent*)event
+{
+    if (!self.applicationView) return;
+    NSString* characters = [event charactersIgnoringModifiers];
+    NativeKeyEventData data;
+    data.mKeyEvent = NativeKeyEventData::KEYDOWN;
+    data.mEventType = [event type];
+    data.mEventModifiers = [event modifierFlags];
+    data.mEventKeyCode = [event keyCode];
+    data.mEventRepeat = [event isARepeat];
+    data.mEventUnmodChars = characters.length ? [characters characterAtIndex:0] : 0;
+    callKeyDown(&data, data.mEventKeyCode, data.mEventModifiers, data.mEventUnmodChars);
+}
+
+- (void)keyUp:(NSEvent*)event
+{
+    if (!self.applicationView) return;
+    NativeKeyEventData data;
+    data.mKeyEvent = NativeKeyEventData::KEYUP;
+    data.mEventType = [event type];
+    data.mEventModifiers = [event modifierFlags];
+    data.mEventKeyCode = [event keyCode];
+    callKeyUp(&data, data.mEventKeyCode, data.mEventModifiers);
+}
+
+- (void)windowHidden:(NSNotification*)notification { callWindowHide(); }
+- (void)windowRestored:(NSNotification*)notification { callWindowUnhide(); }
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [super dealloc];
+}
+
 - (void)viewDidMoveToWindow
 {
     [super viewDidMoveToWindow];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    if (self.applicationView && [self window])
+    {
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowHidden:)
+            name:NSWindowDidMiniaturizeNotification object:[self window]];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowRestored:)
+            name:NSWindowDidDeminiaturizeNotification object:[self window]];
+    }
     [self updateDrawableGeometry];
 }
 
@@ -72,6 +117,11 @@
 {
     [super setFrameSize:new_size];
     [self updateDrawableGeometry];
+    if (self.applicationView && [self window])
+    {
+        const NSSize backing = [self convertSizeToBacking:new_size];
+        callResize(backing.width, backing.height);
+    }
 }
 
 @end
@@ -83,6 +133,8 @@ struct NativeToken
     NSWindow* window;
     LLVulkanMetalView* view;
     CAMetalLayer* layer;
+    bool borrowedWindow;
+    NSView* previousView;
 };
 
 void clear_native(LLWindowMacOSXVulkanNative* native) noexcept
@@ -142,7 +194,7 @@ LLWindowMacOSXVulkanStatus describe_native(
         [token->view updateDrawableGeometry];
 
         const CGFloat scale = [token->layer contentsScale];
-        const CGSize drawable_size = [token->layer drawableSize];
+        const CGSize drawable_size = [token->window isMiniaturized] ? CGSizeZero : [token->layer drawableSize];
         uint32_t drawable_width = 0;
         uint32_t drawable_height = 0;
         if (!std::isfinite(static_cast<double>(scale)) || scale <= 0.0 ||
@@ -180,10 +232,12 @@ bool destroy_token(NativeToken* token) noexcept
     {
         @try
         {
-            [token->window orderOut:nil];
+            token->view.applicationView = NO;
+            [[NSNotificationCenter defaultCenter] removeObserver:token->view];
+            if (!token->borrowedWindow) [token->window orderOut:nil];
             if ([token->window contentView] == token->view)
             {
-                [token->window setContentView:nil];
+                [token->window setContentView:token->previousView];
             }
         }
         @catch (NSException*)
@@ -238,7 +292,7 @@ bool destroy_token(NativeToken* token) noexcept
     {
         @try
         {
-            [token->window close];
+            if (!token->borrowedWindow) [token->window close];
         }
         @catch (NSException*)
         {
@@ -246,7 +300,7 @@ bool destroy_token(NativeToken* token) noexcept
         }
         @try
         {
-            [token->window release];
+            if (!token->borrowedWindow) [token->window release];
         }
         @catch (NSException*)
         {
@@ -255,6 +309,7 @@ bool destroy_token(NativeToken* token) noexcept
         token->window = nil;
     }
 
+    [token->previousView release];
     delete token;
     return clean;
 }
@@ -262,7 +317,7 @@ bool destroy_token(NativeToken* token) noexcept
 LLWindowMacOSXVulkanStatus create_native(
     uint32_t backing_width,
     uint32_t backing_height,
-    LLWindowMacOSXVulkanNative* out_native) noexcept
+    LLWindowMacOSXVulkanNative* out_native, NSWindow* application_window = nil) noexcept
 {
     if (!out_native || backing_width == 0 || backing_height == 0)
     {
@@ -295,7 +350,7 @@ LLWindowMacOSXVulkanStatus create_native(
             }
 
             failure = LLWINDOWMACOSXVULKAN_STATUS_STORAGE_FAILED;
-            token = new (std::nothrow) NativeToken;
+            token = new (std::nothrow) NativeToken{};
             if (!token)
             {
                 return failure;
@@ -305,7 +360,9 @@ LLWindowMacOSXVulkanStatus create_native(
             token->layer = nil;
 
             failure = LLWINDOWMACOSXVULKAN_STATUS_WINDOW_FAILED;
-            token->window = [[NSWindow alloc]
+            token->borrowedWindow = application_window != nil;
+            token->previousView = application_window ? [[application_window contentView] retain] : nil;
+            token->window = application_window ? application_window : [[NSWindow alloc]
                 initWithContentRect:NSMakeRect(0.0, 0.0, 1.0, 1.0)
                           styleMask:NSWindowStyleMaskBorderless
                             backing:NSBackingStoreBuffered
@@ -315,7 +372,7 @@ LLWindowMacOSXVulkanStatus create_native(
                 destroy_token(token);
                 return failure;
             }
-            [token->window setReleasedWhenClosed:NO];
+            if (!token->borrowedWindow) [token->window setReleasedWhenClosed:NO];
 
             failure = LLWINDOWMACOSXVULKAN_STATUS_VIEW_FAILED;
             token->view = [[LLVulkanMetalView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 1.0, 1.0)];
@@ -325,6 +382,7 @@ LLWindowMacOSXVulkanStatus create_native(
                 return failure;
             }
             [token->view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+            token->view.applicationView = token->borrowedWindow;
 
             failure = LLWINDOWMACOSXVULKAN_STATUS_LAYER_FAILED;
             token->layer = [[CAMetalLayer alloc] init];
@@ -472,6 +530,14 @@ LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_create(
         clear_native(out_native);
         return LLWINDOWMACOSXVULKAN_STATUS_APPLICATION_FAILED;
     }
+}
+
+LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_attach(
+    void* window, uint32_t width, uint32_t height, LLWindowMacOSXVulkanNative* native) noexcept
+{
+    if (!window) return LLWINDOWMACOSXVULKAN_STATUS_INVALID_ARGUMENT;
+    try { return create_native(width, height, native, (NSWindow*)window); }
+    catch (...) { clear_native(native); return LLWINDOWMACOSXVULKAN_STATUS_APPLICATION_FAILED; }
 }
 
 LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_refresh(

@@ -27,6 +27,10 @@
 #include "linden_common.h"
 
 #include "llwindowmacosx.h"
+#if defined(LL_VULKAN_MACOS_WSI)
+#include "llwindowmacosxvulkan.h"
+#endif
+#include <atomic>
 
 #include "llkeyboardmacosx.h"
 #include "llwindowcallbacks.h"
@@ -61,6 +65,16 @@ const S32   DEFAULT_REFRESH_RATE = 60;
 namespace
 {
     NSKeyEventRef mRawKeyEvent = NULL;
+    std::atomic<U64> sGLContextAttempts{0}, sGLSwapAttempts{0};
+    std::atomic<bool> sGLAuditArmed{false};
+}
+
+void recordMacOSXGLContextAttempt() noexcept { ++sGLContextAttempts; }
+void recordMacOSXGLSwapAttempt() noexcept { ++sGLSwapAttempts; }
+void armLLWindowMacOSXGLAudit() noexcept { sGLAuditArmed = true; }
+LLWindowMacOSXGLAuditSnapshot getLLWindowMacOSXGLAuditSnapshot() noexcept
+{
+    return {sGLContextAttempts.load(), sGLSwapAttempts.load(), sGLAuditArmed.load()};
 }
 //
 // LLWindowMacOSX
@@ -155,10 +169,10 @@ LLWindowMacOSX::LLWindowMacOSX(LLWindowCallbacks* callbacks,
                                const std::string& title, const std::string& name, S32 x, S32 y, S32 width,
                                S32 height, U32 flags,
                                bool fullscreen, bool clearBg,
-                               bool enable_vsync, bool use_gl,
+                               bool enable_vsync, GraphicsAPI graphics_api,
                                bool ignore_pixel_depth,
                                U32 fsaa_samples)
-    : LLWindow(NULL, fullscreen, flags)
+    : LLWindow(NULL, fullscreen, flags, graphics_api)
 {
     // *HACK: During window construction we get lots of OS events for window
     // reshape, activate, etc. that the viewer isn't ready to handle.
@@ -173,8 +187,8 @@ LLWindowMacOSX::LLWindowMacOSX(LLWindowCallbacks* callbacks,
     gKeyboard = new LLKeyboardMacOSX();
     gKeyboard->setCallbacks(callbacks);
 
-    // Ignore use_gl for now, only used for drones on PC
     mWindow = NULL;
+    mGLView = NULL;
     mContext = NULL;
     mPixelFormat = NULL;
     mDisplay = CGMainDisplayID();
@@ -193,6 +207,7 @@ LLWindowMacOSX::LLWindowMacOSX(LLWindowCallbacks* callbacks,
     mPreeditor = NULL;
     mFSAASamples = fsaa_samples;
     mForceRebuild = false;
+    mRefreshRate = DEFAULT_REFRESH_RATE;
 
     // Get the original aspect ratio of the main device.
     mOriginalAspectRatio = (double)CGDisplayPixelsWide(mDisplay) / (double)CGDisplayPixelsHigh(mDisplay);
@@ -208,6 +223,44 @@ LLWindowMacOSX::LLWindowMacOSX(LLWindowCallbacks* callbacks,
 
     // Stash an object pointer for OSMessageBox()
     gWindowImplementation = this;
+#if defined(LL_VULKAN_MACOS_WSI)
+    if (graphics_api == GraphicsAPI::Vulkan)
+    {
+        LLWindowMacOSXVulkanCreateInfo info;
+        if (const char* loader = std::getenv("LL_VULKAN_LOADER")) info.mLoaderPath = loader;
+        info.mBackingWidth = width;
+        info.mBackingHeight = height;
+        info.mApplicationWindow = getMainAppWindow();
+        auto result = acquireLLWindowMacOSXVulkan(info, 1);
+        if (const auto* error = std::get_if<LLWindowMacOSXVulkanAcquireError>(&result))
+        {
+            LL_WARNS("VulkanViewerSlice") << "failure=cocoa-attachment code=" << static_cast<U32>(error->mCode) << LL_ENDL;
+            mCallbacks = callbacks;
+            return;
+        }
+        mVulkanOwner = std::make_unique<LLWindowMacOSXVulkan>(std::move(std::get<LLWindowMacOSXVulkan>(result)));
+        const auto instance_error = mVulkanOwner->acquireInstanceGeneration(
+            LLRenderVulkan::VulkanInstanceValidationMode::Required,
+            LLRenderVulkan::VulkanInstancePortabilityMode::EnableIfAvailable);
+        if (instance_error || mVulkanOwner->acquireSurfaceGeneration() ||
+            mVulkanOwner->acquirePresentationDeviceGeneration() || mVulkanOwner->acquireLogicalDeviceGeneration() ||
+            mVulkanOwner->acquireSwapchainConfigurationGeneration() || mVulkanOwner->acquireSwapchainGeneration() ||
+            mVulkanOwner->acquireSwapchainImagesGeneration() || mVulkanOwner->acquireSwapchainFrameSlotGeneration())
+        {
+            LL_WARNS("VulkanViewerSlice") << "failure=cocoa-vulkan-initialization" << LL_ENDL;
+            mVulkanOwner.reset();
+            mCallbacks = callbacks;
+            return;
+        }
+        mWindow = info.mApplicationWindow;
+        mGLView = mVulkanOwner->nativeView(); // Geometry helpers accept any NSView.
+        makeFirstResponder(mWindow, mGLView);
+        initCursors();
+        setCursor(UI_CURSOR_ARROW);
+        mCallbacks = callbacks;
+        return;
+    }
+#endif
     // Create the GL context and set it up for windowed or fullscreen, as appropriate.
     if(createContext(x, y, width, height, 32, fullscreen, enable_vsync))
     {
@@ -824,6 +877,20 @@ bool LLWindowMacOSX::switchContext(bool fullscreen, const LLCoordScreen &size, b
 
 void LLWindowMacOSX::destroyContext()
 {
+#if defined(LL_VULKAN_MACOS_WSI)
+    if (getGraphicsAPI() == GraphicsAPI::Vulkan)
+    {
+        mVulkanOwner.reset();
+        mGLView = nullptr;
+        if (mWindow)
+        {
+            NSWindowRef window = mWindow;
+            mWindow = nullptr;
+            closeWindow(window);
+        }
+        return;
+    }
+#endif
     if (!mContext)
     {
         // We don't have a context
@@ -885,6 +952,9 @@ LLWindowMacOSX::~LLWindowMacOSX()
 
 void LLWindowMacOSX::show()
 {
+    // The legacy constructor orders its window front during GL setup. The
+    // Vulkan runtime waits until renderer initialization has succeeded.
+    if (getGraphicsAPI() == GraphicsAPI::Vulkan && mWindow) makeWindowOrderFront(mWindow);
 }
 
 void LLWindowMacOSX::hide()
@@ -950,6 +1020,7 @@ bool LLWindowMacOSX::getVisible()
 
 bool LLWindowMacOSX::getMinimized()
 {
+    if (getGraphicsAPI() == GraphicsAPI::Vulkan) return isWindowMiniaturized(mWindow);
     return mMinimized;
 }
 
@@ -1113,6 +1184,8 @@ bool LLWindowMacOSX::setSizeImpl(const LLCoordWindow size)
 
 void LLWindowMacOSX::swapBuffers()
 {
+    recordMacOSXGLSwapAttempt();
+    llassert_always(getGraphicsAPI() != GraphicsAPI::Vulkan);
     CGLFlushDrawable(mContext);
 }
 
@@ -2514,6 +2587,12 @@ static long getDictLong (CFDictionaryRef refDict, CFStringRef key)
 
 void LLWindowMacOSX::allowLanguageTextInput(LLPreeditor *preeditor, bool b)
 {
+    if (getGraphicsAPI() == GraphicsAPI::Vulkan)
+    {
+        // Progress-only slice has no editable controls or input-method window.
+        llassert_always(!b);
+        return;
+    }
     if (preeditor != mPreeditor && !b)
     {
         // This condition may occur by a call to
@@ -2555,6 +2634,7 @@ public:
 void* LLWindowMacOSX::createSharedContext()
 {
     sharedContext* sc = new sharedContext();
+    recordMacOSXGLContextAttempt();
     CGLCreateContext(mPixelFormat, mContext, &(sc->mContext));
 
     if (sUseMultGL)

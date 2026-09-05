@@ -303,6 +303,8 @@ endif (DARWIN)
 
 if (LL_VULKAN_MACOS_WSI)
   find_library(LL_VULKAN_QUARTZCORE_LIBRARY QuartzCore)
+  target_compile_definitions(llwindow PUBLIC LL_VULKAN_MACOS_WSI=1)
+  target_link_libraries(llwindow llrendervulkaninstance)
   if (NOT LL_VULKAN_QUARTZCORE_LIBRARY)
     message(FATAL_ERROR "LL_VULKAN_MACOS_WSI requires the QuartzCore framework")
   endif ()

@@ -436,7 +436,9 @@ bool LLAppViewerMacOSX::restoreErrorTrap()
 
 bool LLAppViewerMacOSX::initSLURLHandler()
 {
-    if (isSecondInstance())
+    // The explicit developer slice must not replace the installed viewer's
+    // system URL handlers when launched from an isolated build tree.
+    if (isSecondInstance() || gSavedSettings.getBOOL("RenderVulkanDeveloper"))
     {
         return false;
     }

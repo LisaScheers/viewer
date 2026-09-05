@@ -154,7 +154,9 @@ LLWindowMacOSXVulkanNativeCreateResult createNativeWindow(void*, const LLWindowM
 {
     LLWindowMacOSXVulkanNative native{};
     const LLWindowMacOSXVulkanStatus status =
-        llwindow_macosx_vulkan_native_create(info.mBackingWidth, info.mBackingHeight, &native);
+        info.mApplicationWindow
+            ? llwindow_macosx_vulkan_native_attach(info.mApplicationWindow, info.mBackingWidth, info.mBackingHeight, &native)
+            : llwindow_macosx_vulkan_native_create(info.mBackingWidth, info.mBackingHeight, &native);
     if (status != LLWINDOWMACOSXVULKAN_STATUS_SUCCESS)
     {
         return LLWindowMacOSXVulkanNativeCreateError{ nativeFailureCode(status) };

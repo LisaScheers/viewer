@@ -35,10 +35,24 @@
 
 #include <ApplicationServices/ApplicationServices.h>
 #include <OpenGL/OpenGL.h>
+#include <memory>
+
+class LLWindowMacOSXVulkan;
+struct LLWindowMacOSXGLAuditSnapshot
+{
+    U64 mContextCreateAttempts = 0;
+    U64 mBufferSwapAttempts = 0;
+    bool mArmed = false;
+};
+void armLLWindowMacOSXGLAudit() noexcept;
+LLWindowMacOSXGLAuditSnapshot getLLWindowMacOSXGLAuditSnapshot() noexcept;
 
 class LLWindowMacOSX : public LLWindow
 {
 public:
+#if defined(LL_VULKAN_MACOS_WSI)
+    LLWindowMacOSXVulkan* getVulkanOwner() noexcept { return mVulkanOwner.get(); }
+#endif
     void show() override;
     void hide() override;
     void close() override;
@@ -152,7 +166,7 @@ public:
 protected:
     LLWindowMacOSX(LLWindowCallbacks* callbacks,
         const std::string& title, const std::string& name, int x, int y, int width, int height, U32 flags,
-        bool fullscreen, bool clearBg, bool enable_vsync, bool use_gl,
+        bool fullscreen, bool clearBg, bool enable_vsync, GraphicsAPI graphics_api,
         bool ignore_pixel_depth,
         U32 fsaa_samples);
         ~LLWindowMacOSX();
@@ -202,6 +216,9 @@ protected:
 
     // Use generic pointers here.  This lets us do some funky Obj-C interop using Obj-C objects without having to worry about any compilation problems that may arise.
     NSWindowRef         mWindow;
+#if defined(LL_VULKAN_MACOS_WSI)
+    std::unique_ptr<LLWindowMacOSXVulkan> mVulkanOwner;
+#endif
     GLViewRef           mGLView;
     CGLContextObj       mContext;
     CGLPixelFormatObj   mPixelFormat;

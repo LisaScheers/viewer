@@ -19,14 +19,20 @@
 
 #include "llgl.h"
 #include "llwindow.h"
+#if LL_DARWIN
+#include "llwindowmacosx.h"
+#include "llwindowmacosxvulkan.h"
+#else
 #include "llwindowsdl.h"
 #include "llwindowsdlvulkan.h"
+#include <SDL3/SDL.h>
+#endif
 #include "llrendervulkaninstance.h"
 #include "llrendervulkanui.h"
 
-#include <SDL3/SDL.h>
-
+#include <chrono>
 #include <exception>
+#include <thread>
 #include <variant>
 
 namespace
@@ -34,6 +40,14 @@ namespace
 constexpr std::uint32_t SUSPENDED_TICK_DELAY_MS = 16;
 
 using namespace LLRenderVulkan;
+
+#if LL_DARWIN
+using NativeWindow = LLWindowMacOSX;
+using NativeVulkanOwner = LLWindowMacOSXVulkan;
+#else
+using NativeWindow = LLWindowSDL;
+using NativeVulkanOwner = LLWindowSDLVulkan;
+#endif
 
 } // namespace
 
@@ -159,7 +173,7 @@ bool LLViewerVulkanFrameController::rebuildIfNeeded() noexcept
 class LLViewerVulkanRuntime::VulkanBackend final : public LLViewerVulkanFrameBackend
 {
 public:
-    explicit VulkanBackend(LLWindowSDLVulkan& owner) noexcept :
+    explicit VulkanBackend(NativeVulkanOwner& owner) noexcept :
         mOwner(owner),
         mGeneration(owner.instanceGeneration())
     {
@@ -230,7 +244,12 @@ public:
     LLViewerVulkanRebuildOutcome rebuild(LLViewerVulkanDrawableExtent extent) noexcept override
     {
         mUI->retireTarget();
-        const auto  result  = mOwner.rebuildSwapchainChain({ extent.mWidth, extent.mHeight });
+#if LL_DARWIN
+        (void)extent; // Cocoa owns drawable geometry, including miniaturization.
+        const auto result = mOwner.rebuildSwapchainChain();
+#else
+        const auto result = mOwner.rebuildSwapchainChain({ extent.mWidth, extent.mHeight });
+#endif
         const auto* outcome = std::get_if<VulkanSwapchainChainRebuildOutcome>(&result);
         if (!outcome)
         {
@@ -319,7 +338,7 @@ private:
         return false;
     }
 
-    LLWindowSDLVulkan&                           mOwner;
+    NativeVulkanOwner&                           mOwner;
     VulkanInstanceGeneration*                    mGeneration = nullptr;
     std::unique_ptr<UIRenderer>                   mUI;
     LLUIRender::Frame                            mNextFrame;
@@ -335,15 +354,14 @@ LLViewerVulkanRuntime::~LLViewerVulkanRuntime()
 
 bool LLViewerVulkanRuntime::initialize(LLWindow& window)
 {
-#if LL_SDL_WINDOW && defined(LL_VULKAN_SDL_WSI)
+#if (LL_SDL_WINDOW && defined(LL_VULKAN_SDL_WSI)) || (LL_DARWIN && defined(LL_VULKAN_MACOS_WSI))
     if (mWindow || window.getGraphicsAPI() != LLWindow::GraphicsAPI::Vulkan)
     {
         return false;
     }
     mWindow = &window;
 
-    auto&              sdl_window = *static_cast<LLWindowSDL*>(mWindow);
-    LLWindowSDLVulkan* owner      = sdl_window.getVulkanOwner();
+    auto* owner = static_cast<NativeWindow*>(mWindow)->getVulkanOwner();
     if (!owner)
     {
         shutdown();
@@ -381,7 +399,7 @@ bool LLViewerVulkanRuntime::tick(LLUIRender::Frame frame)
         {
             logSummary("suspended");
         }
-        SDL_Delay(SUSPENDED_TICK_DELAY_MS);
+        std::this_thread::sleep_for(std::chrono::milliseconds(SUSPENDED_TICK_DELAY_MS));
     }
     else if (ticked && previous_resumed_frames == 0 && mController->framesSinceLastResume() != 0)
     {
@@ -407,7 +425,7 @@ void LLViewerVulkanRuntime::shutdown() noexcept
     }
 
     if (mBackend) mBackend->retireUI();
-    auto*      owner           = static_cast<LLWindowSDL*>(mWindow)->getVulkanOwner();
+    auto*      owner           = static_cast<NativeWindow*>(mWindow)->getVulkanOwner();
     const bool surface_retired = !owner || owner->resetSurfaceGeneration();
     if (!surface_retired)
     {
@@ -459,8 +477,13 @@ void LLViewerVulkanRuntime::logSummary(const char* status) const noexcept
     const std::uint64_t rebuilds   = mController ? mController->rebuildCount() : 0;
     const std::uint64_t suspends   = mController ? mController->suspendedTransitionCount() : 0;
     const std::uint32_t validation = mBackend ? mBackend->validationMessageCount() : 0;
-    const bool          gl_context = SDL_GL_GetCurrentContext() != nullptr;
-    const LLWindowSDLGLAuditSnapshot gl_audit = getLLWindowSDLGLAuditSnapshot();
+#if LL_DARWIN
+    const bool gl_context = CGLGetCurrentContext() != nullptr;
+    const auto gl_audit = getLLWindowMacOSXGLAuditSnapshot();
+#else
+    const bool gl_context = SDL_GL_GetCurrentContext() != nullptr;
+    const auto gl_audit = getLLWindowSDLGLAuditSnapshot();
+#endif
     LL_INFOS("VulkanViewerSlice") << "status=" << status << " frames=" << frames << " rebuilds=" << rebuilds << " suspends=" << suspends
                                   << " resumed_frames=" << (mController ? mController->framesSinceLastResume() : 0)
                                   << " validation_messages=" << validation << " gl_context=" << gl_context

@@ -68,6 +68,11 @@ LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_create(
     uint32_t backing_height,
     LLWindowMacOSXVulkanNative* out_native) LLWINDOWMACOSXVULKAN_NOEXCEPT;
 
+// Borrows the application's existing window; owns only the attached Metal view.
+LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_attach(
+    void* window, uint32_t backing_width, uint32_t backing_height,
+    LLWindowMacOSXVulkanNative* out_native) LLWINDOWMACOSXVULKAN_NOEXCEPT;
+
 LLWindowMacOSXVulkanStatus llwindow_macosx_vulkan_native_refresh(
     LLWindowMacOSXVulkanNative* native) LLWINDOWMACOSXVULKAN_NOEXCEPT;
 

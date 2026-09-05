@@ -2547,6 +2547,7 @@ void window_macosx_vulkan_object::test<1>()
     ensure("the appended diagnostic callback preserves old positional operation initializers",
            legacy_positional_operations.mCreateSurface == createSurface &&
                legacy_positional_operations.mResizeNativeWindowForDiagnostic == nullptr);
+    ensure("legacy native creation still owns a diagnostic window", createInfo().mApplicationWindow == nullptr);
 }
 
 template<>
